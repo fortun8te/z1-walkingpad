@@ -20,7 +20,7 @@ Everything is documented well enough to build your own client in any language: s
 - 📊 Live telemetry: speed, distance, elapsed time, **steps** (KingSmith extension)
 - 🔥 Calorie estimate via the ACSM walking metabolic equation (research-backed; ±10–15%)
 - 🧠 The pad is the master — app reflects reality even when you use the physical remote
-- 🔁 Sessions resume within 10 minutes; calories persist across reconnects (gap-credited)
+- 🔁 Pad is the master for counters; calories persist across reconnects (gap-credited)
 - 😴 Exit stops the belt and puts the pad in standby
 - 🔋 Zero measurable battery impact (0.0% CPU, 0.0 power score)
 - 🇺🇸 Imperial/metric units, synced to the pad's own display
@@ -89,11 +89,10 @@ Both talk to the pad directly and independently — neither needs the other. **O
 
 ## Behavior nuances (what to expect)
 
-- **The pad is the master.** Belt state follows the treadmill itself, not our commands: start it with the physical remote and the app shows Stop + live speed anyway. State comes from telemetry speed, machine-status events, and our commands.
+- **The pad is the master — of everything.** Belt state, time, distance, and steps are shown exactly as the pad reports them, however they were changed (app, remote, or the pad's own timer). When the pad resets its counters (on Stop, or on its own schedule), the display follows.
+- **Calories are the one thing we compute** (the pad reports none) — but they follow the same lifecycle: the estimate resets when the pad's counters reset, so the numbers never disagree about what "this session" is.
+- **Calories persist across reconnects.** Saved every second; disconnect while the belt is still moving and the count continues, with the disconnected gap estimated — because the pad's session never ended.
 - **Start on a moving belt is a no-op** (the pad refuses it) — `start()` skips the command when the belt is already moving.
-- **Sessions resume within 10 minutes.** Stop → Start inside 10 min keeps accumulating calories/distance/time/steps; later, a fresh session starts. (Speed comes back at minimum — that's the pad, not us.)
-- **Calories persist across reconnects.** Saved every second; reconnect while the belt is moving and the count continues, with the disconnected gap estimated.
-- **Pad counters reset on Stop** (the pad finalizes its session) but persist across connections while running — that's why distance/steps "come back" on reconnect.
 - **Exit stops the belt and sleeps the pad**, then quits — never hangs more than 3 s.
 - **Battery:** unmeasurable. 0.0% CPU / 0.0 power-impact; BLE at one small packet per second is designed for coin-cell devices.
 - **One user at a time:** the pad accepts a single BLE connection — if Connect spins forever, something else (phone app, the other frontend) is holding it.

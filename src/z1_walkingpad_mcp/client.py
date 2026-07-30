@@ -78,20 +78,13 @@ class Z1Treadmill:
         # derived live from telemetry — the pad may be started/stopped by
         # the physical remote at any time, so commands never own this
         self.belt_running = False
+        # The pad is the master of counters: time/distance/steps are shown
+        # exactly as the pad reports them (it resets them on Stop and on its
+        # own schedule). Calories are computed client-side but follow the
+        # same lifecycle — the tracker resets whenever the pad's counters do.
         self.calories = CalorieTracker()
-        # Session stats use signed offsets against the pad's counters, not a
-        # fixed baseline: the pad RESETS its counters on Stop (and sometimes
-        # on power events), so a baseline would invalidate mid-session.
-        # display value = pad counter + offset.
-        self._stat_offsets = {"elapsed_s": 0, "distance_m": 0, "steps": 0}
-        self._session_started = False
         self._last_target_speed: float | None = None
         self._calorie_state_restored = False
-        # stop->start within this window resumes the same session;
-        # a paused session always resumes (no cooldown)
-        self.session_cooldown_s = 600.0
-        self._last_stop_at: float | None = None
-        self._session_paused = False
 
     # -- callbacks ------------------------------------------------------
 
@@ -174,8 +167,6 @@ class Z1Treadmill:
         self._has_control = False
         self.belt_running = False
         self._calorie_state_restored = False
-        self._session_started = False
-        self._stat_offsets = {"elapsed_s": 0, "distance_m": 0, "steps": 0}
 
     async def disconnect(self) -> None:
         if self.client and self.client.is_connected:
@@ -289,41 +280,20 @@ class Z1Treadmill:
         # e.g. started by the physical remote. Nothing to do in that case.
         if not self.belt_running:
             await self._control_command(bytes([c.OP_START_OR_RESUME]), 0x07)
-        # Resume the same session after a brief stop; reset after the
-        # cooldown. Offsets (not a baseline) survive the pad's counter
-        # reset on Stop, so resumed sessions keep correct totals.
-        resuming = self._session_started and (
-            self._session_paused
-            or (
-                self._last_stop_at is not None
-                and (time.monotonic() - self._last_stop_at) <= self.session_cooldown_s
-            )
-        )
-        if not resuming:
-            self._stat_offsets = {
-                "elapsed_s": -(self.status.elapsed_s or 0),
-                "distance_m": -(self.status.distance_m or 0),
-                "steps": -(self.status.steps or 0),
-            }
-            self.calories.reset()
-        self._session_started = True
-        self._last_stop_at = None
-        self._session_paused = False
         self._last_target_speed = None  # belt restarts at minimum speed
 
     async def stop(self) -> dict:
         self._require_unlocked()
         await self._ensure_control()
+        # summary first: the pad resets its counters when Stop lands
+        summary = self.session_summary()
         await self._control_command(bytes([c.OP_STOP_OR_PAUSE, c.STOP_PARAM_STOP]), 0x08, b"\x01")
-        self._last_stop_at = time.monotonic()
-        self._session_paused = False
-        return self.session_summary()
+        return summary
 
     async def pause(self) -> None:
         self._require_unlocked()
         await self._ensure_control()
         await self._control_command(bytes([c.OP_STOP_OR_PAUSE, c.STOP_PARAM_PAUSE]), 0x08, b"\x02")
-        self._session_paused = True
 
     async def set_speed(self, kmh: float) -> None:
         self._require_unlocked()
@@ -352,20 +322,14 @@ class Z1Treadmill:
         return target
 
     def session_summary(self) -> dict:
-        """Metrics for the current logical session (survives pad counter resets)."""
-
-        def stat(name: str, cur: int | None) -> int | None:
-            if cur is None:
-                return None
-            return max(0, cur + self._stat_offsets[name])
-
-        duration_s = stat("elapsed_s", self.status.elapsed_s)
-        distance_m = stat("distance_m", self.status.distance_m)
+        """Current session metrics: the pad's own counters plus our kcal."""
+        duration_s = self.status.elapsed_s
+        distance_m = self.status.distance_m
         avg_kmh = round(distance_m / duration_s * 3.6, 2) if duration_s and distance_m else None
         return {
             "duration_s": duration_s,
             "distance_m": distance_m,
-            "steps": stat("steps", self.status.steps),
+            "steps": self.status.steps,
             "avg_speed_kmh": avg_kmh,
             "calories_kcal": round(self.calories.total_kcal, 1),
             "weight_kg_used": self.calories.weight_kg,
@@ -384,16 +348,14 @@ class Z1Treadmill:
     def _on_treadmill_data(self, _char, data: bytearray) -> None:
         prev = self.status
         self.status = p.parse_treadmill_data(bytes(data))
-        # pad counter reset (Stop finalizes the pad session): fold the final
-        # values into the session offsets so display totals don't zero out
+        # pad counter reset (Stop finalizes the pad session, or the pad's
+        # own timer): the pad is the master — our calorie count resets with it
         if (
             prev.elapsed_s is not None
             and self.status.elapsed_s is not None
             and self.status.elapsed_s < prev.elapsed_s
         ):
-            self._stat_offsets["elapsed_s"] += prev.elapsed_s
-            self._stat_offsets["distance_m"] += prev.distance_m or 0
-            self._stat_offsets["steps"] += prev.steps or 0
+            self.calories.reset()
         # belt state is derived from the pad (the master): it may have been
         # started/stopped by the physical remote between our commands
         self.belt_running = bool(self.status.speed_kmh and self.status.speed_kmh > 0)
