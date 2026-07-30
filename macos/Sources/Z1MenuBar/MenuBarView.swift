@@ -188,6 +188,17 @@ struct MenuBarView: View {
                     Text(viewModel.speedUnitLabel)
                         .foregroundStyle(.secondary)
                 }
+
+                HStack {
+                    Toggle("Persist stats across sessions", isOn: $viewModel.persistStats)
+                        .font(.callout)
+                        .toggleStyle(.checkbox)
+                    Spacer()
+                    Button("Clear") {
+                        viewModel.clearStatsTapped()
+                    }
+                    .disabled(!viewModel.persistStats)
+                }
             }
             .padding(.top, 6)
         }

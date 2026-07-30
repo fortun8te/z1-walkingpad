@@ -20,7 +20,7 @@ Everything is documented well enough to build your own client in any language: s
 - 📊 Live telemetry: speed, distance, elapsed time, **steps** (KingSmith extension)
 - 🔥 Calorie estimate via the ACSM walking metabolic equation (research-backed; ±10–15%)
 - 🧠 The pad is the master — app reflects reality even when you use the physical remote
-- 🔁 Pad is the master for counters; calories persist across reconnects (gap-credited)
+- 🔁 Pad is the master for counters; calories persist across reconnects (gap-credited) — or flip on "Persist stats across sessions" to accumulate until you hit Clear
 - 😴 Exit stops the belt and puts the pad in standby
 - 🔋 Zero measurable battery impact (0.0% CPU, 0.0 power score)
 - 🇺🇸 Imperial/metric units, synced to the pad's own display
@@ -94,6 +94,7 @@ Both talk to the pad directly and independently — neither needs the other. **O
 - **The pad is the master — of everything.** Belt state, time, distance, and steps are shown exactly as the pad reports them, however they were changed (app, remote, or the pad's own timer). When the pad resets its counters (on Stop, or on its own schedule), the display follows.
 - **Calories are the one thing we compute** (the pad reports none) — but they follow the same lifecycle: the estimate resets when the pad's counters reset, so the numbers never disagree about what "this session" is.
 - **Calories persist across reconnects.** Saved every second; disconnect while the belt is still moving and the count continues, with the disconnected gap estimated — because the pad's session never ended.
+- **Want a trip odometer instead?** Settings → **Persist stats across sessions** makes time/distance/steps/kcal keep accumulating across Stops (the pad's resets are folded in) until you hit the **Clear** button beside it. Off = pad-as-master.
 - **Start on a moving belt is a no-op** (the pad refuses it) — `start()` skips the command when the belt is already moving.
 - **Exit stops the belt and sleeps the pad**, then quits — never hangs more than 3 s.
 - **Battery:** unmeasurable. 0.0% CPU / 0.0 power-impact; BLE at one small packet per second is designed for coin-cell devices.

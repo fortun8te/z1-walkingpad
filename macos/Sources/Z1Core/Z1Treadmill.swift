@@ -114,7 +114,13 @@ public actor Z1Treadmill {
     // exactly as the pad reports them (it resets them on Stop and on its
     // own schedule). Calories are computed client-side but follow the same
     // lifecycle — the tracker resets whenever the pad's counters do.
+    //
+    // Opt-out: when persistStats is on, regressions fold into statOffsets
+    // (and the calorie tracker keeps going), so stats accumulate across
+    // sessions until clearStats() is called.
     private var calorieTracker = CalorieTracker()
+    private var statOffsets = (elapsed: 0, distance: 0, steps: 0)
+    public private(set) var persistStats = false
     private var calorieStateRestored = false
     private var lastTargetSpeed: Double?
     private var hasControl = false
@@ -398,20 +404,47 @@ public actor Z1Treadmill {
     }
 
     /// Current session metrics: the pad's own counters plus our kcal.
+    /// With persistStats on, totals accumulate across sessions since the
+    /// last clearStats().
     public func sessionSummary() -> SessionSummary {
-        let durationS = telemetry.elapsedS ?? 0
-        let distanceM = telemetry.distanceM ?? 0
+        let durationS = displayStat(telemetry.elapsedS, statOffsets.elapsed)
+        let distanceM = displayStat(telemetry.distanceM, statOffsets.distance)
         let avg: Double = (durationS > 0 && distanceM > 0)
             ? (Double(distanceM) / Double(durationS) * 3.6 * 100).rounded() / 100
             : 0
         return SessionSummary(
             durationS: durationS,
             distanceM: distanceM,
-            steps: telemetry.steps ?? 0,
+            steps: displayStat(telemetry.steps, statOffsets.steps),
             avgSpeedKmh: avg,
             caloriesKcal: (calorieTracker.totalKcal * 10).rounded() / 10,
             weightKgUsed: calorieTracker.weightKg
         )
+    }
+
+    // MARK: - stats persistence
+
+    public func setPersistStats(_ on: Bool) {
+        persistStats = on
+        if !on {
+            // back to pad-as-master: drop the accumulated offsets
+            statOffsets = (elapsed: 0, distance: 0, steps: 0)
+        }
+        emitStatus()
+    }
+
+    /// Zero all accumulated stats (offsets + calorie estimate) and the
+    /// on-disk calorie state, so nothing restores old totals later.
+    public func clearStats() {
+        statOffsets = (elapsed: 0, distance: 0, steps: 0)
+        calorieTracker.reset()
+        UserDefaults.standard.removeObject(forKey: Self.calorieStateKey)
+        persistCalorieState()
+        emitStatus()
+    }
+
+    private func displayStat(_ cur: Int?, _ offset: Int) -> Int {
+        persistStats ? max(0, (cur ?? 0) + offset) : (cur ?? 0)
     }
 
     // MARK: - telemetry
@@ -456,12 +489,20 @@ public actor Z1Treadmill {
         let prev = telemetry
         telemetry = Z1Protocol.parseTreadmillData(data)
         // pad counter reset (Stop finalizes the pad session, or the pad's
-        // own timer): the pad is the master — our calorie count resets with it
+        // own timer). Default: the pad is the master — stats follow it down.
+        // With persistStats on: fold the final values into the offsets and
+        // keep accumulating instead.
         if let prevElapsed = prev.elapsedS,
            let curElapsed = telemetry.elapsedS,
            curElapsed < prevElapsed
         {
-            calorieTracker.reset()
+            if persistStats {
+                statOffsets.elapsed += prevElapsed
+                statOffsets.distance += prev.distanceM ?? 0
+                statOffsets.steps += prev.steps ?? 0
+            } else {
+                calorieTracker.reset()
+            }
         }
         if !calorieStateRestored {
             calorieStateRestored = true
@@ -518,9 +559,9 @@ public actor Z1Treadmill {
         // belt state is derived from the pad (the master): it may have been
         // started/stopped by the physical remote between our commands
         s.beltRunning = (telemetry.speedKmh ?? 0) > 0
-        s.distanceM = telemetry.distanceM ?? 0
-        s.elapsedS = telemetry.elapsedS ?? 0
-        s.steps = telemetry.steps ?? 0
+        s.distanceM = displayStat(telemetry.distanceM, statOffsets.distance)
+        s.elapsedS = displayStat(telemetry.elapsedS, statOffsets.elapsed)
+        s.steps = displayStat(telemetry.steps, statOffsets.steps)
         s.caloriesKcal = calorieTracker.totalKcal
         s.hasTelemetry = true
         status = s

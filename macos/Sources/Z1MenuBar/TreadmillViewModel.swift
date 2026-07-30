@@ -42,12 +42,22 @@ final class TreadmillViewModel: ObservableObject {
         }
     }
 
+    /// Accumulate stats across sessions (ignore the pad's counter resets)
+    /// until manually cleared. Off = pad-as-master.
+    @Published var persistStats: Bool {
+        didSet {
+            UserDefaults.standard.set(persistStats, forKey: Self.persistKey)
+            Task { await treadmill.setPersistStats(persistStats) }
+        }
+    }
+
     let treadmill = Z1Treadmill()
     private var pumpTask: Task<Void, Never>?
 
     static let weightKey = "weightKg"
     static let unitsKey = "unitsImperial"
     static let stepKey = "speedStep"
+    static let persistKey = "persistStats"
 
     init() {
         let defaults = UserDefaults.standard
@@ -57,8 +67,10 @@ final class TreadmillViewModel: ObservableObject {
         unitsImperial = defaults.object(forKey: Self.unitsKey) as? Bool ?? true
         let storedStep = defaults.double(forKey: Self.stepKey)
         speedStep = storedStep > 0 ? storedStep : 0.1
+        persistStats = defaults.bool(forKey: Self.persistKey)
 
         Task { await treadmill.setWeight(weightKg) }
+        Task { await treadmill.setPersistStats(persistStats) }
         pumpTask = Task { [weak self] in
             guard let self else { return }
             for await s in self.treadmill.statusUpdates {
@@ -146,6 +158,10 @@ final class TreadmillViewModel: ObservableObject {
     func speedDownTapped() {
         guard !busy, isConnected, status.beltRunning else { return }
         run { _ = try await self.treadmill.speedDown(deltaKmh: self.speedStepKmh) }
+    }
+
+    func clearStatsTapped() {
+        Task { await treadmill.clearStats() }
     }
 
     func quit() {
