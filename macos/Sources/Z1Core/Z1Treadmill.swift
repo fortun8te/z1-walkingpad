@@ -118,6 +118,12 @@ public actor Z1Treadmill {
     private var expectingDisconnect = false
     private var lastVendorWrite: ContinuousClock.Instant?
     private var lastControlWrite: ContinuousClock.Instant?
+    /// When the belt was last stopped; a `start()` within `sessionCooldown`
+    /// resumes the same session instead of resetting counters.
+    private var lastStopAt: ContinuousClock.Instant?
+
+    /// Stop->start within this window continues the same session.
+    public var sessionCooldown: Duration = .seconds(600)
 
     struct Frame: Sendable {
         var cmd0: UInt8
@@ -289,13 +295,20 @@ public actor Z1Treadmill {
         try requireReady()
         try await ensureControl()
         _ = try await cpCommand(Data([Z1Constants.opStartOrResume]))
-        // pad counters are cumulative across connections — snapshot a baseline
-        baseline = Z1Protocol.TreadmillData(
-            distanceM: telemetry.distanceM,
-            elapsedS: telemetry.elapsedS,
-            steps: telemetry.steps
-        )
-        calorieTracker.reset()
+        // Resume the same session after a brief stop; reset after the
+        // cooldown. Pad counters are cumulative, so the baseline from the
+        // original start still yields correct deltas on resume.
+        let resuming = baseline != nil
+            && lastStopAt.map { ContinuousClock.now - $0 <= sessionCooldown } == true
+        if !resuming {
+            baseline = Z1Protocol.TreadmillData(
+                distanceM: telemetry.distanceM,
+                elapsedS: telemetry.elapsedS,
+                steps: telemetry.steps
+            )
+            calorieTracker.reset()
+        }
+        lastStopAt = nil
         lastTargetSpeed = nil // belt restarts at minimum speed
         mutate { $0.beltRunning = true }
     }
@@ -305,6 +318,7 @@ public actor Z1Treadmill {
         try requireReady()
         try await ensureControl()
         _ = try await cpCommand(Data([Z1Constants.opStopOrPause, Z1Constants.stopParamStop]))
+        lastStopAt = .now
         mutate { $0.beltRunning = false }
         return sessionSummary()
     }

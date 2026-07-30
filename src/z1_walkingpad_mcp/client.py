@@ -58,6 +58,11 @@ class Z1Treadmill:
         self.calories = CalorieTracker()
         self._session_baseline: p.TreadmillData | None = None
         self._last_target_speed: float | None = None
+        # stop->start within this window resumes the same session;
+        # a paused session always resumes (no cooldown)
+        self.session_cooldown_s = 600.0
+        self._last_stop_at: float | None = None
+        self._session_paused = False
 
     # -- callbacks ------------------------------------------------------
 
@@ -219,23 +224,38 @@ class Z1Treadmill:
         self._require_unlocked()
         await self._ensure_control()
         await self._cp_command(bytes([c.OP_START_OR_RESUME]))
-        # pad counters are cumulative across connections — snapshot a baseline
-        self._session_baseline = p.TreadmillData(
-            distance_m=self.status.distance_m, elapsed_s=self.status.elapsed_s, steps=self.status.steps
+        # Resume the same session after a brief stop; reset after the
+        # cooldown. Pad counters are cumulative, so the original baseline
+        # still yields correct deltas on resume.
+        resuming = self._session_baseline is not None and (
+            self._session_paused
+            or (
+                self._last_stop_at is not None
+                and (time.monotonic() - self._last_stop_at) <= self.session_cooldown_s
+            )
         )
-        self.calories.reset()
+        if not resuming:
+            self._session_baseline = p.TreadmillData(
+                distance_m=self.status.distance_m, elapsed_s=self.status.elapsed_s, steps=self.status.steps
+            )
+            self.calories.reset()
+        self._last_stop_at = None
+        self._session_paused = False
         self._last_target_speed = None  # belt restarts at minimum speed
 
     async def stop(self) -> dict:
         self._require_unlocked()
         await self._ensure_control()
         await self._cp_command(bytes([c.OP_STOP_OR_PAUSE, c.STOP_PARAM_STOP]))
+        self._last_stop_at = time.monotonic()
+        self._session_paused = False
         return self.session_summary()
 
     async def pause(self) -> None:
         self._require_unlocked()
         await self._ensure_control()
         await self._cp_command(bytes([c.OP_STOP_OR_PAUSE, c.STOP_PARAM_PAUSE]))
+        self._session_paused = True
 
     async def set_speed(self, kmh: float) -> None:
         self._require_unlocked()
