@@ -13,8 +13,10 @@ notifications until the supplement-channel unlock frame lands. Order:
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections.abc import Callable
+from pathlib import Path
 
 from bleak import BleakClient, BleakScanner
 from bleak.backends.device import BLEDevice
@@ -22,6 +24,11 @@ from bleak.backends.device import BLEDevice
 from . import constants as c
 from . import protocol as p
 from .metrics import CalorieTracker
+
+# Calorie integration is client-side, so it survives reconnects via this file:
+# pad counters (elapsed/distance/steps) persist on the pad; we persist the kcal
+# total keyed against them and restore on the next connection.
+CALORIE_STATE_FILE = Path.home() / ".z1-walkingpad" / "calorie-state.json"
 
 CP_RESULT = {1: "success", 2: "op not supported", 3: "invalid parameter", 4: "failed", 5: "control not permitted"}
 
@@ -55,9 +62,13 @@ class Z1Treadmill:
         self._last_vendor_write = 0.0
         self._last_cp_write = 0.0
         self._status_callbacks: list[Callable[[p.TreadmillData], None]] = []
+        # derived live from telemetry — the pad may be started/stopped by
+        # the physical remote at any time, so commands never own this
+        self.belt_running = False
         self.calories = CalorieTracker()
         self._session_baseline: p.TreadmillData | None = None
         self._last_target_speed: float | None = None
+        self._calorie_state_restored = False
         # stop->start within this window resumes the same session;
         # a paused session always resumes (no cooldown)
         self.session_cooldown_s = 600.0
@@ -143,6 +154,8 @@ class Z1Treadmill:
     def _on_disconnect(self) -> None:
         self.unlocked = False
         self._has_control = False
+        self.belt_running = False
+        self._calorie_state_restored = False
 
     async def disconnect(self) -> None:
         if self.client and self.client.is_connected:
@@ -223,7 +236,10 @@ class Z1Treadmill:
     async def start(self) -> None:
         self._require_unlocked()
         await self._ensure_control()
-        await self._cp_command(bytes([c.OP_START_OR_RESUME]))
+        # the pad refuses START (result 4) when the belt is already moving —
+        # e.g. started by the physical remote. Nothing to do in that case.
+        if not self.belt_running:
+            await self._cp_command(bytes([c.OP_START_OR_RESUME]))
         # Resume the same session after a brief stop; reset after the
         # cooldown. Pad counters are cumulative, so the original baseline
         # still yields correct deltas on resume.
@@ -317,6 +333,12 @@ class Z1Treadmill:
     def _on_treadmill_data(self, _char, data: bytearray) -> None:
         prev = self.status
         self.status = p.parse_treadmill_data(bytes(data))
+        # belt state is derived from the pad (the master): it may have been
+        # started/stopped by the physical remote between our commands
+        self.belt_running = bool(self.status.speed_kmh and self.status.speed_kmh > 0)
+        if not self._calorie_state_restored:
+            self._calorie_state_restored = True
+            self._restore_calorie_state()
         # credit calorie burn for the interval just elapsed, while moving
         if (
             prev.elapsed_s is not None
@@ -325,10 +347,56 @@ class Z1Treadmill:
             and prev.speed_kmh > 0
         ):
             self.calories.add_sample(prev.speed_kmh, self.status.elapsed_s - prev.elapsed_s)
+        self._persist_calorie_state()
         self._emit_status()
 
+    # -- calorie state persistence ----------------------------------------
+
+    def _persist_calorie_state(self) -> None:
+        try:
+            CALORIE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            CALORIE_STATE_FILE.write_text(
+                json.dumps(
+                    {
+                        "total_kcal": self.calories.total_kcal,
+                        "elapsed_s": self.status.elapsed_s,
+                        "distance_m": self.status.distance_m,
+                    }
+                )
+            )
+        except OSError:
+            pass
+
+    def _restore_calorie_state(self) -> None:
+        try:
+            state = json.loads(CALORIE_STATE_FILE.read_text())
+        except (OSError, json.JSONDecodeError):
+            return
+        cur_elapsed = self.status.elapsed_s
+        if cur_elapsed is None:
+            return
+        saved_elapsed = state.get("elapsed_s") or 0
+        if cur_elapsed < saved_elapsed:
+            return  # pad counters went backwards (power cycle) — start fresh
+        self.calories.total_kcal = float(state.get("total_kcal") or 0)
+        # credit the gap while we were disconnected, if the belt kept moving
+        gap_s = cur_elapsed - saved_elapsed
+        gap_d = (self.status.distance_m or 0) - (state.get("distance_m") or 0)
+        if gap_s > 0 and gap_d > 0:
+            self.calories.add_sample(gap_d / gap_s * 3.6, gap_s)
+
     def _on_machine_status(self, _char, data: bytearray) -> None:
-        pass  # op codes logged by callers that care; belt state comes via 0x2ACD
+        # belt-state events from the pad itself: works even when no
+        # treadmill-data frames flow (e.g. belt fully stopped)
+        if not data:
+            return
+        op = data[0]
+        if op == 4:  # started
+            self.belt_running = True
+            self._emit_status()
+        elif op in (1, 2):  # safety-key stop / user stop or pause
+            self.belt_running = False
+            self._emit_status()
 
     # -- helpers ------------------------------------------------------------
 

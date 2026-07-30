@@ -112,6 +112,7 @@ public actor Z1Treadmill {
     private var telemetry = Z1Protocol.TreadmillData()
     private var baseline: Z1Protocol.TreadmillData?
     private var calorieTracker = CalorieTracker()
+    private var calorieStateRestored = false
     private var lastTargetSpeed: Double?
     private var hasControl = false
     private var unlocked = false
@@ -201,6 +202,7 @@ public actor Z1Treadmill {
                 characteristics: [
                     Z1Constants.charSupportedSpeedRange,
                     Z1Constants.charTreadmillData,
+                    Z1Constants.charFitnessMachineStatus,
                     Z1Constants.charControlPoint,
                     Z1Constants.charSupplementNotify,
                     Z1Constants.charSupplementWrite,
@@ -211,6 +213,7 @@ public actor Z1Treadmill {
             try await transport.setNotify(Z1Constants.charSupplementNotify, enable: true)
             // telemetry (informational; stays silent pre-unlock)
             try? await transport.setNotify(Z1Constants.charTreadmillData, enable: true)
+            try? await transport.setNotify(Z1Constants.charFitnessMachineStatus, enable: true)
 
             // 2. unlock — write without response; success arrives as 71 80
             unlocked = false
@@ -286,6 +289,7 @@ public actor Z1Treadmill {
         baseline = nil
         lastTargetSpeed = nil
         telemetry = Z1Protocol.TreadmillData()
+        calorieStateRestored = false
         mutate { $0.beltRunning = false }
     }
 
@@ -294,7 +298,11 @@ public actor Z1Treadmill {
     public func start() async throws {
         try requireReady()
         try await ensureControl()
-        _ = try await cpCommand(Data([Z1Constants.opStartOrResume]))
+        // the pad refuses START (result 4) when the belt is already moving —
+        // e.g. started by the physical remote. Nothing to do in that case.
+        if (telemetry.speedKmh ?? 0) <= 0 {
+            _ = try await cpCommand(Data([Z1Constants.opStartOrResume]))
+        }
         // Resume the same session after a brief stop; reset after the
         // cooldown. Pad counters are cumulative, so the baseline from the
         // original start still yields correct deltas on resume.
@@ -448,6 +456,15 @@ public actor Z1Treadmill {
             }
         case Z1Constants.charTreadmillData.uuidString:
             handleTelemetry(data)
+        case Z1Constants.charFitnessMachineStatus.uuidString:
+            // belt-state events from the pad itself (the master): works even
+            // when no treadmill-data frames flow (e.g. belt fully stopped)
+            guard let op = data.first else { return }
+            switch op {
+            case 4: mutate { $0.beltRunning = true } // started
+            case 1, 2: mutate { $0.beltRunning = false } // safety-key / user stop or pause
+            default: break
+            }
         default:
             break
         }
@@ -456,6 +473,10 @@ public actor Z1Treadmill {
     private func handleTelemetry(_ data: Data) {
         let prev = telemetry
         telemetry = Z1Protocol.parseTreadmillData(data)
+        if !calorieStateRestored {
+            calorieStateRestored = true
+            restoreCalorieState()
+        }
         // credit calorie burn for the interval just elapsed, while moving
         if let prevElapsed = prev.elapsedS,
            let curElapsed = telemetry.elapsedS,
@@ -463,12 +484,50 @@ public actor Z1Treadmill {
         {
             calorieTracker.addSample(speedKmh: prevSpeed, elapsedS: Double(curElapsed - prevElapsed))
         }
+        persistCalorieState()
         emitStatus()
+    }
+
+    // MARK: - calorie state persistence
+    //
+    // Calorie integration is client-side; the pad's own counters (elapsed,
+    // distance) survive reconnects, so we persist the kcal total keyed
+    // against them and restore on the next connection.
+
+    private static let calorieStateKey = "z1.calorieState"
+
+    private func persistCalorieState() {
+        UserDefaults.standard.set(
+            [
+                "totalKcal": calorieTracker.totalKcal,
+                "elapsedS": telemetry.elapsedS ?? 0,
+                "distanceM": telemetry.distanceM ?? 0,
+            ],
+            forKey: Self.calorieStateKey
+        )
+    }
+
+    private func restoreCalorieState() {
+        guard let state = UserDefaults.standard.dictionary(forKey: Self.calorieStateKey),
+              let curElapsed = telemetry.elapsedS
+        else { return }
+        let savedElapsed = state["elapsedS"] as? Int ?? 0
+        guard curElapsed >= savedElapsed else { return } // pad counters reset (power cycle) — fresh
+        calorieTracker.totalKcal = state["totalKcal"] as? Double ?? 0
+        // credit the gap while we were disconnected, if the belt kept moving
+        let gapS = curElapsed - savedElapsed
+        let gapD = (telemetry.distanceM ?? 0) - (state["distanceM"] as? Int ?? 0)
+        if gapS > 0, gapD > 0 {
+            calorieTracker.addSample(speedKmh: Double(gapD) / Double(gapS) * 3.6, elapsedS: Double(gapS))
+        }
     }
 
     private func emitStatus() {
         var s = status
         s.speedKmh = telemetry.speedKmh ?? 0
+        // belt state is derived from the pad (the master): it may have been
+        // started/stopped by the physical remote between our commands
+        s.beltRunning = (telemetry.speedKmh ?? 0) > 0
         s.distanceM = max(0, (telemetry.distanceM ?? 0) - (baseline?.distanceM ?? 0))
         s.elapsedS = max(0, (telemetry.elapsedS ?? 0) - (baseline?.elapsedS ?? 0))
         s.steps = max(0, (telemetry.steps ?? 0) - (baseline?.steps ?? 0))

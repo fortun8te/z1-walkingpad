@@ -35,7 +35,7 @@ public enum Z1Metrics {
 /// Integrates calorie burn from a stream of speed samples.
 public struct CalorieTracker: Sendable {
     public var weightKg: Double
-    public private(set) var totalKcal = 0.0
+    public internal(set) var totalKcal = 0.0
 
     public init(weightKg: Double = Z1Metrics.defaultWeightKg) {
         self.weightKg = weightKg
