@@ -148,11 +148,14 @@ final class TreadmillViewModel: ObservableObject {
     func quit() {
         let treadmill = self.treadmill
         Task {
-            // Always disconnect cleanly before exiting (this also stops the
-            // belt if it's running) — but never hang on exit: if BLE doesn't
-            // answer within 3s, terminate anyway.
+            // Always leave the pad cleanly before exiting: belt stopped
+            // (sleep() handles that) and pad in standby — but never hang
+            // on exit: if BLE doesn't answer within 3s, terminate anyway.
             await withTaskGroup(of: Void.self) { group in
-                group.addTask { await treadmill.disconnect() }
+                group.addTask {
+                    try? await treadmill.sleep()
+                    await treadmill.disconnect()
+                }
                 group.addTask { try? await Task.sleep(for: .seconds(3)) }
                 await group.next()
                 group.cancelAll()

@@ -373,6 +373,24 @@ public actor Z1Treadmill {
         mutate { $0.properties[1] = value }
     }
 
+    /// Soft power-off: stop the belt (if running) and switch the pad to
+    /// standby mode. Property 10 mode index 2 = sleep, per the
+    /// docs/protocol.md property table (bits 5–7 hold the mode; preserved).
+    /// Verified on hardware: 0x0200 (manual) <-> 0x0240 (sleep).
+    public func sleep() async throws {
+        try requireReady()
+        if status.beltRunning {
+            _ = try await stop()
+        }
+        let current = status.properties[10] ?? 0
+        let value = (current & ~0xE0) | (2 << 5)
+        _ = try await vendorRoundtrip(
+            Z1Protocol.propertyWriteFrame(propID: 10, value: UInt16(value)),
+            pred: { $0.cmd0 == Z1Constants.vopProperty && $0.cmd1 == 0x81 && $0.data.first == 10 }
+        )
+        mutate { $0.properties[10] = value }
+    }
+
     /// Metrics since the last start(): duration, distance, steps, calories.
     public func sessionSummary() -> SessionSummary {
         let base = baseline
