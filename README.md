@@ -130,16 +130,51 @@ Properties observed on the Z1: `1` units/language (bit 1 = miles; written when t
 
 ### FTMS control (post-unlock)
 
-Control point `0x2AD9`, write **with** response, pace ≥400 ms. Indication replies: `[0x80, request-op, result, …]` — result `1` = success, `4` = failed (e.g. START on a moving belt), `5` = control not permitted (re-send `00` and retry).
+Control point `0x2AD9`, write **with** response, pace ≥400 ms. Indication replies: `[0x80, request-op, result, …]`.
 
 | Op | Bytes | Effect |
 |---|---|---|
 | Request Control | `00` | required once before any command |
-| Start/Resume | `07` | belt ramps to minimum speed (1.6 km/h) |
+| Reset | `01` | |
 | Set Target Speed | `02 <u16 LE, km/h×100>` | e.g. 2.5 km/h = `02 fa 00` |
+| Start/Resume | `07` | belt ramps to minimum speed (1.6 km/h); **fails (4) if belt already moving** |
 | Stop / Pause | `08 01` / `08 02` | Stop finalizes the pad session (resets its counters) |
 
+| Result | Meaning |
+|---|---|
+| 1 | success |
+| 2 | op not supported |
+| 3 | invalid parameter |
+| 4 | failed |
+| 5 | control not permitted → re-send `00`, retry once |
+
 Typical session: `00` → `07` → `02 …` → `08 01`.
+
+### Quick reference (build-your-own cheat sheet)
+
+Connection constants:
+
+- Scan name prefix `KS-HD-Z1`; vendor writes ≥**400 ms** apart (dropped if faster); write-without-response on the vendor char, with-response on the control point
+- Await unlock `71 80` up to ~10 s (usually <100 ms); other vendor replies ~3 s; control indications ~3 s
+
+Vendor channel (`…d00fdf7` write / `…b00fdf7` notify, frame `[cmd0, cmd1, len, data, sum&0xFF]`):
+
+| Frame | Bytes | Reply |
+|---|---|---|
+| Unlock | `71 00 05 01 <LE32(name[-4:])+1> CC` | `71 80` |
+| SYS_INFO | `71 01 08 <unix LE32> <uid LE32> CC` | `71 81` (proto u16, model u16, caps u32) |
+| Property read (all / one) | `72 00 01 <id|00> CC` | `72 80` — 4-byte records `[id, err, lo, hi]` |
+| Property write | `72 01 03 <id> <lo> <hi> CC` | `72 81` — `data[1]=0` OK |
+| Func/method info | `75 00 00 75` | `75 80` |
+| *(unsolicited)* | — | `72 50` property push (3-byte records), `73 50` exercise record, `73 51` fault |
+
+Vendor control tunnel (alternative to FTMS control point; used as fallback by some clients): `77 01 <len> <op> <params…> CC` → reply `77 81`, `data[0]=op`, status `data[1]` (0 or 0x81 = OK). Ops mirror FTMS: start `77 01 01 07 7F`, stop `77 01 02 08 01 82`, speed `77 01 03 02 <u16 LE km/h×100> CC`.
+
+Machine status (`0x2AD9` sibling `0x2ADA`, notify): `04` started, `02` user stop/pause, `01` safety-key stop, `05` speed changed, `FF` control lost.
+
+Telemetry flags (`0x2ACD`, u16 LE then fields in order): bit0 *clear* → speed u16 (km/h×100) · bit1 avg speed u16 · bit2 distance u24 m · bit3 incline+ramp s16×2 · bit4 ±elevation u16×2 · bit5 pace u8 · bit6 avg pace u8 · bit7 energy u16+u16+u8 · bit8 HR u8 · bit9 MET u8 · bit10 elapsed u16 s · bit11 remaining u16 s · **bit13 steps u16 (KingSmith)**. Z1 sends flags `0x2404` + speed.
+
+Device facts: firmware `V0.0.6` (`0x2A26`), speed range 1.6–6.4 km/h (`0x2AD4`, u16×2 km/h×100), one BLE connection at a time, no GAP service.
 
 ### Telemetry
 

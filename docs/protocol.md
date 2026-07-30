@@ -140,6 +140,28 @@ Commands:
 
 Typical session: `00` → `07` → `02 …` (any number of times) → `08 01`.
 
+## Vendor control tunnel (0x77) — alternative control path
+
+The supplement channel can also carry belt commands (used as a fallback by
+the duttke.de implementation when the control point fails). Frame
+`77 01 <len> <op> <params…> CC` → reply `77 81`, `data[0]` = op, `data[1]` =
+status (0 or 0x81 = OK). Ops mirror FTMS:
+
+| command | frame |
+|---|---|
+| start | `77 01 01 07 7F` |
+| stop | `77 01 02 08 01 82` (note: param 1 here vs 2 on FTMS) |
+| set speed | `77 01 03 02 <u16 LE km/h×100> CC` |
+
+Not needed on the Z1 (FTMS control point works post-unlock) but part of the
+known protocol surface.
+
+## Machine status (`0x2ADA`, notify)
+
+`04` started · `02` user stop/pause · `01` safety-key stop · `05` speed
+changed · `0xFF` control lost. Useful for belt state when no treadmill-data
+frames flow (belt fully stopped).
+
 ## Telemetry (`0x2ACD`)
 
 Standard FTMS treadmill data: flags u16 LE, then fields in flag order.
