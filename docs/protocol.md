@@ -176,8 +176,9 @@ instantaneous speed (flag bit 0 clear).
 | **13** | **step count** | u16 — **KingSmith extension** |
 
 Frames arrive ~1/second while the belt runs. Distance/steps accumulate
-under load (walking). Counters persist across BLE connections — snapshot a
-baseline at session start and compute deltas.
+under load (walking). Counters persist across BLE connections while the
+pad's session is open, and reset when the pad finalizes a session (Stop)
+or on its own schedule — clients display them as-is (pad-as-master).
 
 **Step accuracy note:** the pad's step counter (belt/motor dynamics) is
 unreliable at slow speeds — consumer counters err 20–40% below ~3 km/h
