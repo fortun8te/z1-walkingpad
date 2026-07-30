@@ -18,6 +18,7 @@ from pathlib import Path
 
 from mcp.server.mcpserver import MCPServer
 
+from . import strava
 from .client import Z1Error, Z1Treadmill
 
 mcp = MCPServer("z1-walkingpad")
@@ -97,8 +98,9 @@ async def treadmill_pause() -> str:
 async def treadmill_stop() -> dict:
     """Stop the belt, end the session, and return its summary:
     duration, distance, steps, average speed, estimated calories.
-    The summary is appended to sessions.jsonl and written as a
-    session-<timestamp>.json file in the sessions directory."""
+    The summary is appended to sessions.jsonl, written as a
+    session-<timestamp>.json file, and uploaded to Strava if configured
+    (see docs/strava.md) — the Strava iOS app then syncs it to Apple Health."""
     t = await _ensure_connected()
     summary = await t.stop()
     record = {"ended_at": int(time.time()), **summary}
@@ -111,6 +113,13 @@ async def treadmill_stop() -> dict:
             json.dump(record, f, indent=2)
     except OSError:
         pass
+    # best-effort Strava upload — never let a sync failure break stop
+    if strava.configured():
+        try:
+            activity_id = strava.upload_walk(summary, record["ended_at"])
+            summary["strava_activity_id"] = activity_id
+        except strava.StravaError as e:
+            summary["strava_error"] = str(e)
     return summary
 
 
