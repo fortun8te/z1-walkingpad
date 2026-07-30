@@ -79,7 +79,12 @@ class Z1Treadmill:
         # the physical remote at any time, so commands never own this
         self.belt_running = False
         self.calories = CalorieTracker()
-        self._session_baseline: p.TreadmillData | None = None
+        # Session stats use signed offsets against the pad's counters, not a
+        # fixed baseline: the pad RESETS its counters on Stop (and sometimes
+        # on power events), so a baseline would invalidate mid-session.
+        # display value = pad counter + offset.
+        self._stat_offsets = {"elapsed_s": 0, "distance_m": 0, "steps": 0}
+        self._session_started = False
         self._last_target_speed: float | None = None
         self._calorie_state_restored = False
         # stop->start within this window resumes the same session;
@@ -169,6 +174,8 @@ class Z1Treadmill:
         self._has_control = False
         self.belt_running = False
         self._calorie_state_restored = False
+        self._session_started = False
+        self._stat_offsets = {"elapsed_s": 0, "distance_m": 0, "steps": 0}
 
     async def disconnect(self) -> None:
         if self.client and self.client.is_connected:
@@ -283,9 +290,9 @@ class Z1Treadmill:
         if not self.belt_running:
             await self._control_command(bytes([c.OP_START_OR_RESUME]), 0x07)
         # Resume the same session after a brief stop; reset after the
-        # cooldown. Pad counters are cumulative, so the original baseline
-        # still yields correct deltas on resume.
-        resuming = self._session_baseline is not None and (
+        # cooldown. Offsets (not a baseline) survive the pad's counter
+        # reset on Stop, so resumed sessions keep correct totals.
+        resuming = self._session_started and (
             self._session_paused
             or (
                 self._last_stop_at is not None
@@ -293,10 +300,13 @@ class Z1Treadmill:
             )
         )
         if not resuming:
-            self._session_baseline = p.TreadmillData(
-                distance_m=self.status.distance_m, elapsed_s=self.status.elapsed_s, steps=self.status.steps
-            )
+            self._stat_offsets = {
+                "elapsed_s": -(self.status.elapsed_s or 0),
+                "distance_m": -(self.status.distance_m or 0),
+                "steps": -(self.status.steps or 0),
+            }
             self.calories.reset()
+        self._session_started = True
         self._last_stop_at = None
         self._session_paused = False
         self._last_target_speed = None  # belt restarts at minimum speed
@@ -342,21 +352,20 @@ class Z1Treadmill:
         return target
 
     def session_summary(self) -> dict:
-        """Metrics since the last start(): duration, distance, steps, calories."""
-        base = self._session_baseline or p.TreadmillData()
+        """Metrics for the current logical session (survives pad counter resets)."""
 
-        def delta(cur: int | None, ref: int | None) -> int | None:
+        def stat(name: str, cur: int | None) -> int | None:
             if cur is None:
                 return None
-            return cur - (ref or 0)
+            return max(0, cur + self._stat_offsets[name])
 
-        duration_s = delta(self.status.elapsed_s, base.elapsed_s)
-        distance_m = delta(self.status.distance_m, base.distance_m)
+        duration_s = stat("elapsed_s", self.status.elapsed_s)
+        distance_m = stat("distance_m", self.status.distance_m)
         avg_kmh = round(distance_m / duration_s * 3.6, 2) if duration_s and distance_m else None
         return {
             "duration_s": duration_s,
             "distance_m": distance_m,
-            "steps": delta(self.status.steps, base.steps),
+            "steps": stat("steps", self.status.steps),
             "avg_speed_kmh": avg_kmh,
             "calories_kcal": round(self.calories.total_kcal, 1),
             "weight_kg_used": self.calories.weight_kg,
@@ -375,6 +384,16 @@ class Z1Treadmill:
     def _on_treadmill_data(self, _char, data: bytearray) -> None:
         prev = self.status
         self.status = p.parse_treadmill_data(bytes(data))
+        # pad counter reset (Stop finalizes the pad session): fold the final
+        # values into the session offsets so display totals don't zero out
+        if (
+            prev.elapsed_s is not None
+            and self.status.elapsed_s is not None
+            and self.status.elapsed_s < prev.elapsed_s
+        ):
+            self._stat_offsets["elapsed_s"] += prev.elapsed_s
+            self._stat_offsets["distance_m"] += prev.distance_m or 0
+            self._stat_offsets["steps"] += prev.steps or 0
         # belt state is derived from the pad (the master): it may have been
         # started/stopped by the physical remote between our commands
         self.belt_running = bool(self.status.speed_kmh and self.status.speed_kmh > 0)

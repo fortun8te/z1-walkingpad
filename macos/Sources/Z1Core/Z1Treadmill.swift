@@ -110,7 +110,11 @@ public actor Z1Treadmill {
     private var notifyPump: Task<Void, Never>?
 
     private var telemetry = Z1Protocol.TreadmillData()
-    private var baseline: Z1Protocol.TreadmillData?
+    // Session stats use signed offsets against the pad's counters, not a
+    // fixed baseline: the pad RESETS its counters on Stop, so a baseline
+    // would invalidate mid-session. display value = pad counter + offset.
+    private var statOffsets = (elapsed: 0, distance: 0, steps: 0)
+    private var sessionStarted = false
     private var calorieTracker = CalorieTracker()
     private var calorieStateRestored = false
     private var lastTargetSpeed: Double?
@@ -286,7 +290,8 @@ public actor Z1Treadmill {
     private func resetConnectionState() {
         unlocked = false
         hasControl = false
-        baseline = nil
+        sessionStarted = false
+        statOffsets = (elapsed: 0, distance: 0, steps: 0)
         lastTargetSpeed = nil
         telemetry = Z1Protocol.TreadmillData()
         calorieStateRestored = false
@@ -304,18 +309,19 @@ public actor Z1Treadmill {
             try await controlCommand(Data([Z1Constants.opStartOrResume]), tunnelOp: 0x07)
         }
         // Resume the same session after a brief stop; reset after the
-        // cooldown. Pad counters are cumulative, so the baseline from the
-        // original start still yields correct deltas on resume.
-        let resuming = baseline != nil
+        // cooldown. Offsets (not a baseline) survive the pad's counter
+        // reset on Stop, so resumed sessions keep correct totals.
+        let resuming = sessionStarted
             && lastStopAt.map { ContinuousClock.now - $0 <= sessionCooldown } == true
         if !resuming {
-            baseline = Z1Protocol.TreadmillData(
-                distanceM: telemetry.distanceM,
-                elapsedS: telemetry.elapsedS,
-                steps: telemetry.steps
+            statOffsets = (
+                elapsed: -(telemetry.elapsedS ?? 0),
+                distance: -(telemetry.distanceM ?? 0),
+                steps: -(telemetry.steps ?? 0)
             )
             calorieTracker.reset()
         }
+        sessionStarted = true
         lastStopAt = nil
         lastTargetSpeed = nil // belt restarts at minimum speed
         mutate { $0.beltRunning = true }
@@ -414,12 +420,11 @@ public actor Z1Treadmill {
         mutate { $0.properties[10] = value }
     }
 
-    /// Metrics since the last start(): duration, distance, steps, calories.
+    /// Metrics for the current logical session (survives pad counter resets).
     public func sessionSummary() -> SessionSummary {
-        let base = baseline
-        let durationS = (telemetry.elapsedS ?? 0) - (base?.elapsedS ?? 0)
-        let distanceM = (telemetry.distanceM ?? 0) - (base?.distanceM ?? 0)
-        let steps = (telemetry.steps ?? 0) - (base?.steps ?? 0)
+        let durationS = max(0, (telemetry.elapsedS ?? 0) + statOffsets.elapsed)
+        let distanceM = max(0, (telemetry.distanceM ?? 0) + statOffsets.distance)
+        let steps = max(0, (telemetry.steps ?? 0) + statOffsets.steps)
         let avg: Double = (durationS > 0 && distanceM > 0)
             ? (Double(distanceM) / Double(durationS) * 3.6 * 100).rounded() / 100
             : 0
@@ -474,6 +479,16 @@ public actor Z1Treadmill {
     private func handleTelemetry(_ data: Data) {
         let prev = telemetry
         telemetry = Z1Protocol.parseTreadmillData(data)
+        // pad counter reset (Stop finalizes the pad session): fold the final
+        // values into the session offsets so display totals don't zero out
+        if let prevElapsed = prev.elapsedS,
+           let curElapsed = telemetry.elapsedS,
+           curElapsed < prevElapsed
+        {
+            statOffsets.elapsed += prevElapsed
+            statOffsets.distance += prev.distanceM ?? 0
+            statOffsets.steps += prev.steps ?? 0
+        }
         if !calorieStateRestored {
             calorieStateRestored = true
             restoreCalorieState()
@@ -529,9 +544,9 @@ public actor Z1Treadmill {
         // belt state is derived from the pad (the master): it may have been
         // started/stopped by the physical remote between our commands
         s.beltRunning = (telemetry.speedKmh ?? 0) > 0
-        s.distanceM = max(0, (telemetry.distanceM ?? 0) - (baseline?.distanceM ?? 0))
-        s.elapsedS = max(0, (telemetry.elapsedS ?? 0) - (baseline?.elapsedS ?? 0))
-        s.steps = max(0, (telemetry.steps ?? 0) - (baseline?.steps ?? 0))
+        s.distanceM = max(0, (telemetry.distanceM ?? 0) + statOffsets.distance)
+        s.elapsedS = max(0, (telemetry.elapsedS ?? 0) + statOffsets.elapsed)
+        s.steps = max(0, (telemetry.steps ?? 0) + statOffsets.steps)
         s.caloriesKcal = calorieTracker.totalKcal
         s.hasTelemetry = true
         status = s
