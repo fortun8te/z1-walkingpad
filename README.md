@@ -1,71 +1,54 @@
 # Z1 WalkingPad
 
-Control a KingSmith WalkingPad Z1 under-desk treadmill from a Mac over Bluetooth LE — start/stop, speed control, live distance/steps/calories. Two independent frontends share one protocol:
+**Control a KingSmith WalkingPad Z1 treadmill from your Mac — menu-bar app, CLI, or AI assistant.** Reverse-engineered BLE protocol, fully documented.
 
-- **macOS menu-bar app** (`macos/`) — a native SwiftUI app living in your menu bar, for daily driving
-- **MCP server + CLI + Python library** (`src/`) — for AI assistants (Claude, Kimi, …), scripting, and automation
+![Platform](https://img.shields.io/badge/platform-macOS-blue)
+![Swift](https://img.shields.io/badge/swift-6-orange)
+![Python](https://img.shields.io/badge/python-%E2%89%A53.10-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
 
-Built specifically for the Z1 (advertises as `KS-HD-Z1D`, firmware V0.0.6), but the protocol likely covers other `KS-HD-*` KingSmith devices.
+The WalkingPad Z1 (`KS-HD-Z1D`, firmware V0.0.6) speaks standard Bluetooth FTMS — but locks it behind a vendor unlock handshake that stops every generic client cold. This project cracked that gate and ships two independent, production-ready implementations around it:
 
-## The two frontends
+- 🖥️ **macOS menu-bar app** — native SwiftUI, lives in your menu bar, Apple-clean UI
+- 🤖 **MCP server + CLI + Python library** — drive the treadmill from AI assistants (Claude, Kimi, …) or scripts
 
-| | macOS menu-bar app | MCP server / CLI / Python lib |
-|---|---|---|
-| Purpose | Manual daily control | AI-assistant control (`treadmill_start`, …) and scripts |
-| Code | Swift, CoreBluetooth (`macos/`) | Python, bleak (`src/z1_walkingpad_mcp/`) |
-| Install | `cd macos && bash build-app.sh --install` | `uv pip install -e ".[mcp]"` |
-| Units | Imperial/metric setting (default Imperial) | km/h + kg internally; `Z1_WEIGHT_KG` env |
-| Session log | in-app summary | JSON files in `~/.z1-walkingpad/` (or `Z1_SESSIONS_DIR`) |
-| Settings UI | units, body weight, speed step | env vars |
+Everything is documented well enough to build your own client in any language: see the [protocol quick reference](#quick-reference-build-your-own-cheat-sheet).
 
-Both talk to the pad directly and independently — neither needs the other. **Only one BLE connection at a time**: quit the app (or stop the MCP server) before using the other.
+## Features
 
-## Behavior nuances (what to expect)
+- ▶️ Start / stop / pause, set speed, ±nudge steppers (1.6–6.4 km/h range)
+- 📊 Live telemetry: speed, distance, elapsed time, **steps** (KingSmith extension)
+- 🔥 Calorie estimate via the ACSM walking metabolic equation (research-backed; ±10–15%)
+- 🧠 The pad is the master — app reflects reality even when you use the physical remote
+- 🔁 Sessions resume within 10 minutes; calories persist across reconnects (gap-credited)
+- 😴 Exit stops the belt and puts the pad in standby
+- 🔋 Zero measurable battery impact (0.0% CPU, 0.0 power score)
+- 🇺🇸 Imperial/metric units, synced to the pad's own display
+- 📝 Session history as JSON; Apple Health bridge via iCloud + iOS Shortcut
 
-- **The pad is the master.** Belt state follows the treadmill itself, not our commands: start it with the physical remote and the app shows Stop + live speed in the menu bar anyway. State comes from three sources — telemetry speed, machine-status events, and our commands.
-- **Start on a moving belt is a no-op** (the pad refuses it) — so `start()` skips the command when the belt is already moving.
-- **Sessions resume within 10 minutes.** Stop → Start inside 10 min keeps accumulating calories/distance/time/steps; after that, a fresh session starts. (Speed still comes back at minimum — that's the pad, not us.)
-- **Calories persist across reconnects.** Integration is client-side but saved every second; reconnect while the belt is still moving and the count continues — including an estimate for the disconnected gap.
-- **Pad counters reset on Stop** (the pad finalizes its session) but persist across BLE connections while running — that's why distance/steps "come back" on reconnect.
-- **Exit stops the belt and sleeps the pad** (standby mode), then quits — never hangs more than 3 s.
-- **Battery:** unmeasurable. The app idles at 0.0% CPU / 0.0 power-impact score; BLE at one small packet per second is designed for coin-cell devices.
-- **One user at a time:** the pad accepts a single BLE connection — if Connect spins forever, something else (phone app, the other frontend) is holding it.
-
-## Usage
+## Quick start
 
 ### macOS menu-bar app
 
 ```bash
-cd macos && bash build-app.sh --install   # builds + ad-hoc signs Z1WalkingPad.app, copies to /Applications
+git clone https://github.com/slandau3/z1-walkingpad-mcp.git
+cd z1-walkingpad-mcp/macos
+bash build-app.sh --install    # builds + signs Z1WalkingPad.app → /Applications
 ```
 
-Click the `figure.walk` icon in the menu bar → Connect. Big speed readout with −/+ steppers, Start/Stop, live elapsed/distance/steps/kcal grid, last-session line. Settings (expandable): Imperial/Metric (also syncs the pad's own LED units), body weight, speed per −/+ tap. Exit stops the belt and sleeps the pad.
+Launch it, click the `figure.walk` menu-bar icon → **Connect**. Requires only the macOS Command Line Tools — no Xcode, no Python.
 
-Details: `macos/README.md`.
-
-### Python install + CLI
+### MCP server / CLI (Python)
 
 ```bash
 uv venv --python 3.12 .venv
-uv pip install --python .venv/bin/python -e ".[dev,mcp]"   # drop ",mcp" for core+CLI only
+uv pip install --python .venv/bin/python -e ".[dev,mcp]"
 
-.venv/bin/python -m z1_walkingpad_mcp status                    # connect, unlock, dump properties
-.venv/bin/python -m z1_walkingpad_mcp start --speed 2.5         # start belt, set 2.5 km/h
-.venv/bin/python -m z1_walkingpad_mcp start --duration 30       # auto-stop after 30 s
-.venv/bin/python -m z1_walkingpad_mcp up --delta 0.2            # nudge speed up (default 0.1)
-.venv/bin/python -m z1_walkingpad_mcp down                      # nudge speed down
-.venv/bin/python -m z1_walkingpad_mcp stop                      # stop + session summary
-
-.venv/bin/python -m pytest tests/    # unit tests, no BLE needed
+.venv/bin/python -m z1_walkingpad_mcp start --speed 2.5    # CLI: start at 2.5 km/h
+.venv/bin/python -m z1_walkingpad_mcp.server               # MCP: stdio server
 ```
 
-### MCP server (for AI assistants)
-
-```bash
-.venv/bin/python -m z1_walkingpad_mcp.server    # stdio transport
-```
-
-Tools: `treadmill_status`, `treadmill_start`, `treadmill_set_speed`, `treadmill_speed_up`, `treadmill_speed_down`, `treadmill_pause`, `treadmill_stop`. Example client config:
+MCP client config:
 
 ```json
 {
@@ -79,7 +62,60 @@ Tools: `treadmill_status`, `treadmill_start`, `treadmill_set_speed`, `treadmill_
 }
 ```
 
-`treadmill_stop` returns the session summary (duration, distance, steps, avg speed, kcal) and writes it to `~/.z1-walkingpad/` (`sessions.jsonl` + per-session JSON; override with `Z1_SESSIONS_DIR`, e.g. an iCloud Drive folder — see `docs/apple-health.md`).
+Tools: `treadmill_status` · `treadmill_start` · `treadmill_set_speed` · `treadmill_speed_up` · `treadmill_speed_down` · `treadmill_pause` · `treadmill_stop`
+
+## Contents
+
+- [The two frontends](#the-two-frontends)
+- [Behavior nuances](#behavior-nuances-what-to-expect)
+- [Usage](#usage)
+- [Protocol](#how-it-works-the-protocol) — [quick reference](#quick-reference-build-your-own-cheat-sheet)
+- [Health metrics & Apple Health](#health-metrics)
+- [Development](#development)
+- [Safety model](#safety-model)
+
+## The two frontends
+
+| | macOS menu-bar app | MCP server / CLI / Python lib |
+|---|---|---|
+| Purpose | Manual daily control | AI-assistant control and scripts |
+| Code | Swift, CoreBluetooth (`macos/`) | Python, bleak (`src/z1_walkingpad_mcp/`) |
+| Install | `bash build-app.sh --install` | `uv pip install -e ".[mcp]"` |
+| Units | Imperial/metric setting (default Imperial) | km/h + kg; `Z1_WEIGHT_KG` env |
+| Session log | in-app summary | JSON in `~/.z1-walkingpad/` (or `Z1_SESSIONS_DIR`) |
+| Settings | units, body weight, speed step | env vars |
+
+Both talk to the pad directly and independently — neither needs the other. **Only one BLE connection at a time**: quit the app (or stop the MCP server) before using the other.
+
+## Behavior nuances (what to expect)
+
+- **The pad is the master.** Belt state follows the treadmill itself, not our commands: start it with the physical remote and the app shows Stop + live speed anyway. State comes from telemetry speed, machine-status events, and our commands.
+- **Start on a moving belt is a no-op** (the pad refuses it) — `start()` skips the command when the belt is already moving.
+- **Sessions resume within 10 minutes.** Stop → Start inside 10 min keeps accumulating calories/distance/time/steps; later, a fresh session starts. (Speed comes back at minimum — that's the pad, not us.)
+- **Calories persist across reconnects.** Saved every second; reconnect while the belt is moving and the count continues, with the disconnected gap estimated.
+- **Pad counters reset on Stop** (the pad finalizes its session) but persist across connections while running — that's why distance/steps "come back" on reconnect.
+- **Exit stops the belt and sleeps the pad**, then quits — never hangs more than 3 s.
+- **Battery:** unmeasurable. 0.0% CPU / 0.0 power-impact; BLE at one small packet per second is designed for coin-cell devices.
+- **One user at a time:** the pad accepts a single BLE connection — if Connect spins forever, something else (phone app, the other frontend) is holding it.
+
+## Usage
+
+### macOS menu-bar app
+
+Click the menu-bar icon → Connect. Big speed readout with −/+ steppers, Start/Stop, live elapsed/distance/steps/kcal grid, last-session line. Settings (expandable): Imperial/Metric (also syncs the pad's own LED units), body weight, speed per −/+ tap. **Exit** stops the belt and sleeps the pad. Details: `macos/README.md`.
+
+### CLI
+
+```bash
+.venv/bin/python -m z1_walkingpad_mcp status                    # connect, unlock, dump properties
+.venv/bin/python -m z1_walkingpad_mcp start --speed 2.5         # start belt, set 2.5 km/h
+.venv/bin/python -m z1_walkingpad_mcp start --duration 30       # auto-stop after 30 s
+.venv/bin/python -m z1_walkingpad_mcp up --delta 0.2            # nudge speed up (default 0.1)
+.venv/bin/python -m z1_walkingpad_mcp down                      # nudge speed down
+.venv/bin/python -m z1_walkingpad_mcp stop                      # stop + session summary
+```
+
+`treadmill_stop` / CLI `stop` returns the session summary (duration, distance, steps, avg speed, kcal) and writes it to `~/.z1-walkingpad/` (`sessions.jsonl` + per-session JSON; override with `Z1_SESSIONS_DIR`).
 
 ## How it works (the protocol)
 
@@ -163,14 +199,14 @@ Vendor channel (`…d00fdf7` write / `…b00fdf7` notify, frame `[cmd0, cmd1, le
 |---|---|---|
 | Unlock | `71 00 05 01 <LE32(name[-4:])+1> CC` | `71 80` |
 | SYS_INFO | `71 01 08 <unix LE32> <uid LE32> CC` | `71 81` (proto u16, model u16, caps u32) |
-| Property read (all / one) | `72 00 01 <id|00> CC` | `72 80` — 4-byte records `[id, err, lo, hi]` |
+| Property read (all / one) | `72 00 01 <id\|00> CC` | `72 80` — 4-byte records `[id, err, lo, hi]` |
 | Property write | `72 01 03 <id> <lo> <hi> CC` | `72 81` — `data[1]=0` OK |
 | Func/method info | `75 00 00 75` | `75 80` |
 | *(unsolicited)* | — | `72 50` property push (3-byte records), `73 50` exercise record, `73 51` fault |
 
-Vendor control tunnel (alternative to FTMS control point; used as fallback by some clients): `77 01 <len> <op> <params…> CC` → reply `77 81`, `data[0]=op`, status `data[1]` (0 or 0x81 = OK). Ops mirror FTMS: start `77 01 01 07 7F`, stop `77 01 02 08 01 82`, speed `77 01 03 02 <u16 LE km/h×100> CC`.
+Vendor control tunnel (alternative to FTMS control point): `77 01 <len> <op> <params…> CC` → reply `77 81`, `data[0]=op`, status `data[1]` (0 or 0x81 = OK). Ops mirror FTMS: start `77 01 01 07 7F`, stop `77 01 02 08 01 82`, speed `77 01 03 02 <u16 LE km/h×100> CC`.
 
-Machine status (`0x2AD9` sibling `0x2ADA`, notify): `04` started, `02` user stop/pause, `01` safety-key stop, `05` speed changed, `FF` control lost.
+Machine status (`0x2ADA`, notify): `04` started, `02` user stop/pause, `01` safety-key stop, `05` speed changed, `FF` control lost.
 
 Telemetry flags (`0x2ACD`, u16 LE then fields in order): bit0 *clear* → speed u16 (km/h×100) · bit1 avg speed u16 · bit2 distance u24 m · bit3 incline+ramp s16×2 · bit4 ±elevation u16×2 · bit5 pace u8 · bit6 avg pace u8 · bit7 energy u16+u16+u8 · bit8 HR u8 · bit9 MET u8 · bit10 elapsed u16 s · bit11 remaining u16 s · **bit13 steps u16 (KingSmith)**. Z1 sends flags `0x2404` + speed.
 
@@ -186,9 +222,9 @@ FTMS treadmill data `0x2ACD`: flags u16 LE, fields in flag order. The Z1 sends d
 - **Display/screen control** — not exposed over BLE at all; the LED panel cycling is RF-remote only.
 - **Incline** — fixed hardware.
 
-### Calories (computed locally)
+## Health metrics
 
-The **ACSM walking metabolic equation** (exercise-physiology standard, level grade):
+Calories use the **ACSM walking metabolic equation** (exercise-physiology standard, level grade):
 
 ```
 VO2 (ml/kg/min) = 0.1 × speed(m/min) + 3.5
@@ -197,11 +233,22 @@ kcal/min        = VO2 × weight_kg / 200
 
 Continuous in speed; chosen over the Compendium MET table because research shows fixed MET buckets misclassify intensity at slow walking speeds (PubMed 35876127). Expect ±10–15% real-world error. Weight: `Z1_WEIGHT_KG` (Python) or the in-app setting (macOS).
 
-## How this was found
+**Apple Health:** HealthKit is unavailable on macOS (verified: `HKHealthStore.isHealthDataAvailable()` → `false`), so sessions reach Health via the iPhone: point `Z1_SESSIONS_DIR` at an iCloud Drive folder and use the iOS Shortcut recipe in `docs/apple-health.md`.
 
-Static reverse engineering under constraints (no official-app install, no extra hardware): blutter disassembly of the KS Fit Android app, upstream issue archaeology, and the breakthrough — the [duttke.de Web Bluetooth implementation](https://www.duttke.de/en/walkingpad/), whose unlock variant is the one firmware V0.0.6 accepts. Full story: **`docs/reverse-engineering.md`**. Byte-level spec: **`docs/protocol.md`**.
+## Development
 
-## Repository layout
+```bash
+# Python: tests + typecheck-friendly layout (src/)
+.venv/bin/python -m pytest tests/          # 16 unit tests, no BLE needed
+
+# Swift: build + framework-free test suite (CLT ships no XCTest)
+cd macos && swift build && swift run z1tests   # 54 checks
+
+# Hardware smoke test (no belt movement)
+cd macos && swift run z1smoke
+```
+
+Repository layout:
 
 ```
 src/z1_walkingpad_mcp/
@@ -214,8 +261,12 @@ src/z1_walkingpad_mcp/
 macos/                         Frontend: native menu-bar app (Swift, independent build)
 docs/                          protocol.md · reverse-engineering.md · apple-health.md · strava.md
 scripts/                       The BLE reverse-engineering record (incl. the winning replay)
-tests/                         Python unit tests (no BLE needed)
+tests/                         Python unit tests
 ```
+
+## How this was found
+
+Static reverse engineering under constraints (no official-app install, no extra hardware): blutter disassembly of the KS Fit Android app, upstream issue archaeology, and the breakthrough — the [duttke.de Web Bluetooth implementation](https://www.duttke.de/en/walkingpad/), whose unlock variant is the one firmware V0.0.6 accepts. Full story: **`docs/reverse-engineering.md`**. Byte-level spec: **`docs/protocol.md`**.
 
 ## Safety model
 
@@ -226,3 +277,13 @@ tests/                         Python unit tests (no BLE needed)
 | Start / Stop / Set Speed / Sleep | Yes | Only ever sent deliberately (Exit sends stop + sleep) |
 
 The pad allows one BLE connection at a time; close other controllers before connecting.
+
+## Acknowledgments
+
+- [duttke.de/en/walkingpad](https://www.duttke.de/en/walkingpad/) — the Web Bluetooth implementation whose unlock frame variant cracked the gate
+- [mcdax/walkingpad-controller](https://github.com/mcdax/walkingpad-controller) — FTMS/WiLink library and KS Fit protocol docs
+- [worawit/blutter](https://github.com/worawit/blutter) — Flutter AOT disassembler used on the KS Fit APKs
+
+## License
+
+MIT — see [LICENSE](LICENSE).
