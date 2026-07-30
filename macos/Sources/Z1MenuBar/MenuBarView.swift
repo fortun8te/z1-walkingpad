@@ -174,10 +174,10 @@ struct MenuBarView: View {
                 }
 
                 HStack {
-                    Text("Speed step")
+                    Text("Speed per −/+ tap")
                         .font(.callout)
                     Spacer()
-                    Picker("Speed step", selection: $viewModel.speedStep) {
+                    Picker("Speed per −/+ tap", selection: $viewModel.speedStep) {
                         Text("0.1").tag(0.1)
                         Text("0.2").tag(0.2)
                         Text("0.5").tag(0.5)
@@ -185,6 +185,8 @@ struct MenuBarView: View {
                     .pickerStyle(.segmented)
                     .labelsHidden()
                     .frame(width: 150)
+                    Text(viewModel.speedUnitLabel)
+                        .foregroundStyle(.secondary)
                 }
             }
             .padding(.top, 6)
