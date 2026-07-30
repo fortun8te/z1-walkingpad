@@ -46,6 +46,19 @@ class Z1Error(RuntimeError):
     pass
 
 
+class ControlRefused(Z1Error):
+    """Control point answered with a non-success result code."""
+
+    def __init__(self, op: int, result: int) -> None:
+        self.op = op
+        self.result = result
+        super().__init__(f"control point refused op {op:#04x}: {CP_RESULT.get(result, f'code {result}')}")
+
+
+# vendor control tunnel opcodes mirror FTMS (see docs/protocol.md)
+TUNNEL_FRAME = lambda op, params: p.build_frame(0x77, 0x01, bytes([op]) + params)
+
+
 class Z1Treadmill:
     def __init__(self, device_name: str | None = None) -> None:
         self.device_name = device_name
@@ -223,8 +236,37 @@ class Z1Treadmill:
         if len(resp) >= 3 and resp[0] == 0x80:
             result = resp[2]
             if result != 1:
-                raise Z1Error(f"control point refused op {resp[1]:#04x}: {CP_RESULT.get(result, f'code {result}')}")
+                if result == 5:
+                    self._has_control = False  # re-request control next time
+                raise ControlRefused(resp[1], result)
         return resp
+
+    async def _vendor_control(self, op: int, params: bytes = b"") -> None:
+        """0x77 vendor control tunnel — fallback when the control point
+        refuses (the pad sometimes transiently answers result 4 after a
+        session; the tunnel is the documented alternate path)."""
+        resp = await self._vendor_roundtrip(
+            TUNNEL_FRAME(op, params),
+            lambda f: f[0] == 0x77 and f[1] == 0x81 and len(f[2]) >= 2 and f[2][0] == op,
+        )
+        if resp[2][1] not in (0, 0x81):
+            raise Z1Error(f"vendor tunnel refused op {op:#04x}: status {resp[2][1]:#04x}")
+
+    async def _control_command(self, cp_bytes: bytes, tunnel_op: int, tunnel_params: bytes = b"") -> None:
+        """Send a control command, retrying once after a transient refusal
+        (result 4), then falling back to the 0x77 vendor tunnel."""
+        try:
+            await self._cp_command(cp_bytes)
+        except ControlRefused as e:
+            if e.result != 4:
+                raise
+            await asyncio.sleep(3)
+            try:
+                await self._cp_command(cp_bytes)
+            except ControlRefused as e2:
+                if e2.result != 4:
+                    raise
+                await self._vendor_control(tunnel_op, tunnel_params)
 
     async def _ensure_control(self) -> None:
         if not self._has_control:
@@ -239,7 +281,7 @@ class Z1Treadmill:
         # the pad refuses START (result 4) when the belt is already moving —
         # e.g. started by the physical remote. Nothing to do in that case.
         if not self.belt_running:
-            await self._cp_command(bytes([c.OP_START_OR_RESUME]))
+            await self._control_command(bytes([c.OP_START_OR_RESUME]), 0x07)
         # Resume the same session after a brief stop; reset after the
         # cooldown. Pad counters are cumulative, so the original baseline
         # still yields correct deltas on resume.
@@ -262,7 +304,7 @@ class Z1Treadmill:
     async def stop(self) -> dict:
         self._require_unlocked()
         await self._ensure_control()
-        await self._cp_command(bytes([c.OP_STOP_OR_PAUSE, c.STOP_PARAM_STOP]))
+        await self._control_command(bytes([c.OP_STOP_OR_PAUSE, c.STOP_PARAM_STOP]), 0x08, b"\x01")
         self._last_stop_at = time.monotonic()
         self._session_paused = False
         return self.session_summary()
@@ -270,7 +312,7 @@ class Z1Treadmill:
     async def pause(self) -> None:
         self._require_unlocked()
         await self._ensure_control()
-        await self._cp_command(bytes([c.OP_STOP_OR_PAUSE, c.STOP_PARAM_PAUSE]))
+        await self._control_command(bytes([c.OP_STOP_OR_PAUSE, c.STOP_PARAM_PAUSE]), 0x08, b"\x02")
         self._session_paused = True
 
     async def set_speed(self, kmh: float) -> None:
@@ -279,7 +321,7 @@ class Z1Treadmill:
             raise Z1Error(f"speed {kmh} out of range {self.min_speed}-{self.max_speed} km/h")
         await self._ensure_control()
         value = round(kmh * 100).to_bytes(2, "little")
-        await self._cp_command(bytes([c.OP_SET_TARGET_SPEED]) + value)
+        await self._control_command(bytes([c.OP_SET_TARGET_SPEED]) + value, 0x02, value)
         self._last_target_speed = kmh
 
     async def speed_up(self, delta_kmh: float = 0.1) -> float:

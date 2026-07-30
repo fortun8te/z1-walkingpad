@@ -13,7 +13,7 @@ struct MenuBarView: View {
             if let summary = viewModel.lastSummary {
                 summaryLine(summary)
             }
-            if let error = viewModel.status.errorMessage {
+            if let error = viewModel.commandError ?? viewModel.status.errorMessage {
                 Text(error)
                     .font(.caption)
                     .foregroundStyle(.red)

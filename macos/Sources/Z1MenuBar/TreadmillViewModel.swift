@@ -11,6 +11,9 @@ final class TreadmillViewModel: ObservableObject {
     @Published private(set) var status = Z1Treadmill.Status()
     @Published private(set) var busy = false
     @Published private(set) var lastSummary: SessionSummary?
+    /// Last failed command, shown until the next success. Kept separate
+    /// from `status` because the status stream replaces it every second.
+    @Published private(set) var commandError: String?
 
     // MARK: - persisted settings (UserDefaults — the same store @AppStorage uses)
 
@@ -170,8 +173,11 @@ final class TreadmillViewModel: ObservableObject {
             defer { busy = false }
             do {
                 try await op()
+                commandError = nil
             } catch {
-                // surfaced via status.errorMessage for connect; log the rest
+                // surface command failures in the popover — a silent retry
+                // loop is how "I hit Start and nothing happens" happens
+                commandError = error.localizedDescription
                 NSLog("Z1MenuBar: \(error.localizedDescription)")
             }
         }

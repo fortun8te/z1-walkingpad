@@ -301,7 +301,7 @@ public actor Z1Treadmill {
         // the pad refuses START (result 4) when the belt is already moving —
         // e.g. started by the physical remote. Nothing to do in that case.
         if (telemetry.speedKmh ?? 0) <= 0 {
-            _ = try await cpCommand(Data([Z1Constants.opStartOrResume]))
+            try await controlCommand(Data([Z1Constants.opStartOrResume]), tunnelOp: 0x07)
         }
         // Resume the same session after a brief stop; reset after the
         // cooldown. Pad counters are cumulative, so the baseline from the
@@ -325,7 +325,9 @@ public actor Z1Treadmill {
     public func stop() async throws -> SessionSummary {
         try requireReady()
         try await ensureControl()
-        _ = try await cpCommand(Data([Z1Constants.opStopOrPause, Z1Constants.stopParamStop]))
+        try await controlCommand(
+            Data([Z1Constants.opStopOrPause, Z1Constants.stopParamStop]), tunnelOp: 0x08, tunnelParams: Data([0x01])
+        )
         lastStopAt = .now
         mutate { $0.beltRunning = false }
         return sessionSummary()
@@ -334,7 +336,9 @@ public actor Z1Treadmill {
     public func pause() async throws {
         try requireReady()
         try await ensureControl()
-        _ = try await cpCommand(Data([Z1Constants.opStopOrPause, Z1Constants.stopParamPause]))
+        try await controlCommand(
+            Data([Z1Constants.opStopOrPause, Z1Constants.stopParamPause]), tunnelOp: 0x08, tunnelParams: Data([0x02])
+        )
         mutate { $0.beltRunning = false }
     }
 
@@ -345,11 +349,8 @@ public actor Z1Treadmill {
         }
         try await ensureControl()
         let value = UInt16((kmh * 100).rounded())
-        _ = try await cpCommand(Data([
-            Z1Constants.opSetTargetSpeed,
-            UInt8(value & 0xFF),
-            UInt8(value >> 8),
-        ]))
+        let params = Data([UInt8(value & 0xFF), UInt8(value >> 8)])
+        try await controlCommand(Data([Z1Constants.opSetTargetSpeed]) + params, tunnelOp: 0x02, tunnelParams: params)
         lastTargetSpeed = kmh
     }
 
@@ -613,6 +614,35 @@ public actor Z1Treadmill {
             }
         }
         return resp
+    }
+
+    /// 0x77 vendor control tunnel — fallback when the control point refuses
+    /// (the pad sometimes transiently answers result 4 after a session; the
+    /// tunnel is the documented alternate path, see docs/protocol.md).
+    private func vendorControl(_ op: UInt8, params: Data = Data()) async throws {
+        let reply = try await vendorRoundtrip(
+            Z1Protocol.buildFrame(cmd0: 0x77, cmd1: 0x01, data: Data([op]) + params),
+            pred: { $0.cmd0 == 0x77 && $0.cmd1 == 0x81 && $0.data.first == op }
+        )
+        let status = reply.data.count >= 2 ? reply.data[reply.data.startIndex + 1] : 0xFF
+        guard status == 0 || status == 0x81 else {
+            throw Z1Error.controlRefused(op: op, result: status)
+        }
+    }
+
+    /// Send a control command, retrying once after a transient refusal
+    /// (result 4), then falling back to the 0x77 vendor tunnel.
+    private func controlCommand(_ cpBytes: Data, tunnelOp: UInt8, tunnelParams: Data = Data()) async throws {
+        do {
+            _ = try await cpCommand(cpBytes)
+        } catch Z1Error.controlRefused(_, 4) {
+            try await Task.sleep(for: .seconds(3))
+            do {
+                _ = try await cpCommand(cpBytes)
+            } catch Z1Error.controlRefused(_, 4) {
+                try await vendorControl(tunnelOp, params: tunnelParams)
+            }
+        }
     }
 
     private func timeoutCPWaiter(_ id: UUID) {
