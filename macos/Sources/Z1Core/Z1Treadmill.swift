@@ -1,0 +1,563 @@
+import CoreBluetooth
+import Foundation
+
+public enum Z1Error: Error, Equatable, LocalizedError {
+    case notFound
+    case notConnected
+    case unlockTimeout
+    case vendorTimeout
+    case controlPointTimeout
+    case controlRefused(op: UInt8, result: UInt8)
+    case speedOutOfRange(Double)
+
+    public var errorDescription: String? {
+        switch self {
+        case .notFound:
+            "Z1 treadmill not found (is it on and not connected to another app?)"
+        case .notConnected:
+            "not connected/unlocked — call connect() first"
+        case .unlockTimeout:
+            "unlock timed out — pad did not answer the supplement handshake"
+        case .vendorTimeout:
+            "vendor frame response timed out"
+        case .controlPointTimeout:
+            "control point indication timed out"
+        case .controlRefused(let op, let result):
+            "control point refused op \(String(format: "%02x", op)): \(Self.cpResultName(result))"
+        case .speedOutOfRange(let kmh):
+            "speed \(kmh) out of range"
+        }
+    }
+
+    static func cpResultName(_ result: UInt8) -> String {
+        switch result {
+        case 1: "success"
+        case 2: "op not supported"
+        case 3: "invalid parameter"
+        case 4: "failed"
+        case 5: "control not permitted"
+        default: "code \(result)"
+        }
+    }
+}
+
+public struct SessionSummary: Sendable, Equatable {
+    public var durationS: Int
+    public var distanceM: Int
+    public var steps: Int
+    public var avgSpeedKmh: Double
+    public var caloriesKcal: Double
+    public var weightKgUsed: Double
+
+    public init(durationS: Int, distanceM: Int, steps: Int, avgSpeedKmh: Double, caloriesKcal: Double, weightKgUsed: Double) {
+        self.durationS = durationS
+        self.distanceM = distanceM
+        self.steps = steps
+        self.avgSpeedKmh = avgSpeedKmh
+        self.caloriesKcal = caloriesKcal
+        self.weightKgUsed = weightKgUsed
+    }
+}
+
+/// Async BLE client for the KingSmith WalkingPad Z1.
+///
+/// Protocol recap (see docs/protocol.md): the pad ignores every FTMS control
+/// point command and suppresses all notifications until the supplement-channel
+/// unlock frame lands. Order:
+///
+/// 1. subscribe supplement notify characteristic
+/// 2. send unlock frame (write WITHOUT response)
+/// 3. await 71 80 -> send SYS_INFO -> SETTING_GET
+/// 4. FTMS works from here on: request control -> start/stop/set speed
+///
+/// Mirrors `client.py`.
+public actor Z1Treadmill {
+
+    public enum Phase: String, Sendable {
+        case disconnected
+        case scanning
+        case connecting
+        case ready
+        case error
+    }
+
+    /// Snapshot of everything the UI needs. Speed is the live belt speed;
+    /// distance/elapsed/steps are deltas since the last `start()` (pad
+    /// counters persist across BLE connections).
+    public struct Status: Sendable, Equatable {
+        public var phase: Phase = .disconnected
+        public var deviceName: String?
+        public var beltRunning = false
+        public var speedKmh = 0.0
+        public var distanceM = 0
+        public var elapsedS = 0
+        public var steps = 0
+        public var caloriesKcal = 0.0
+        public var minSpeedKmh = 1.6
+        public var maxSpeedKmh = 6.4
+        public var hasTelemetry = false
+        public var properties: [Int: Int] = [:]
+        public var errorMessage: String?
+
+        public init() {}
+    }
+
+    public private(set) var status = Status()
+    public nonisolated let statusUpdates: AsyncStream<Status>
+    private let statusYield: AsyncStream<Status>.Continuation
+
+    private let transport = BLETransport()
+    private var notifyPump: Task<Void, Never>?
+
+    private var telemetry = Z1Protocol.TreadmillData()
+    private var baseline: Z1Protocol.TreadmillData?
+    private var calorieTracker = CalorieTracker()
+    private var lastTargetSpeed: Double?
+    private var hasControl = false
+    private var unlocked = false
+    private var expectingDisconnect = false
+    private var lastVendorWrite: ContinuousClock.Instant?
+    private var lastControlWrite: ContinuousClock.Instant?
+
+    struct Frame: Sendable {
+        var cmd0: UInt8
+        var cmd1: UInt8
+        var data: Data
+    }
+
+    private struct Waiter<T: Sendable> {
+        let id: UUID
+        let cont: CheckedContinuation<T, Error>
+        var timeout: Task<Void, Never>?
+    }
+
+    private typealias VendorWaiter = (waiter: Waiter<Frame>, pred: @Sendable (Frame) -> Bool)
+    private var vendorWaiters: [VendorWaiter] = []
+    private var cpWaiters: [Waiter<Data>] = []
+
+    public init(weightKg: Double = Z1Metrics.defaultWeightKg) {
+        var cont: AsyncStream<Status>.Continuation!
+        statusUpdates = AsyncStream { cont = $0 }
+        statusYield = cont
+        calorieTracker = CalorieTracker(weightKg: weightKg)
+    }
+
+    private var pumpStarted = false
+
+    /// Deferred out of `init`: actor initializers can't capture `self` in
+    /// escaping closures. Called at the top of `connect()`.
+    private func ensurePumpStarted() {
+        guard !pumpStarted else { return }
+        pumpStarted = true
+        transport.onDisconnect = { [weak self] in
+            guard let self else { return }
+            Task { await self.handleTransportDisconnect() }
+        }
+        notifyPump = Task { [weak self] in
+            guard let self else { return }
+            for await (uuidString, data) in self.transport.notifications {
+                await self.handleNotification(uuidString, data)
+            }
+        }
+    }
+
+    public var deviceName: String? { status.deviceName }
+
+    /// Estimated calories for the current session (since last `start()`).
+    public var caloriesKcal: Double { calorieTracker.totalKcal }
+
+    public func setWeight(_ kg: Double) {
+        guard kg > 0 else { return }
+        calorieTracker.weightKg = kg
+        emitStatus()
+    }
+
+    // MARK: - connection
+
+    public func connect() async throws {
+        guard status.phase == .disconnected || status.phase == .error else { return }
+        ensurePumpStarted()
+        mutate {
+            $0.phase = .scanning
+            $0.errorMessage = nil
+            $0.hasTelemetry = false
+        }
+        do {
+            try await transport.waitPoweredOn()
+            let name = try await transport.scan(
+                namePrefix: Z1Constants.deviceNamePrefix,
+                timeout: Z1Constants.scanTimeout
+            )
+            mutate { $0.phase = .connecting; $0.deviceName = name }
+            try await transport.connect(timeout: Z1Constants.connectTimeout)
+            try await transport.discoverProfile(
+                services: [Z1Constants.fitnessMachineService, Z1Constants.supplementService],
+                characteristics: [
+                    Z1Constants.charSupportedSpeedRange,
+                    Z1Constants.charTreadmillData,
+                    Z1Constants.charControlPoint,
+                    Z1Constants.charSupplementNotify,
+                    Z1Constants.charSupplementWrite,
+                ]
+            )
+
+            // 1. supplement notify FIRST — before any vendor write
+            try await transport.setNotify(Z1Constants.charSupplementNotify, enable: true)
+            // telemetry (informational; stays silent pre-unlock)
+            try? await transport.setNotify(Z1Constants.charTreadmillData, enable: true)
+
+            // 2. unlock — write without response; success arrives as 71 80
+            unlocked = false
+            _ = try await vendorRoundtrip(
+                Z1Protocol.unlockFrame(deviceName: name),
+                pred: { $0.cmd0 == Z1Constants.vopUnlock && $0.cmd1 == 0x80 },
+                timeout: Z1Constants.unlockTimeout
+            )
+            unlocked = true
+
+            // 3. extension init (best-effort: pad still works if these time out)
+            _ = try? await vendorRoundtrip(
+                Z1Protocol.sysInfoFrame(unixTime: UInt32(Date().timeIntervalSince1970)),
+                pred: { $0.cmd0 == Z1Constants.vopUnlock && $0.cmd1 == 0x81 }
+            )
+            if let reply = try? await vendorRoundtrip(
+                Z1Protocol.settingGetFrame(),
+                pred: { $0.cmd0 == Z1Constants.vopProperty && $0.cmd1 == 0x80 }
+            ) {
+                let props = Z1Protocol.parsePropertyRecords(reply.data)
+                mutate { $0.properties = props }
+            }
+
+            // FTMS statics + control point indications
+            if let range = try? await transport.read(Z1Constants.charSupportedSpeedRange), range.count >= 4 {
+                let lo = Int(range[range.startIndex]) | (Int(range[range.startIndex + 1]) << 8)
+                let hi = Int(range[range.startIndex + 2]) | (Int(range[range.startIndex + 3]) << 8)
+                mutate {
+                    $0.minSpeedKmh = Double(lo) / 100
+                    $0.maxSpeedKmh = Double(hi) / 100
+                }
+            }
+            try await transport.setNotify(Z1Constants.charControlPoint, enable: true)
+
+            mutate { $0.phase = .ready }
+        } catch {
+            unlocked = false
+            await transport.disconnect()
+            mutate {
+                $0.phase = .error
+                $0.errorMessage = error.localizedDescription
+            }
+            throw error
+        }
+    }
+
+    public func disconnect() async {
+        if hasControl, unlocked {
+            _ = try? await stop()
+        }
+        expectingDisconnect = true
+        await transport.disconnect()
+        resetConnectionState()
+        mutate { $0.phase = .disconnected }
+    }
+
+    private func handleTransportDisconnect() {
+        if expectingDisconnect {
+            expectingDisconnect = false
+            return
+        }
+        resetConnectionState()
+        failAllWaiters(Z1Error.notConnected)
+        mutate {
+            $0.phase = .disconnected
+            $0.errorMessage = "Connection lost"
+        }
+    }
+
+    private func resetConnectionState() {
+        unlocked = false
+        hasControl = false
+        baseline = nil
+        lastTargetSpeed = nil
+        telemetry = Z1Protocol.TreadmillData()
+        mutate { $0.beltRunning = false }
+    }
+
+    // MARK: - public control API
+
+    public func start() async throws {
+        try requireReady()
+        try await ensureControl()
+        _ = try await cpCommand(Data([Z1Constants.opStartOrResume]))
+        // pad counters are cumulative across connections — snapshot a baseline
+        baseline = Z1Protocol.TreadmillData(
+            distanceM: telemetry.distanceM,
+            elapsedS: telemetry.elapsedS,
+            steps: telemetry.steps
+        )
+        calorieTracker.reset()
+        lastTargetSpeed = nil // belt restarts at minimum speed
+        mutate { $0.beltRunning = true }
+    }
+
+    @discardableResult
+    public func stop() async throws -> SessionSummary {
+        try requireReady()
+        try await ensureControl()
+        _ = try await cpCommand(Data([Z1Constants.opStopOrPause, Z1Constants.stopParamStop]))
+        mutate { $0.beltRunning = false }
+        return sessionSummary()
+    }
+
+    public func pause() async throws {
+        try requireReady()
+        try await ensureControl()
+        _ = try await cpCommand(Data([Z1Constants.opStopOrPause, Z1Constants.stopParamPause]))
+        mutate { $0.beltRunning = false }
+    }
+
+    public func setSpeed(_ kmh: Double) async throws {
+        try requireReady()
+        guard kmh >= status.minSpeedKmh, kmh <= status.maxSpeedKmh else {
+            throw Z1Error.speedOutOfRange(kmh)
+        }
+        try await ensureControl()
+        let value = UInt16((kmh * 100).rounded())
+        _ = try await cpCommand(Data([
+            Z1Constants.opSetTargetSpeed,
+            UInt8(value & 0xFF),
+            UInt8(value >> 8),
+        ]))
+        lastTargetSpeed = kmh
+    }
+
+    /// Nudge speed up; returns the new target.
+    @discardableResult
+    public func speedUp(deltaKmh: Double = 0.1) async throws -> Double {
+        try await nudgeSpeed(deltaKmh)
+    }
+
+    /// Nudge speed down; returns the new target.
+    @discardableResult
+    public func speedDown(deltaKmh: Double = 0.1) async throws -> Double {
+        try await nudgeSpeed(-deltaKmh)
+    }
+
+    private func nudgeSpeed(_ delta: Double) async throws -> Double {
+        // prefer the last commanded target: telemetry lags ~1s, so rapid
+        // successive nudges would otherwise re-read the stale speed
+        let current = lastTargetSpeed ?? telemetry.speedKmh ?? status.minSpeedKmh
+        var target = ((current + delta) * 10).rounded() / 10 // pad steps are 0.1 km/h
+        target = max(status.minSpeedKmh, min(status.maxSpeedKmh, target))
+        try await setSpeed(target)
+        return target
+    }
+
+    /// Metrics since the last start(): duration, distance, steps, calories.
+    public func sessionSummary() -> SessionSummary {
+        let base = baseline
+        let durationS = (telemetry.elapsedS ?? 0) - (base?.elapsedS ?? 0)
+        let distanceM = (telemetry.distanceM ?? 0) - (base?.distanceM ?? 0)
+        let steps = (telemetry.steps ?? 0) - (base?.steps ?? 0)
+        let avg: Double = (durationS > 0 && distanceM > 0)
+            ? (Double(distanceM) / Double(durationS) * 3.6 * 100).rounded() / 100
+            : 0
+        return SessionSummary(
+            durationS: durationS,
+            distanceM: distanceM,
+            steps: steps,
+            avgSpeedKmh: avg,
+            caloriesKcal: (calorieTracker.totalKcal * 10).rounded() / 10,
+            weightKgUsed: calorieTracker.weightKg
+        )
+    }
+
+    // MARK: - telemetry
+
+    private func handleNotification(_ uuidString: String, _ data: Data) {
+        switch uuidString {
+        case Z1Constants.charSupplementNotify.uuidString:
+            guard let parsed = Z1Protocol.parseFrame(data) else { return }
+            let frame = Frame(cmd0: parsed.cmd0, cmd1: parsed.cmd1, data: parsed.data)
+            var matched: [Int] = []
+            for (i, w) in vendorWaiters.enumerated() where w.pred(frame) {
+                matched.append(i)
+            }
+            for i in matched.reversed() {
+                let w = vendorWaiters.remove(at: i)
+                w.waiter.timeout?.cancel()
+                w.waiter.cont.resume(returning: frame)
+            }
+        case Z1Constants.charControlPoint.uuidString:
+            if !cpWaiters.isEmpty {
+                let w = cpWaiters.removeFirst()
+                w.timeout?.cancel()
+                w.cont.resume(returning: data)
+            }
+        case Z1Constants.charTreadmillData.uuidString:
+            handleTelemetry(data)
+        default:
+            break
+        }
+    }
+
+    private func handleTelemetry(_ data: Data) {
+        let prev = telemetry
+        telemetry = Z1Protocol.parseTreadmillData(data)
+        // credit calorie burn for the interval just elapsed, while moving
+        if let prevElapsed = prev.elapsedS,
+           let curElapsed = telemetry.elapsedS,
+           let prevSpeed = prev.speedKmh, prevSpeed > 0
+        {
+            calorieTracker.addSample(speedKmh: prevSpeed, elapsedS: Double(curElapsed - prevElapsed))
+        }
+        emitStatus()
+    }
+
+    private func emitStatus() {
+        var s = status
+        s.speedKmh = telemetry.speedKmh ?? 0
+        s.distanceM = max(0, (telemetry.distanceM ?? 0) - (baseline?.distanceM ?? 0))
+        s.elapsedS = max(0, (telemetry.elapsedS ?? 0) - (baseline?.elapsedS ?? 0))
+        s.steps = max(0, (telemetry.steps ?? 0) - (baseline?.steps ?? 0))
+        s.caloriesKcal = calorieTracker.totalKcal
+        s.hasTelemetry = true
+        status = s
+        statusYield.yield(s)
+    }
+
+    private func mutate(_ body: (inout Status) -> Void) {
+        body(&status)
+        statusYield.yield(status)
+    }
+
+    // MARK: - vendor channel
+
+    @discardableResult
+    private func vendorRoundtrip(
+        _ frame: Data,
+        pred: @escaping @Sendable (Frame) -> Bool,
+        timeout: TimeInterval = Z1Constants.vendorResponseTimeout
+    ) async throws -> Frame {
+        let id = UUID()
+        return try await withCheckedThrowingContinuation { cont in
+            var waiter = Waiter<Frame>(id: id, cont: cont)
+            waiter.timeout = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(timeout))
+                guard !Task.isCancelled, let self else { return }
+                await self.timeoutVendorWaiter(id)
+            }
+            vendorWaiters.append((waiter, pred))
+            Task {
+                do {
+                    await paceVendor()
+                    try await transport.write(Z1Constants.charSupplementWrite, frame, withResponse: false)
+                } catch {
+                    failVendorWaiter(id, error)
+                }
+            }
+        }
+    }
+
+    private func timeoutVendorWaiter(_ id: UUID) {
+        guard let i = vendorWaiters.firstIndex(where: { $0.waiter.id == id }) else { return }
+        let w = vendorWaiters.remove(at: i)
+        w.waiter.cont.resume(throwing: Z1Error.vendorTimeout)
+    }
+
+    private func failVendorWaiter(_ id: UUID, _ error: Error) {
+        guard let i = vendorWaiters.firstIndex(where: { $0.waiter.id == id }) else { return }
+        let w = vendorWaiters.remove(at: i)
+        w.waiter.timeout?.cancel()
+        w.waiter.cont.resume(throwing: error)
+    }
+
+    // MARK: - FTMS control point
+
+    private func cpCommand(_ cmd: Data) async throws -> Data {
+        let id = UUID()
+        let resp = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data, Error>) in
+            var waiter = Waiter<Data>(id: id, cont: cont)
+            waiter.timeout = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(Z1Constants.vendorResponseTimeout))
+                guard !Task.isCancelled, let self else { return }
+                await self.timeoutCPWaiter(id)
+            }
+            cpWaiters.append(waiter)
+            Task {
+                do {
+                    await paceControl()
+                    try await transport.write(Z1Constants.charControlPoint, cmd, withResponse: true)
+                } catch {
+                    failCPWaiter(id, error)
+                }
+            }
+        }
+        // indication: 80 <request-op> <result> [params...]
+        if resp.count >= 3, resp[resp.startIndex] == 0x80 {
+            let result = resp[resp.startIndex + 2]
+            guard result == 1 else {
+                if result == 5 { hasControl = false } // re-request control next time
+                throw Z1Error.controlRefused(op: resp[resp.startIndex + 1], result: result)
+            }
+        }
+        return resp
+    }
+
+    private func timeoutCPWaiter(_ id: UUID) {
+        guard let i = cpWaiters.firstIndex(where: { $0.id == id }) else { return }
+        let w = cpWaiters.remove(at: i)
+        w.cont.resume(throwing: Z1Error.controlPointTimeout)
+    }
+
+    private func failCPWaiter(_ id: UUID, _ error: Error) {
+        guard let i = cpWaiters.firstIndex(where: { $0.id == id }) else { return }
+        let w = cpWaiters.remove(at: i)
+        w.timeout?.cancel()
+        w.cont.resume(throwing: error)
+    }
+
+    private func ensureControl() async throws {
+        if !hasControl {
+            _ = try await cpCommand(Data([Z1Constants.opRequestControl]))
+            hasControl = true
+        }
+    }
+
+    private func failAllWaiters(_ error: Error) {
+        let vendors = vendorWaiters
+        vendorWaiters.removeAll()
+        for w in vendors {
+            w.waiter.timeout?.cancel()
+            w.waiter.cont.resume(throwing: error)
+        }
+        let cps = cpWaiters
+        cpWaiters.removeAll()
+        for w in cps {
+            w.timeout?.cancel()
+            w.cont.resume(throwing: error)
+        }
+    }
+
+    // MARK: - helpers
+
+    private func requireReady() throws {
+        guard status.phase == .ready, unlocked else { throw Z1Error.notConnected }
+    }
+
+    private func paceVendor() async {
+        if let last = lastVendorWrite {
+            let remaining = Z1Constants.vendorMinInterval - (ContinuousClock.now - last)
+            if remaining > .zero { try? await Task.sleep(for: remaining) }
+        }
+        lastVendorWrite = ContinuousClock.now
+    }
+
+    private func paceControl() async {
+        if let last = lastControlWrite {
+            let remaining = Z1Constants.controlMinInterval - (ContinuousClock.now - last)
+            if remaining > .zero { try? await Task.sleep(for: remaining) }
+        }
+        lastControlWrite = ContinuousClock.now
+    }
+}

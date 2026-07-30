@@ -1,0 +1,132 @@
+import Foundation
+import Z1Core
+
+/// Frame building/parsing tests (mirrors the Python test vectors).
+public func protocolTests(_ t: TestRunner) {
+    t.suite("protocol") { t in
+        // Verified on hardware: KS-HD-Z1D -> 71 00 05 01 2e 5a 31 44 74
+        t.expectEqual(
+            Z1Protocol.unlockFrame(deviceName: "KS-HD-Z1D"),
+            Data([0x71, 0x00, 0x05, 0x01, 0x2E, 0x5A, 0x31, 0x44, 0x74]),
+            "unlock frame known vector"
+        )
+
+        // checksum roundtrip
+        let payload = Data([0x01, 0x02, 0x03, 0xFF])
+        let frame = Z1Protocol.buildFrame(cmd0: 0x72, cmd1: 0x01, data: payload)
+        t.expectEqual(frame.count, 3 + payload.count + 1, "frame length")
+        let parsed = Z1Protocol.parseFrame(frame)
+        t.expectEqual(parsed?.cmd0, 0x72, "roundtrip cmd0")
+        t.expectEqual(parsed?.cmd1, 0x01, "roundtrip cmd1")
+        t.expectEqual(parsed?.data, payload, "roundtrip data")
+
+        // bad checksum rejected
+        var corrupted = Z1Protocol.buildFrame(cmd0: 0x72, cmd1: 0x00, data: Data([0x00]))
+        corrupted[corrupted.count - 1] ^= 0xFF
+        t.expectEqual(Z1Protocol.parseFrame(corrupted)?.cmd0, nil, "bad checksum rejected")
+
+        // malformed frames rejected
+        t.expectEqual(Z1Protocol.parseFrame(Data([0x71, 0x80]))?.cmd0, nil, "short frame rejected")
+        t.expectEqual(
+            Z1Protocol.parseFrame(Data([0x71, 0x80, 0x02, 0x00]))?.cmd0, nil,
+            "truncated body rejected"
+        )
+
+        // unlock-ok detection
+        t.check(Z1Protocol.isUnlockOK(Z1Protocol.buildFrame(cmd0: 0x71, cmd1: 0x80)), "isUnlockOK true")
+        t.check(!Z1Protocol.isUnlockOK(Z1Protocol.buildFrame(cmd0: 0x71, cmd1: 0x81)), "isUnlockOK false for 71 81")
+        t.check(!Z1Protocol.isUnlockOK(Data([0x00, 0x01, 0x02])), "isUnlockOK false for garbage")
+
+        // spec vector: SETTING_GET (all) = 72 00 01 00 73
+        t.expectEqual(
+            Z1Protocol.settingGetFrame(),
+            Data([0x72, 0x00, 0x01, 0x00, 0x73]),
+            "SETTING_GET all vector"
+        )
+
+        // SYS_INFO frame roundtrip
+        let sysinfo = Z1Protocol.parseFrame(Z1Protocol.sysInfoFrame(unixTime: 0, userID: 0))
+        t.expectEqual(sysinfo?.cmd0, 0x71, "sysinfo cmd0")
+        t.expectEqual(sysinfo?.cmd1, 0x01, "sysinfo cmd1")
+        t.expectEqual(sysinfo?.data, Data(count: 8), "sysinfo 8-byte payload")
+
+        // property records [id, error, lo, hi]; error != 0 skipped
+        let records = Data([0x01, 0x00, 0x03, 0x00, 0x05, 0x01, 0x09, 0x00, 0x04, 0x00, 0x05, 0x00])
+        let props = Z1Protocol.parsePropertyRecords(records)
+        t.expectEqual(props[1], 3, "property 1 parsed")
+        t.expectEqual(props[4], 5, "property 4 parsed")
+        t.expectNil(props[5], "error record skipped")
+
+        // spec telemetry vector: 04 24 fa 00 00 00 00 02 00 00 00
+        let raw = Data([0x04, 0x24, 0xFA, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00])
+        let d = Z1Protocol.parseTreadmillData(raw)
+        t.expectEqual(d.speedKmh, 2.5, "vector speed")
+        t.expectEqual(d.distanceM, 0, "vector distance")
+        t.expectEqual(d.elapsedS, 2, "vector elapsed")
+        t.expectEqual(d.steps, 0, "vector steps")
+
+        // u24 distance + all fields
+        let full = Data([
+            0x04, 0x24,
+            0x80, 0x02, // speed 640 -> 6.4 km/h
+            0x34, 0x12, 0x00, // distance u24 = 4660 m
+            0x3C, 0x00, // elapsed 60 s
+            0x41, 0x01, // steps 321
+        ])
+        let f = Z1Protocol.parseTreadmillData(full)
+        t.expectEqual(f.speedKmh, 6.4, "full speed")
+        t.expectEqual(f.distanceM, 4660, "full distance (u24)")
+        t.expectEqual(f.elapsedS, 60, "full elapsed")
+        t.expectEqual(f.steps, 321, "full steps")
+
+        // truncated telemetry
+        t.expectNil(Z1Protocol.parseTreadmillData(Data()).speedKmh, "empty telemetry")
+        t.expectNil(Z1Protocol.parseTreadmillData(Data([0x04])).speedKmh, "1-byte telemetry")
+    }
+}
+
+/// MET table / calorie math tests.
+public func metricsTests(_ t: TestRunner) {
+    t.suite("metrics") { t in
+        t.expectEqual(Z1Metrics.metForSpeed(0.0), 1.0, accuracy: 1e-12, "MET at 0.0")
+        t.expectEqual(Z1Metrics.metForSpeed(1.6), 2.0, accuracy: 1e-12, "MET at 1.6")
+        t.expectEqual(Z1Metrics.metForSpeed(3.2), 3.0, accuracy: 1e-9, "MET at 3.2")
+        t.expectEqual(Z1Metrics.metForSpeed(6.4), 5.0, accuracy: 1e-12, "MET at 6.4")
+        t.expectEqual(Z1Metrics.metForSpeed(2.05), 2.4, accuracy: 1e-9, "MET interpolation")
+        t.expectEqual(Z1Metrics.metForSpeed(-1), 1.0, accuracy: 1e-12, "MET clamped low")
+        t.expectEqual(Z1Metrics.metForSpeed(10), 5.0, accuracy: 1e-12, "MET clamped high")
+
+        // 3.0 MET * 3.5 * 75 / 200 = 3.9375
+        t.expectEqual(Z1Metrics.kcalPerMinute(3.2, weightKg: 75), 3.9375, accuracy: 1e-9, "kcal/min known vector")
+
+        var tracker = CalorieTracker(weightKg: 75)
+        tracker.addSample(speedKmh: 3.2, elapsedS: 60)
+        t.expectEqual(tracker.totalKcal, 3.9375, accuracy: 1e-9, "tracker one minute")
+        tracker.addSample(speedKmh: 3.2, elapsedS: 0)
+        tracker.addSample(speedKmh: 3.2, elapsedS: -5)
+        t.expectEqual(tracker.totalKcal, 3.9375, accuracy: 1e-9, "tracker ignores non-positive intervals")
+        tracker.addSample(speedKmh: 3.2, elapsedS: 60)
+        t.expectEqual(tracker.totalKcal, 7.875, accuracy: 1e-9, "tracker two minutes")
+        tracker.reset()
+        t.expectEqual(tracker.totalKcal, 0.0, accuracy: 1e-12, "tracker reset")
+
+        var heavy = CalorieTracker(weightKg: 75)
+        heavy.weightKg = 150
+        heavy.addSample(speedKmh: 3.2, elapsedS: 60)
+        t.expectEqual(heavy.totalKcal, 7.875, accuracy: 1e-9, "double weight -> double burn")
+    }
+}
+
+/// Runs every suite. Returns the process exit code (0 = all passed).
+@discardableResult
+public func runAllZ1CoreTests() -> Int32 {
+    let runner = TestRunner()
+    protocolTests(runner)
+    metricsTests(runner)
+    if runner.failures == 0 {
+        print("PASS: \(runner.checks) checks, 0 failures")
+        return 0
+    }
+    print("FAILED: \(runner.checks) checks, \(runner.failures) failures")
+    return 1
+}

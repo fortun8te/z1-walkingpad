@@ -3,12 +3,16 @@
 Run: python -m z1_walkingpad_mcp.server   (stdio transport)
 
 Set Z1_WEIGHT_KG for accurate calorie estimates (default 75).
-Session summaries are appended to ~/.z1-walkingpad/sessions.jsonl on stop.
+On stop, session summaries are appended to sessions.jsonl and written as
+per-session JSON files in the sessions directory (default
+~/.z1-walkingpad; override with Z1_SESSIONS_DIR — point it at an iCloud
+Drive folder to feed the iOS Shortcut bridge, see docs/apple-health.md).
 """
 
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -19,7 +23,7 @@ from .client import Z1Error, Z1Treadmill
 mcp = MCPServer("z1-walkingpad")
 _treadmill = Z1Treadmill()
 
-HISTORY_FILE = Path.home() / ".z1-walkingpad" / "sessions.jsonl"
+SESSIONS_DIR = Path(os.environ.get("Z1_SESSIONS_DIR", Path.home() / ".z1-walkingpad"))
 
 
 async def _ensure_connected() -> Z1Treadmill:
@@ -93,14 +97,18 @@ async def treadmill_pause() -> str:
 async def treadmill_stop() -> dict:
     """Stop the belt, end the session, and return its summary:
     duration, distance, steps, average speed, estimated calories.
-    The summary is appended to ~/.z1-walkingpad/sessions.jsonl."""
+    The summary is appended to sessions.jsonl and written as a
+    session-<timestamp>.json file in the sessions directory."""
     t = await _ensure_connected()
     summary = await t.stop()
     record = {"ended_at": int(time.time()), **summary}
     try:
-        HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with HISTORY_FILE.open("a") as f:
+        SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+        with (SESSIONS_DIR / "sessions.jsonl").open("a") as f:
             f.write(json.dumps(record) + "\n")
+        # per-session file for the iOS Shortcut / Apple Health bridge
+        with (SESSIONS_DIR / f"session-{record['ended_at']}.json").open("w") as f:
+            json.dump(record, f, indent=2)
     except OSError:
         pass
     return summary
