@@ -561,6 +561,7 @@ public actor Z1Treadmill {
         UserDefaults.standard.set(
             [
                 "totalKcal": calorieTracker.totalKcal,
+                "correctedSteps": correctedSteps,
                 "elapsedS": telemetry.elapsedS ?? 0,
                 "distanceM": telemetry.distanceM ?? 0,
             ],
@@ -575,11 +576,16 @@ public actor Z1Treadmill {
         let savedElapsed = state["elapsedS"] as? Int ?? 0
         guard curElapsed >= savedElapsed else { return } // pad counters reset (power cycle) — fresh
         calorieTracker.totalKcal = state["totalKcal"] as? Double ?? 0
+        correctedSteps = state["correctedSteps"] as? Double ?? 0
         // credit the gap while we were disconnected, if the belt kept moving
         let gapS = curElapsed - savedElapsed
         let gapD = (telemetry.distanceM ?? 0) - (state["distanceM"] as? Int ?? 0)
         if gapS > 0, gapD > 0 {
-            calorieTracker.addSample(speedKmh: Double(gapD) / Double(gapS) * 3.6, elapsedS: Double(gapS))
+            let avgKmh = Double(gapD) / Double(gapS) * 3.6
+            calorieTracker.addSample(speedKmh: avgKmh, elapsedS: Double(gapS))
+            if let stride = strideLearner.stride(for: avgKmh) {
+                correctedSteps += Double(gapD) / stride
+            }
         }
     }
 

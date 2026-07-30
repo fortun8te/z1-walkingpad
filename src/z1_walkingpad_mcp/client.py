@@ -408,6 +408,7 @@ class Z1Treadmill:
                 json.dumps(
                     {
                         "total_kcal": self.calories.total_kcal,
+                        "corrected_steps": self._corrected_steps,
                         "elapsed_s": self.status.elapsed_s,
                         "distance_m": self.status.distance_m,
                     }
@@ -428,11 +429,16 @@ class Z1Treadmill:
         if cur_elapsed < saved_elapsed:
             return  # pad counters went backwards (power cycle) — start fresh
         self.calories.total_kcal = float(state.get("total_kcal") or 0)
+        self._corrected_steps = float(state.get("corrected_steps") or 0)
         # credit the gap while we were disconnected, if the belt kept moving
         gap_s = cur_elapsed - saved_elapsed
         gap_d = (self.status.distance_m or 0) - (state.get("distance_m") or 0)
         if gap_s > 0 and gap_d > 0:
-            self.calories.add_sample(gap_d / gap_s * 3.6, gap_s)
+            avg_kmh = gap_d / gap_s * 3.6
+            self.calories.add_sample(avg_kmh, gap_s)
+            stride = self.stride.stride_for(avg_kmh)
+            if stride:
+                self._corrected_steps += gap_d / stride
 
     def _on_machine_status(self, _char, data: bytearray) -> None:
         # belt-state events from the pad itself: works even when no

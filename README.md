@@ -20,7 +20,7 @@ Everything is documented well enough to build your own client in any language: s
 - 📊 Live telemetry: speed, distance, elapsed time, **steps** — self-calibrating estimate that learns your stride-vs-speed curve (pad counters are unreliable at slow speeds; belt distance is exact)
 - 🔥 Calorie estimate via the ACSM walking metabolic equation (research-backed; ±10–15%)
 - 🧠 The pad is the master — app reflects reality even when you use the physical remote
-- 🔁 Pad is the master for counters; calories persist across reconnects (gap-credited) — or flip on "Persist stats across sessions" to accumulate until you hit Clear
+- 🔁 Pad is the master for counters; calories and steps persist across reconnects (gap-credited) — or flip on "Persist stats across sessions" to accumulate until you hit Clear
 - 😴 Exit stops the belt and puts the pad in standby
 - 🔋 Zero measurable battery impact (0.0% CPU, 0.0 power score)
 - 🇺🇸 Imperial/metric units, synced to the pad's own display
@@ -93,7 +93,7 @@ Both talk to the pad directly and independently — neither needs the other. **O
 
 - **The pad is the master — of everything.** Belt state, time, distance, and steps are shown exactly as the pad reports them, however they were changed (app, remote, or the pad's own timer). When the pad resets its counters (on Stop, or on its own schedule), the display follows.
 - **Calories are the one thing we compute** (the pad reports none) — but they follow the same lifecycle: the estimate resets when the pad's counters reset, so the numbers never disagree about what "this session" is.
-- **Calories persist across reconnects.** Saved every second; disconnect while the belt is still moving and the count continues, with the disconnected gap estimated — because the pad's session never ended.
+- **Calories and steps persist across reconnects.** Saved every second; disconnect while the belt is still moving and both counts continue, with the disconnected gap estimated (avg-speed calories, stride-based steps) — because the pad's session never ended.
 - **Want a trip odometer instead?** Settings → **Persist stats across sessions** makes time/distance/steps/kcal keep accumulating across Stops (the pad's resets are folded in) until you hit the **Clear** button beside it. Off = pad-as-master.
 - **Step counts are corrected, not just relayed.** Consumer step counters degrade badly below ~3 km/h (research: 20–40% error at desk speeds), but belt distance is mechanically exact — so once you've walked at ≥3 km/h for a few minutes, the app has learned your personal stride-vs-speed curve and derives slow-speed steps from distance instead. Until then it shows the pad's raw count.
 - **Start on a moving belt is a no-op** (the pad refuses it) — `start()` skips the command when the belt is already moving.
