@@ -49,8 +49,13 @@ connect/disconnect, big speed readout with − / + steppers, Start/Stop, stats
   calorie math.
 - **Speed step** — stepper nudge size: 0.1 / 0.2 / 0.5 in the display unit
   (converted to km/h on the wire, rounded to the pad's 0.1 km/h steps).
+- **Persist stats across sessions** — off (default) means pad-as-master:
+  stats follow the pad's counters and its resets. On means time, distance,
+  steps and kcal keep accumulating across Stops until you hit the **Clear**
+  button beside it (which also wipes the on-disk calorie state).
 
-All settings persist across launches. Quit is at the bottom of the popover.
+All settings persist across launches. Exit is at the bottom of the popover
+(stops the belt, sleeps the pad, then quits).
 
 ## Bluetooth permission
 
