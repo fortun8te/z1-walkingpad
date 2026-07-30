@@ -68,6 +68,15 @@ public enum Z1Protocol {
         buildFrame(cmd0: Z1Constants.vopProperty, cmd1: 0x00, data: Data([propID]))
     }
 
+    /// Property write: 72 01 03 <id> <lo> <hi> CC (reply 72 81, data[1]=0 OK).
+    public static func propertyWriteFrame(propID: UInt8, value: UInt16) -> Data {
+        buildFrame(
+            cmd0: Z1Constants.vopProperty,
+            cmd1: 0x01,
+            data: Data([propID, UInt8(value & 0xFF), UInt8(value >> 8)])
+        )
+    }
+
     /// Parse a SETTING_GET reply: 4-byte records [id, error, valLo, valHi].
     public static func parsePropertyRecords(_ data: Data) -> [Int: Int] {
         var props: [Int: Int] = [:]

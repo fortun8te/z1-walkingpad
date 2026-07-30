@@ -20,7 +20,7 @@ struct MenuBarView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             Divider()
-            settingsRow
+            settingsSection
             Divider()
             quitRow
         }
@@ -67,10 +67,10 @@ struct MenuBarView: View {
             stepperButton(systemName: "minus", action: viewModel.speedDownTapped)
             Spacer()
             HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Text(viewModel.status.speedKmh, format: .number.precision(.fractionLength(1)))
+                Text(viewModel.displaySpeed, format: .number.precision(.fractionLength(1)))
                     .font(.system(size: 44, weight: .semibold, design: .rounded))
                     .monospacedDigit()
-                Text("km/h")
+                Text(viewModel.speedUnitLabel)
                     .font(.title3)
                     .foregroundStyle(.secondary)
             }
@@ -112,7 +112,7 @@ struct MenuBarView: View {
         let s = viewModel.status
         return LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
             statCell(value: formatElapsed(s.elapsedS), label: "Elapsed", icon: "clock")
-            statCell(value: formatDistance(s.distanceM), label: "Distance", icon: "map")
+            statCell(value: viewModel.formatDistance(s.distanceM), label: "Distance", icon: "map")
             statCell(value: "\(s.steps)", label: "Steps", icon: "figure.walk")
             statCell(
                 value: s.caloriesKcal.formatted(.number.precision(.fractionLength(1))),
@@ -138,26 +138,56 @@ struct MenuBarView: View {
 
     private func summaryLine(_ s: SessionSummary) -> some View {
         Text(
-            "Last session: \(formatElapsed(s.durationS)) · \(formatDistance(s.distanceM)) · "
+            "Last session: \(formatElapsed(s.durationS)) · \(viewModel.formatDistance(s.distanceM)) · "
                 + "\(s.steps) steps · \(s.caloriesKcal.formatted(.number.precision(.fractionLength(1)))) kcal"
         )
         .font(.caption)
         .foregroundStyle(.secondary)
     }
 
-    // MARK: - settings + quit
+    // MARK: - settings
 
-    private var settingsRow: some View {
-        HStack {
-            Label("Body weight", systemImage: "scalemass")
-                .font(.callout)
-            Spacer()
-            TextField("kg", value: $viewModel.weightKg, format: .number.precision(.fractionLength(0...1)))
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 64)
-                .multilineTextAlignment(.trailing)
-            Text("kg")
-                .foregroundStyle(.secondary)
+    private var settingsSection: some View {
+        DisclosureGroup("Settings") {
+            VStack(alignment: .leading, spacing: 10) {
+                Picker("Units", selection: $viewModel.unitsImperial) {
+                    Text("Imperial").tag(true)
+                    Text("Metric").tag(false)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+
+                HStack {
+                    Label("Body weight", systemImage: "scalemass")
+                        .font(.callout)
+                    Spacer()
+                    TextField(
+                        "weight",
+                        value: viewModel.weightBinding,
+                        format: .number.precision(.fractionLength(0...1))
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 64)
+                    .multilineTextAlignment(.trailing)
+                    Text(viewModel.weightUnitLabel)
+                        .foregroundStyle(.secondary)
+                }
+
+                HStack {
+                    Text("Speed step")
+                        .font(.callout)
+                    Spacer()
+                    Picker("Speed step", selection: $viewModel.speedStep) {
+                        Text("0.1").tag(0.1)
+                        Text("0.2").tag(0.2)
+                        Text("0.5").tag(0.5)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 150)
+                }
+            }
+            .padding(.top, 6)
         }
     }
 
@@ -178,11 +208,5 @@ struct MenuBarView: View {
         return h > 0
             ? String(format: "%d:%02d:%02d", h, m, s)
             : String(format: "%d:%02d", m, s)
-    }
-
-    private func formatDistance(_ meters: Int) -> String {
-        meters >= 1000
-            ? String(format: "%.2f km", Double(meters) / 1000)
-            : "\(meters) m"
     }
 }

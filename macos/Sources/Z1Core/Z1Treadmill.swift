@@ -348,9 +348,29 @@ public actor Z1Treadmill {
         // successive nudges would otherwise re-read the stale speed
         let current = lastTargetSpeed ?? telemetry.speedKmh ?? status.minSpeedKmh
         var target = ((current + delta) * 10).rounded() / 10 // pad steps are 0.1 km/h
+        if target == current {
+            // a display-unit step (e.g. 0.1 mph ≈ 0.16 km/h) can round back to
+            // the current speed — force at least one 0.1 km/h pad step
+            target = ((current + (delta >= 0 ? 0.1 : -0.1)) * 10).rounded() / 10
+        }
         target = max(status.minSpeedKmh, min(status.maxSpeedKmh, target))
         try await setSpeed(target)
         return target
+    }
+
+    /// Sync the pad's own LED display units. Per the docs/protocol.md property
+    /// table, property 1 is "units / screen language" and bit 1 (0x0002)
+    /// selects miles vs km; all other bits are preserved from the cached
+    /// SETTING_GET dump (default 0 if absent).
+    public func setDisplayUnits(imperial: Bool) async throws {
+        try requireReady()
+        let current = status.properties[1] ?? 0
+        let value = Z1Units.displayUnitsValue(current: current, imperial: imperial)
+        _ = try await vendorRoundtrip(
+            Z1Protocol.propertyWriteFrame(propID: 1, value: UInt16(value)),
+            pred: { $0.cmd0 == Z1Constants.vopProperty && $0.cmd1 == 0x81 && $0.data.first == 1 }
+        )
+        mutate { $0.properties[1] = value }
     }
 
     /// Metrics since the last start(): duration, distance, steps, calories.

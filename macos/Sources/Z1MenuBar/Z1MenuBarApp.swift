@@ -20,7 +20,7 @@ struct Z1MenuBarApp: App {
             HStack(spacing: 3) {
                 Image(systemName: "figure.walk")
                 if viewModel.status.beltRunning {
-                    Text(viewModel.status.speedKmh, format: .number.precision(.fractionLength(1)))
+                    Text(viewModel.displaySpeed, format: .number.precision(.fractionLength(1)))
                         .monospacedDigit()
                 }
             }

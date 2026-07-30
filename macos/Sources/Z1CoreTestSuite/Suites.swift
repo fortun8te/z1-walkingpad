@@ -117,12 +117,51 @@ public func metricsTests(_ t: TestRunner) {
     }
 }
 
+/// Unit conversion + display-units property-bit tests.
+public func unitsTests(_ t: TestRunner) {
+    t.suite("units") { t in
+        t.expectEqual(Z1Units.kmhToMph(6.4), 3.98, accuracy: 0.005, "6.4 km/h -> 3.98 mph")
+        t.expectEqual(Z1Units.mphToKmh(3.98), 6.4, accuracy: 0.01, "3.98 mph -> ~6.4 km/h")
+        t.check(
+            abs(Z1Units.mphToKmh(Z1Units.kmhToMph(4.2)) - 4.2) < 1e-9,
+            "mph<->km/h roundtrip"
+        )
+
+        t.expectEqual(Z1Units.metersToMiles(1609), 1.0, accuracy: 0.001, "1609 m -> 1.0 mi")
+        t.expectEqual(Z1Units.metersToFeet(100), 328.084, accuracy: 0.001, "100 m -> 328 ft")
+
+        t.expectEqual(Z1Units.kgToLb(75), 165.3, accuracy: 0.05, "75 kg -> 165.3 lb")
+        t.expectEqual(Z1Units.lbToKg(165.3), 75, accuracy: 0.05, "165.3 lb -> ~75 kg")
+        t.check(
+            abs(Z1Units.lbToKg(Z1Units.kgToLb(82.5)) - 82.5) < 1e-9,
+            "lb<->kg roundtrip"
+        )
+
+        // property 1, bit 0x0002: set = miles, clear = km; other bits preserved
+        // (docs/protocol.md property table; hardware unit reports 0x0003)
+        t.expectEqual(Z1Units.displayUnitsValue(current: 0x0003, imperial: true), 0x0003, "bit set keeps miles")
+        t.expectEqual(Z1Units.displayUnitsValue(current: 0x0003, imperial: false), 0x0001, "bit clear -> km, bit0 preserved")
+        t.expectEqual(Z1Units.displayUnitsValue(current: 0x0001, imperial: true), 0x0003, "km -> miles, bit0 preserved")
+        t.expectEqual(Z1Units.displayUnitsValue(current: 0, imperial: true), 0x0002, "absent property defaults to 0")
+        t.check(Z1Units.propertyIndicatesImperial(0x0003), "0x0003 indicates imperial")
+        t.check(!Z1Units.propertyIndicatesImperial(0x0001), "0x0001 indicates metric")
+
+        // property write frame vector: 72 01 03 01 <lo> <hi> CC
+        t.expectEqual(
+            Z1Protocol.propertyWriteFrame(propID: 1, value: 0x0003),
+            Data([0x72, 0x01, 0x03, 0x01, 0x03, 0x00, 0x7A]),
+            "property-1 write frame vector"
+        )
+    }
+}
+
 /// Runs every suite. Returns the process exit code (0 = all passed).
 @discardableResult
 public func runAllZ1CoreTests() -> Int32 {
     let runner = TestRunner()
     protocolTests(runner)
     metricsTests(runner)
+    unitsTests(runner)
     if runner.failures == 0 {
         print("PASS: \(runner.checks) checks, 0 failures")
         return 0

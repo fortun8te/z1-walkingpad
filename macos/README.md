@@ -39,9 +39,18 @@ open macos/Z1WalkingPad.app     # or launch from /Applications after --install
 ```
 
 A `figure.walk` icon appears in the menu bar; while the belt runs it also
-shows the current speed. Click it for the popover: connect/disconnect, big
-speed readout with − / + steppers (0.1 km/h), Start/Stop, stats (elapsed,
-distance, steps, estimated kcal), body-weight setting (persisted), Quit.
+shows the current speed (in your chosen unit). Click it for the popover:
+connect/disconnect, big speed readout with − / + steppers, Start/Stop, stats
+(elapsed, distance, steps, estimated kcal), and a Settings section:
+
+- **Units** — Imperial (mph / mi+ft / lb) or Metric (km/h / km / kg); default
+  Imperial. Also synced to the pad's own LED display (property 1, bit 0x0002).
+- **Body weight** — entered in the current unit, stored in kg for the
+  calorie math.
+- **Speed step** — stepper nudge size: 0.1 / 0.2 / 0.5 in the display unit
+  (converted to km/h on the wire, rounded to the pad's 0.1 km/h steps).
+
+All settings persist across launches. Quit is at the bottom of the popover.
 
 ## Bluetooth permission
 
