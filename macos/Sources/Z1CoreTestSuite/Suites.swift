@@ -88,32 +88,33 @@ public func protocolTests(_ t: TestRunner) {
 /// MET table / calorie math tests.
 public func metricsTests(_ t: TestRunner) {
     t.suite("metrics") { t in
-        t.expectEqual(Z1Metrics.metForSpeed(0.0), 1.0, accuracy: 1e-12, "MET at 0.0")
-        t.expectEqual(Z1Metrics.metForSpeed(1.6), 2.0, accuracy: 1e-12, "MET at 1.6")
-        t.expectEqual(Z1Metrics.metForSpeed(3.2), 3.0, accuracy: 1e-9, "MET at 3.2")
-        t.expectEqual(Z1Metrics.metForSpeed(6.4), 5.0, accuracy: 1e-12, "MET at 6.4")
-        t.expectEqual(Z1Metrics.metForSpeed(2.05), 2.4, accuracy: 1e-9, "MET interpolation")
-        t.expectEqual(Z1Metrics.metForSpeed(-1), 1.0, accuracy: 1e-12, "MET clamped low")
-        t.expectEqual(Z1Metrics.metForSpeed(10), 5.0, accuracy: 1e-12, "MET clamped high")
+        t.expectEqual(Z1Metrics.metForSpeed(0.0), 1.0, accuracy: 1e-12, "MET at 0.0 (resting)")
+        // ACSM level-walking: VO2 = 0.1 * (km/h * 1000/60) + 3.5
+        // 3.2 km/h = 53.33 m/min -> VO2 8.833 -> MET 2.524
+        t.expectEqual(Z1Metrics.vo2ForSpeed(3.2), 8.833, accuracy: 0.001, "VO2 at 3.2 km/h")
+        t.expectEqual(Z1Metrics.metForSpeed(3.2), 8.833 / 3.5, accuracy: 0.001, "MET at 3.2")
+        // 6.4 km/h = 106.67 m/min -> VO2 14.167
+        t.expectEqual(Z1Metrics.vo2ForSpeed(6.4), 14.167, accuracy: 0.001, "VO2 at max speed")
+        t.expectEqual(Z1Metrics.metForSpeed(-1), 1.0, accuracy: 1e-12, "negative speed clamps to resting")
 
-        // 3.0 MET * 3.5 * 75 / 200 = 3.9375
-        t.expectEqual(Z1Metrics.kcalPerMinute(3.2, weightKg: 75), 3.9375, accuracy: 1e-9, "kcal/min known vector")
+        // 8.833 * 75 / 200 = 3.3125
+        t.expectEqual(Z1Metrics.kcalPerMinute(3.2, weightKg: 75), 3.3125, accuracy: 0.001, "kcal/min known vector")
 
         var tracker = CalorieTracker(weightKg: 75)
         tracker.addSample(speedKmh: 3.2, elapsedS: 60)
-        t.expectEqual(tracker.totalKcal, 3.9375, accuracy: 1e-9, "tracker one minute")
+        t.expectEqual(tracker.totalKcal, 3.3125, accuracy: 0.001, "tracker one minute")
         tracker.addSample(speedKmh: 3.2, elapsedS: 0)
         tracker.addSample(speedKmh: 3.2, elapsedS: -5)
-        t.expectEqual(tracker.totalKcal, 3.9375, accuracy: 1e-9, "tracker ignores non-positive intervals")
+        t.expectEqual(tracker.totalKcal, 3.3125, accuracy: 0.001, "tracker ignores non-positive intervals")
         tracker.addSample(speedKmh: 3.2, elapsedS: 60)
-        t.expectEqual(tracker.totalKcal, 7.875, accuracy: 1e-9, "tracker two minutes")
+        t.expectEqual(tracker.totalKcal, 6.625, accuracy: 0.001, "tracker two minutes")
         tracker.reset()
         t.expectEqual(tracker.totalKcal, 0.0, accuracy: 1e-12, "tracker reset")
 
         var heavy = CalorieTracker(weightKg: 75)
         heavy.weightKg = 150
         heavy.addSample(speedKmh: 3.2, elapsedS: 60)
-        t.expectEqual(heavy.totalKcal, 7.875, accuracy: 1e-9, "double weight -> double burn")
+        t.expectEqual(heavy.totalKcal, 6.625, accuracy: 0.001, "double weight -> double burn")
     }
 }
 

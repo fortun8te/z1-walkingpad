@@ -159,14 +159,18 @@ baseline at session start and compute deltas.
 
 ## Calories (computed locally)
 
-The pad reports no energy data. Estimate with the Compendium of Physical
-Activities MET values for level walking:
+The pad reports no energy data. We estimate with the **ACSM walking
+metabolic equation** (level grade), the exercise-physiology standard:
 
 ```
-kcal/min = MET(speed) × 3.5 × weight_kg / 200
+VO2 (ml/kg/min) = 0.1 × speed(m/min) + 3.5
+kcal/min        = VO2 × weight_kg / 200        (5 kcal per L O2)
 ```
 
-MET table (interpolate linearly): 0.0→1.0 (standing), 1.6→2.0, 2.5→2.8,
-3.2→3.0, 4.0→3.5, 4.8→3.8, 5.5→4.3, 6.4→5.0. Integrate per telemetry
-sample; weight defaults to 75 kg (`Z1_WEIGHT_KG` in Python, in-app setting
-on macOS).
+Continuous in speed — no bucket interpolation. Best validated around
+3–6 km/h; classic validation error is ~2.0–2.6 ml/kg/min and a 2021 field
+study found ~13% overprediction for unloaded walking — treat the number as
+±10–15%. Chosen over the Compendium MET table because research shows the
+fixed MET buckets misclassify intensity at exactly these slow speeds
+(PubMed 35876127, 2022). Weight defaults to 75 kg (`Z1_WEIGHT_KG` in
+Python, in-app setting on macOS).

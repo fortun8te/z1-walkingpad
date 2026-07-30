@@ -1,28 +1,31 @@
 """Local health-metric estimation — the Z1 streams speed/distance/time/steps
-but NOT calories, so we compute energy expenditure the same way fitness apps
-do: the Compendium of Physical Activities MET values for level walking.
+but NOT calories, so we compute energy expenditure with the **ACSM walking
+metabolic equation** (level grade), the exercise-physiology standard:
 
-kcal/min = MET * 3.5 * weight_kg / 200
+    VO2 (ml/kg/min) = 0.1 * speed(m/min) + 3.5          (grade = 0)
+    kcal/min        = VO2 * weight_kg / 200             (5 kcal per L O2)
+
+Best validated for 50-100 m/min (~3-6 km/h); below that (our minimum is
+1.6 km/h) expect somewhat larger error. Classic validation puts the standard
+error around 2.0-2.6 ml/kg/min (~0.6-0.7 MET); a 2021 field comparison found
+~13% overprediction for unloaded walking. This replaces the coarser
+Compendium-of-METs bucket table, which research shows misclassifies
+intensity near slow-walking speeds.
+
+Sources: ACSM Guidelines for Exercise Testing and Prescription;
+japplphysiol.00121.2021 (2021); pubmed 16095415; pubmed 35876127 (2022).
 """
 
 from __future__ import annotations
 
 import os
 
-# MET by walking speed (km/h), level surface, Compendium of Physical Activities.
-# Linear interpolation between points.
-_MET_TABLE: list[tuple[float, float]] = [
-    (0.0, 1.0),  # standing
-    (1.6, 2.0),  # very slow walk
-    (2.5, 2.8),
-    (3.2, 3.0),
-    (4.0, 3.5),
-    (4.8, 3.8),
-    (5.5, 4.3),
-    (6.4, 5.0),  # Z1 max speed
-]
-
 DEFAULT_WEIGHT_KG = 75.0
+
+# resting component of the ACSM equation (3.5 ml/kg/min = 1 MET)
+_RESTING_VO2 = 3.5
+# walking economy: 0.1 ml/kg/min per m/min on level ground
+_SPEED_COEFF = 0.1
 
 
 def configured_weight_kg() -> float:
@@ -35,18 +38,18 @@ def configured_weight_kg() -> float:
     return DEFAULT_WEIGHT_KG
 
 
+def vo2_for_speed(kmh: float) -> float:
+    """Gross VO2 (ml/kg/min) per the ACSM level-walking equation."""
+    speed_m_per_min = max(0.0, kmh) * 1000 / 60
+    return _SPEED_COEFF * speed_m_per_min + _RESTING_VO2
+
+
 def met_for_speed(kmh: float) -> float:
-    if kmh <= _MET_TABLE[0][0]:
-        return _MET_TABLE[0][1]
-    for (s0, m0), (s1, m1) in zip(_MET_TABLE, _MET_TABLE[1:]):
-        if kmh <= s1:
-            frac = (kmh - s0) / (s1 - s0)
-            return m0 + frac * (m1 - m0)
-    return _MET_TABLE[-1][1]
+    return vo2_for_speed(kmh) / _RESTING_VO2
 
 
 def kcal_per_minute(kmh: float, weight_kg: float) -> float:
-    return met_for_speed(kmh) * 3.5 * weight_kg / 200
+    return vo2_for_speed(kmh) * weight_kg / 200
 
 
 class CalorieTracker:

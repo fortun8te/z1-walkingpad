@@ -1,42 +1,34 @@
 import Foundation
 
 /// Local health-metric estimation — the Z1 streams speed/distance/time/steps
-/// but NOT calories, so we compute energy expenditure the same way fitness apps
-/// do: the Compendium of Physical Activities MET values for level walking.
+/// but NOT calories, so we compute energy expenditure with the **ACSM walking
+/// metabolic equation** (level grade), the exercise-physiology standard:
 ///
-///     kcal/min = MET * 3.5 * weight_kg / 200
+///     VO2 (ml/kg/min) = 0.1 * speed(m/min) + 3.5        (grade = 0)
+///     kcal/min        = VO2 * weight_kg / 200           (5 kcal per L O2)
 ///
+/// Best validated for ~3-6 km/h; expect ~±13% error in field conditions.
 /// Mirrors `metrics.py`.
 public enum Z1Metrics {
-    /// MET by walking speed (km/h), level surface. Linear interpolation between points.
-    public static let metTable: [(speed: Double, met: Double)] = [
-        (0.0, 1.0), // standing
-        (1.6, 2.0), // very slow walk
-        (2.5, 2.8),
-        (3.2, 3.0),
-        (4.0, 3.5),
-        (4.8, 3.8),
-        (5.5, 4.3),
-        (6.4, 5.0), // Z1 max speed
-    ]
-
     public static let defaultWeightKg = 75.0
 
+    /// Resting component (3.5 ml/kg/min = 1 MET).
+    static let restingVO2 = 3.5
+    /// Walking economy: 0.1 ml/kg/min per m/min on level ground.
+    static let speedCoeff = 0.1
+
+    /// Gross VO2 (ml/kg/min) per the ACSM level-walking equation.
+    public static func vo2ForSpeed(_ kmh: Double) -> Double {
+        let speedMPerMin = max(0.0, kmh) * 1000 / 60
+        return speedCoeff * speedMPerMin + restingVO2
+    }
+
     public static func metForSpeed(_ kmh: Double) -> Double {
-        if kmh <= metTable[0].speed { return metTable[0].met }
-        for i in 1 ..< metTable.count {
-            let (s0, m0) = metTable[i - 1]
-            let (s1, m1) = metTable[i]
-            if kmh <= s1 {
-                let frac = (kmh - s0) / (s1 - s0)
-                return m0 + frac * (m1 - m0)
-            }
-        }
-        return metTable[metTable.count - 1].met
+        vo2ForSpeed(kmh) / restingVO2
     }
 
     public static func kcalPerMinute(_ kmh: Double, weightKg: Double) -> Double {
-        metForSpeed(kmh) * 3.5 * weightKg / 200
+        vo2ForSpeed(kmh) * weightKg / 200
     }
 }
 

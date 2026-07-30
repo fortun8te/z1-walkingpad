@@ -160,7 +160,7 @@ See `macos/README.md`. Only one BLE connection at a time: quit the app (or the M
 
 ## Health metrics
 
-The pad streams speed, distance, elapsed time, and steps live. Calories are computed locally exactly like fitness apps do: Compendium-of-Physical-Activities MET values for level walking, `kcal/min = MET × 3.5 × weight_kg / 200` (MET 2.0 at 1.6 km/h → 5.0 at 6.4 km/h, interpolated). Set your weight for accurate numbers:
+The pad streams speed, distance, elapsed time, and steps live. Calories are computed locally with the **ACSM walking metabolic equation** (the exercise-physiology standard for level walking): `VO2 = 0.1 × speed(m/min) + 3.5` ml/kg/min, then `kcal/min = VO2 × weight_kg / 200`. Chosen over the Compendium MET table on research grounds — the fixed MET buckets misclassify intensity at slow walking speeds; expect ±10–15% real-world error. Set your weight for accurate numbers:
 
 ```bash
 export Z1_WEIGHT_KG=80   # default is 75; the macOS app has its own weight setting
