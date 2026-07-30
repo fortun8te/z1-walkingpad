@@ -24,6 +24,7 @@ from bleak.backends.device import BLEDevice
 from . import constants as c
 from . import protocol as p
 from .metrics import CalorieTracker
+from .stride import TRUST_SPEED_KMH, StrideLearner
 
 # Calorie integration is client-side, so it survives reconnects via this file:
 # pad counters (elapsed/distance/steps) persist on the pad; we persist the kcal
@@ -85,6 +86,16 @@ class Z1Treadmill:
         self.calories = CalorieTracker()
         self._last_target_speed: float | None = None
         self._calorie_state_restored = False
+        self.stride = StrideLearner()
+        self._corrected_steps = 0.0
+
+    @property
+    def steps_display(self) -> int | None:
+        """Step count to show: distance-derived estimate once the stride
+        curve is calibrated, raw pad count before that."""
+        if self.stride.calibrated:
+            return round(self._corrected_steps)
+        return self.status.steps
 
     # -- callbacks ------------------------------------------------------
 
@@ -329,7 +340,7 @@ class Z1Treadmill:
         return {
             "duration_s": duration_s,
             "distance_m": distance_m,
-            "steps": self.status.steps,
+            "steps": self.steps_display,
             "avg_speed_kmh": avg_kmh,
             "calories_kcal": round(self.calories.total_kcal, 1),
             "weight_kg_used": self.calories.weight_kg,
@@ -350,12 +361,27 @@ class Z1Treadmill:
         self.status = p.parse_treadmill_data(bytes(data))
         # pad counter reset (Stop finalizes the pad session, or the pad's
         # own timer): the pad is the master — our calorie count resets with it
-        if (
+        regressed = (
             prev.elapsed_s is not None
             and self.status.elapsed_s is not None
             and self.status.elapsed_s < prev.elapsed_s
-        ):
+        )
+        if regressed:
             self.calories.reset()
+            self._corrected_steps = 0.0
+        else:
+            # step estimation: trust the pad's count at >= 3 km/h (and learn
+            # the personal stride curve from it); below that, derive steps
+            # from the exact belt distance and the learned stride
+            d_dist = (self.status.distance_m or 0) - (prev.distance_m or 0)
+            d_steps = (self.status.steps or 0) - (prev.steps or 0)
+            speed = self.status.speed_kmh or 0
+            if speed >= TRUST_SPEED_KMH and d_dist > 0 and d_steps > 0:
+                self.stride.learn(d_dist, d_steps, speed)
+                self._corrected_steps += d_steps
+            elif d_dist > 0:
+                stride = self.stride.stride_for(speed)
+                self._corrected_steps += (d_dist / stride) if stride else max(d_steps, 0)
         # belt state is derived from the pad (the master): it may have been
         # started/stopped by the physical remote between our commands
         self.belt_running = bool(self.status.speed_kmh and self.status.speed_kmh > 0)

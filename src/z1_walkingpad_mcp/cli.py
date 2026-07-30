@@ -13,7 +13,7 @@ def fmt_status(t: Z1Treadmill) -> str:
     s = t.status
     return (
         f"speed={s.speed_kmh} km/h  distance={s.distance_m} m  "
-        f"elapsed={s.elapsed_s} s  steps={s.steps}  kcal≈{t.calories.total_kcal:.1f}"
+        f"elapsed={s.elapsed_s} s  steps={t.steps_display}  kcal≈{t.calories.total_kcal:.1f}"
     )
 
 

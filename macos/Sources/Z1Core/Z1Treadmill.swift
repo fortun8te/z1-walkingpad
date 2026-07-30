@@ -121,6 +121,16 @@ public actor Z1Treadmill {
     private var calorieTracker = CalorieTracker()
     private var statOffsets = (elapsed: 0, distance: 0, steps: 0)
     public private(set) var persistStats = false
+    private var strideLearner = StrideLearner()
+    private var correctedSteps = 0.0
+
+    /// Step count to display: distance-derived estimate once the stride
+    /// curve is calibrated, pad count (with persistStats offsets) before that.
+    public var stepsDisplay: Int {
+        strideLearner.calibrated
+            ? Int(correctedSteps.rounded())
+            : displayStat(telemetry.steps, statOffsets.steps)
+    }
     private var calorieStateRestored = false
     private var lastTargetSpeed: Double?
     private var hasControl = false
@@ -415,7 +425,7 @@ public actor Z1Treadmill {
         return SessionSummary(
             durationS: durationS,
             distanceM: distanceM,
-            steps: displayStat(telemetry.steps, statOffsets.steps),
+            steps: stepsDisplay,
             avgSpeedKmh: avg,
             caloriesKcal: (calorieTracker.totalKcal * 10).rounded() / 10,
             weightKgUsed: calorieTracker.weightKg
@@ -438,6 +448,7 @@ public actor Z1Treadmill {
     public func clearStats() {
         statOffsets = (elapsed: 0, distance: 0, steps: 0)
         calorieTracker.reset()
+        correctedSteps = 0
         UserDefaults.standard.removeObject(forKey: Self.calorieStateKey)
         persistCalorieState()
         emitStatus()
@@ -492,16 +503,35 @@ public actor Z1Treadmill {
         // own timer). Default: the pad is the master — stats follow it down.
         // With persistStats on: fold the final values into the offsets and
         // keep accumulating instead.
-        if let prevElapsed = prev.elapsedS,
-           let curElapsed = telemetry.elapsedS,
-           curElapsed < prevElapsed
-        {
+        let regressed: Bool = {
+            guard let prevElapsed = prev.elapsedS, let curElapsed = telemetry.elapsedS else { return false }
+            return curElapsed < prevElapsed
+        }()
+        if regressed {
             if persistStats {
-                statOffsets.elapsed += prevElapsed
+                statOffsets.elapsed += prev.elapsedS ?? 0
                 statOffsets.distance += prev.distanceM ?? 0
                 statOffsets.steps += prev.steps ?? 0
             } else {
                 calorieTracker.reset()
+                correctedSteps = 0
+            }
+        } else {
+            // step estimation: trust the pad's count at >= 3 km/h (and learn
+            // the personal stride curve from it); below that, derive steps
+            // from the exact belt distance and the learned stride
+            let dDist = Double((telemetry.distanceM ?? 0) - (prev.distanceM ?? 0))
+            let dSteps = Double((telemetry.steps ?? 0) - (prev.steps ?? 0))
+            let speed = telemetry.speedKmh ?? 0
+            if speed >= StrideLearner.trustSpeedKmh, dDist > 0, dSteps > 0 {
+                strideLearner.learn(distanceM: dDist, steps: dSteps, speedKmh: speed)
+                correctedSteps += dSteps
+            } else if dDist > 0 {
+                if let stride = strideLearner.stride(for: speed) {
+                    correctedSteps += dDist / stride
+                } else {
+                    correctedSteps += max(dSteps, 0)
+                }
             }
         }
         if !calorieStateRestored {
@@ -561,7 +591,7 @@ public actor Z1Treadmill {
         s.beltRunning = (telemetry.speedKmh ?? 0) > 0
         s.distanceM = displayStat(telemetry.distanceM, statOffsets.distance)
         s.elapsedS = displayStat(telemetry.elapsedS, statOffsets.elapsed)
-        s.steps = displayStat(telemetry.steps, statOffsets.steps)
+        s.steps = stepsDisplay
         s.caloriesKcal = calorieTracker.totalKcal
         s.hasTelemetry = true
         status = s

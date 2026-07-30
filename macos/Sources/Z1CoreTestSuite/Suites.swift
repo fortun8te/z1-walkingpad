@@ -156,6 +156,45 @@ public func unitsTests(_ t: TestRunner) {
     }
 }
 
+/// Stride-curve estimator tests.
+public func strideTests(_ t: TestRunner) {
+    t.suite("stride") { t in
+        let key = "z1.strideLearner.test"
+        defer { UserDefaults.standard.removeObject(forKey: key) }
+
+        var fresh = StrideLearner(userDefaultsKey: key)
+        t.check(!fresh.calibrated, "starts uncalibrated")
+        t.expectNil(fresh.stride(for: 2.0), "no stride when uncalibrated")
+
+        fresh.learn(distanceM: 100, steps: 150, speedKmh: 2.0) // below trust speed
+        fresh.learn(distanceM: 0, steps: 100, speedKmh: 4.0)
+        fresh.learn(distanceM: 100, steps: 0, speedKmh: 4.0)
+        t.check(!fresh.calibrated, "invalid segments ignored")
+
+        fresh.learn(distanceM: 120, steps: 160, speedKmh: 3.5) // stride 0.75
+        t.check(fresh.calibrated, "calibrated after valid segment")
+        t.expectEqual(fresh.stride(for: 3.5)!, 0.75, accuracy: 1e-9, "bucket readback")
+
+        var two = StrideLearner(userDefaultsKey: key + ".two")
+        defer { UserDefaults.standard.removeObject(forKey: key + ".two") }
+        two.learn(distanceM: 140, steps: 200, speedKmh: 3.0) // 0.70
+        two.learn(distanceM: 160, steps: 200, speedKmh: 4.0) // 0.80
+        t.expectEqual(two.stride(for: 3.5)!, 0.75, accuracy: 1e-9, "interpolation")
+        t.expectEqual(two.stride(for: 1.6)!, 0.70, accuracy: 1e-9, "extrapolate low -> nearest")
+        t.expectEqual(two.stride(for: 6.4)!, 0.80, accuracy: 1e-9, "extrapolate high -> nearest")
+
+        var threshold = StrideLearner(userDefaultsKey: key + ".min")
+        defer { UserDefaults.standard.removeObject(forKey: key + ".min") }
+        threshold.learn(distanceM: 30, steps: 40, speedKmh: 3.5)
+        t.expectNil(threshold.stride(for: 3.5), "below 50m threshold not calibrated")
+        threshold.learn(distanceM: 30, steps: 40, speedKmh: 3.5) // 60m cumulative
+        t.expectEqual(threshold.stride(for: 3.5)!, 0.75, accuracy: 1e-9, "cumulative crosses threshold")
+
+        let reloaded = StrideLearner(userDefaultsKey: key)
+        t.expectEqual(reloaded.stride(for: 3.5)!, 0.75, accuracy: 1e-9, "persistence roundtrip")
+    }
+}
+
 /// Runs every suite. Returns the process exit code (0 = all passed).
 @discardableResult
 public func runAllZ1CoreTests() -> Int32 {
@@ -163,6 +202,7 @@ public func runAllZ1CoreTests() -> Int32 {
     protocolTests(runner)
     metricsTests(runner)
     unitsTests(runner)
+    strideTests(runner)
     if runner.failures == 0 {
         print("PASS: \(runner.checks) checks, 0 failures")
         return 0
