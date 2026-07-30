@@ -196,7 +196,7 @@ struct MenuBarView: View {
     private var quitRow: some View {
         HStack {
             Spacer()
-            Button("Quit Z1 WalkingPad") {
+            Button("Exit") {
                 viewModel.quit()
             }
             .keyboardShortcut("q")
