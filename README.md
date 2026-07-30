@@ -30,6 +30,8 @@ Everything is documented well enough to build your own client in any language: s
 
 ### macOS menu-bar app
 
+![The Z1 WalkingPad menu-bar app: live speed, controls, session stats, and settings](docs/assets/popover.svg)
+
 ```bash
 git clone https://github.com/slandau3/z1-walkingpad-mcp.git
 cd z1-walkingpad-mcp/macos
