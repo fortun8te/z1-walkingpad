@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.7" y2="1">
+      <stop offset="0" stop-color="#253140"/>
+      <stop offset="1" stop-color="#101820"/>
+    </linearGradient>
+    <linearGradient id="teal" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3EE6A8"/>
+      <stop offset="1" stop-color="#22B8CF"/>
+    </linearGradient>
+  </defs>
+
+  <!-- macOS-style rounded-square base -->
+  <rect width="1024" height="1024" rx="228" fill="url(#bg)"/>
+
+  <!-- Z1 monogram -->
+  <text x="512" y="490" text-anchor="middle"
+        font-family="'Helvetica Neue', Arial, sans-serif"
+        font-size="360" font-weight="800" letter-spacing="6"
+        fill="url(#teal)">Z1</text>
+
+  <!-- walking pad (side view) -->
+  <g>
+    <!-- floor shadow -->
+    <ellipse cx="512" cy="748" rx="330" ry="18" fill="#000000" opacity="0.35"/>
+
+    <!-- belt -->
+    <rect x="172" y="600" width="680" height="34" rx="17" fill="url(#teal)"/>
+    <!-- belt slats -->
+    <g stroke="#0E1620" stroke-width="6" stroke-linecap="round" opacity="0.5">
+      <line x1="240" y1="607" x2="240" y2="627"/>
+      <line x1="296" y1="607" x2="296" y2="627"/>
+      <line x1="352" y1="607" x2="352" y2="627"/>
+      <line x1="408" y1="607" x2="408" y2="627"/>
+      <line x1="464" y1="607" x2="464" y2="627"/>
+      <line x1="520" y1="607" x2="520" y2="627"/>
+      <line x1="576" y1="607" x2="576" y2="627"/>
+      <line x1="632" y1="607" x2="632" y2="627"/>
+      <line x1="688" y1="607" x2="688" y2="627"/>
+      <line x1="744" y1="607" x2="744" y2="627"/>
+      <line x1="800" y1="607" x2="800" y2="627"/>
+    </g>
+
+    <!-- deck body -->
+    <rect x="172" y="634" width="680" height="78" rx="30" fill="#2C3947"/>
+    <rect x="172" y="634" width="680" height="78" rx="30" fill="none" stroke="#45566A" stroke-width="3"/>
+
+    <!-- end rollers -->
+    <circle cx="206" cy="673" r="24" fill="#1B2530" stroke="url(#teal)" stroke-width="6"/>
+    <circle cx="818" cy="673" r="24" fill="#1B2530" stroke="url(#teal)" stroke-width="6"/>
+
+    <!-- feet -->
+    <rect x="230" y="712" width="56" height="20" rx="10" fill="#1B2530"/>
+    <rect x="738" y="712" width="56" height="20" rx="10" fill="#1B2530"/>
+  </g>
+</svg>
