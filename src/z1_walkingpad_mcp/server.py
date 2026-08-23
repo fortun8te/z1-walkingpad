@@ -20,11 +20,15 @@ from mcp.server.mcpserver import MCPServer
 
 from . import strava
 from .client import Z1Error, Z1Treadmill
+from .governor import Governor
+from .session_recorder import recover_incomplete
 
 mcp = MCPServer("z1-walkingpad")
 _treadmill = Z1Treadmill()
+governor = Governor(_treadmill)
 
 SESSIONS_DIR = Path(os.environ.get("Z1_SESSIONS_DIR", Path.home() / ".z1-walkingpad"))
+GOVERNOR_SESSIONS_DIR = governor.sessions_dir
 
 
 async def _ensure_connected() -> Z1Treadmill:
@@ -54,12 +58,81 @@ async def treadmill_start(speed_kmh: float | None = None) -> str:
     """Start the belt. Optionally set a target speed right after starting.
     The belt always ramps up from the minimum speed (1.6 km/h).
     Resets the session counters (distance/time/steps/calories)."""
-    t = await _ensure_connected()
-    await t.start()
+    await governor.connect()
+    await governor.start()
     if speed_kmh is not None:
-        await t.set_speed(speed_kmh)
-        return f"belt started, speed set to {speed_kmh} km/h"
-    return f"belt started at minimum speed ({t.min_speed} km/h)"
+        target = await governor.set_speed(speed_kmh)
+        return f"belt started, ramping to {target} km/h"
+    return f"belt started, ramping to {governor.config.default_speed_kmh} km/h"
+
+
+@mcp.tool()
+async def governor_status() -> dict:
+    """Governor state machine: state, fault, target/current speed,
+    distance/steps/step source, active session id."""
+    if not _treadmill.connected:
+        try:
+            await governor.connect()
+        except Exception:
+            pass
+    return governor.status_dict()
+
+
+@mcp.tool()
+async def governor_pause() -> str:
+    """Pause the belt (session counters preserved; resume with governor_resume)."""
+    await governor.pause()
+    return "belt paused"
+
+
+@mcp.tool()
+async def governor_resume() -> str:
+    """Manually clear a latched fault and/or restart ramping after pause."""
+    result = await governor.resume()
+    return "belt resumed" if result else "already running"
+
+
+@mcp.tool()
+async def governor_configure(max_speed_kmh: float | None = None,
+                             default_speed_kmh: float | None = None) -> str:
+    """Adjust Governor limits live. Speeds are clamped and validated."""
+    overrides = {k: v for k, v in {
+        "max_speed_kmh": max_speed_kmh, "default_speed_kmh": default_speed_kmh
+    }.items() if v is not None}
+    cfg = governor.configure(**overrides)
+    return f"configured: max={cfg.max_speed_kmh} km/h, default={cfg.default_speed_kmh} km/h"
+
+
+@mcp.tool()
+async def sessions_recover() -> int:
+    """Mark crash-interrupted session journals as incomplete-recovered.
+    Returns count recovered."""
+    paths = recover_incomplete(GOVERNOR_SESSIONS_DIR)
+    return len(paths)
+
+
+@mcp.tool()
+async def sessions_list() -> list[dict]:
+    """List recorded session summaries (newest first)."""
+    files = sorted(GOVERNOR_SESSIONS_DIR.glob("*.ready.json"), reverse=True)
+    out = []
+    for f in files[:50]:
+        try:
+            data = json.loads(f.read_text())
+            data["file"] = f.name
+            out.append(data)
+        except (OSError, json.JSONDecodeError):
+            continue
+    return out
+
+
+@mcp.tool()
+async def session_detail(session_id: str) -> dict:
+    """Full summary for one session id."""
+    path = GOVERNOR_SESSIONS_DIR / f"{session_id}.ready.json"
+    if not path.exists():
+        raise ValueError(f"unknown session {session_id}")
+    return json.loads(path.read_text())
 
 
 @mcp.tool()

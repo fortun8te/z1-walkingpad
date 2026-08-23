@@ -88,6 +88,8 @@ class Z1Treadmill:
         self._calorie_state_restored = False
         self.stride = StrideLearner()
         self._corrected_steps = 0.0
+        self._disconnect_callbacks: list[Callable[[], None]] = []
+        self._disconnect_callbacks: list[Callable[[], None]] = []
 
     @property
     def steps_display(self) -> int | None:
@@ -101,6 +103,9 @@ class Z1Treadmill:
 
     def on_status(self, cb: Callable[[p.TreadmillData], None]) -> None:
         self._status_callbacks.append(cb)
+
+    def on_disconnect(self, cb: Callable[[], None]) -> None:
+        self._disconnect_callbacks.append(cb)
 
     def _emit_status(self) -> None:
         for cb in self._status_callbacks:
@@ -164,6 +169,18 @@ class Z1Treadmill:
         except Z1Error:
             pass
 
+        # silence the buzzer (prop 8 bit 1) on every connect — best-effort
+        try:
+            cur = self.properties.get(8, 0)
+            if cur & 0x02:
+                await self._vendor_roundtrip(
+                    p.property_write_frame(8, cur & ~0x02),
+                    lambda f: f[0] == c.VOP_PROPERTY and f[1] == 0x81,
+                )
+                self.properties[8] = cur & ~0x02
+        except Z1Error:
+            pass
+
         # FTMS statics + control point indications
         try:
             rng = await self.client.read_gatt_char(c.CHAR_SUPPORTED_SPEED_RANGE)
@@ -178,6 +195,11 @@ class Z1Treadmill:
         self._has_control = False
         self.belt_running = False
         self._calorie_state_restored = False
+        for callback in list(self._disconnect_callbacks):
+            try:
+                callback()
+            except Exception:
+                pass
 
     async def disconnect(self) -> None:
         if self.client and self.client.is_connected:

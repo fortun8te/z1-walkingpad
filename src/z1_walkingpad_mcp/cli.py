@@ -7,6 +7,8 @@ import asyncio
 import sys
 
 from .client import Z1Error, Z1Treadmill
+from .config import GovernorConfig
+from .governor import Governor
 
 
 def fmt_status(t: Z1Treadmill) -> str:
@@ -18,8 +20,11 @@ def fmt_status(t: Z1Treadmill) -> str:
 
 
 async def cmd_status(args: argparse.Namespace) -> None:
-    t = Z1Treadmill(args.name)
+    cfg = GovernorConfig.from_env()
+    g = Governor(Z1Treadmill(args.name), config=cfg)
+    t = g.treadmill
     await t.connect()
+    print(f"governor: state={g.status_dict()['state']}  motion={'ON' if cfg.motion_enabled else 'OFF'}")
     print(f"connected to {t.device_name}, speed range {t.min_speed}-{t.max_speed} km/h")
     props = await t.read_properties()
     for pid, val in sorted(props.items()):
@@ -72,12 +77,46 @@ async def cmd_nudge(args: argparse.Namespace) -> None:
     await t.disconnect()
 
 
+async def cmd_supervise(args: argparse.Namespace) -> None:
+    cfg = GovernorConfig.from_env()
+    g = Governor(Z1Treadmill(args.name), config=cfg)
+    await g.treadmill.connect()
+    print(f"connected — governor state={g.status_dict()['state']}  motion={'ON' if cfg.motion_enabled else 'OFF'}")
+    if args.speed:
+        target = await g.set_speed(args.speed)
+        print(f"target speed: {target} km/h")
+    g.treadmill.on_status(lambda s: print(fmt_status(g.treadmill), flush=True))
+    if not cfg.motion_enabled:
+        print("motion disabled — passive recording only. Set Z1_ENABLE_MOTION=1 to start the belt.")
+        try:
+            await asyncio.Event().wait()  # supervise telemetry until Ctrl-C
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            pass
+    else:
+        await g.start()
+        print("belt started — walking. Press Ctrl-C to stop.")
+        try:
+            while True:
+                await asyncio.sleep(1)
+                if g.fault.value != "none":
+                    print(f"FAULT: {g.message} — belt stopped. Resume with 'resume'.")
+                    break
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            pass
+        summary = await g.stop()
+        print(f"session complete: {summary}")
+    await g.treadmill.disconnect()
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser(prog="z1-walkingpad", description=__doc__)
     parser.add_argument("--name", default=None, help="BLE name (default: scan for KS-HD-Z1*)")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("status", help="connect, unlock, dump properties and one telemetry sample")
+
+    p_sup = sub.add_parser("supervise", help="foreground supervised walk (Governor)")
+    p_sup.add_argument("--speed", type=float, default=None, help="target speed override (km/h)")
 
     p_start = sub.add_parser("start", help="start the belt")
     p_start.add_argument("--speed", type=float, default=None, help="set speed (km/h) after start")
@@ -90,7 +129,8 @@ async def main() -> int:
         p_nudge.add_argument("--delta", type=float, default=0.1, help="km/h step")
 
     args = parser.parse_args()
-    handlers = {"status": cmd_status, "start": cmd_start, "stop": cmd_stop, "up": cmd_nudge, "down": cmd_nudge}
+    handlers = {"status": cmd_status, "start": cmd_start, "stop": cmd_stop, "up": cmd_nudge,
+                "down": cmd_nudge, "supervise": cmd_supervise}
     try:
         await handlers[args.command](args)
         return 0

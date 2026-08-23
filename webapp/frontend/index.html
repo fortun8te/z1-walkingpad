@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+  <title>Z1</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    :root {
+      --glass-bg: rgba(255,255,255,0.06);
+      --glass-border: rgba(255,255,255,0.12);
+      --accent: #7dd3fc;
+      --danger: #f87171;
+      --text-primary: rgba(255,255,255,0.95);
+      --text-secondary: rgba(255,255,255,0.55);
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+      color: var(--text-primary);
+      min-height: 100dvh;
+      display:flex; flex-direction:column;
+      align-items:center; justify-content:center;
+      padding: env(safe-area-inset-top) 16px env(safe-area-inset-bottom);
+      overflow-x:hidden;
+    }
+    .card {
+      backdrop-filter: blur(24px) saturate(180%);
+      -webkit-backdrop-filter: blur(24px) saturate(180%);
+      background: var(--glass-bg);
+      border:1px solid var(--glass-border);
+      border-radius:28px;
+      padding:32px;
+      width:min(420px,100%);
+      text-align:center;
+      transition: transform .25s ease;
+    }
+    .card:hover { transform: translateY(-2px); }
+    h1 { font-size:15px; font-weight:500; letter-spacing:.5px; color:var(--text-secondary); margin-bottom:20px; }
+    .speed {
+      font-size:88px; font-weight:700;
+      letter-spacing:-4px; line-height:1;
+      color: var(--accent);
+      margin-bottom:6px;
+    }
+    .unit { font-size:14px; color:var(--text-secondary); letter-spacing:1px; margin-bottom:28px; }
+    .stats { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-bottom:32px; }
+    .stat { text-align:center; }
+    .stat-label { font-size:11px; letter-spacing:.5px; color:var(--text-secondary); margin-bottom:4px; }
+    .stat-value { font-size:22px; font-weight:600; }
+    .btn-row { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
+    button {
+      appearance:none; border:none;
+      backdrop-filter:blur(12px);
+      background:rgba(255,255,255,0.08);
+      border:1px solid var(--glass-border);
+      border-radius:16px;
+      color:var(--text-primary);
+      font-size:14px; font-weight:600;
+      padding:16px 0;
+      cursor:pointer;
+      transition:all .18s ease;
+    }
+    button:hover { background:rgba(255,255,255,0.14); transform:scale(1.02); }
+    button:active { transform:scale(.97); }
+    .stop-btn { grid-column:span 3; background:rgba(248,113,113,.12); border-color:rgba(248,113,113,.3); color:var(--danger); font-size:16px; }
+    .status-dot { width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:6px; vertical-align:middle; }
+    .dot-on { background:#4ade80; box-shadow:0 0 6px #4ade80aa; }
+    .dot-off { background:#6b7280; }
+    .fault-msg { font-size:13px; color:var(--danger); margin-top:14px; min-height:18px; }
+    .sessions { margin-top:28px; text-align:left; max-height:180px; overflow-y:auto; }
+    .session-row { display:flex; justify-content:space-between; padding:8px 12px;
+      border-radius:10px; background:rgba(255,255,255,.04); margin-bottom:6px; font-size:13px; }
+    .session-outcome { font-weight:600; }
+    .session-outcome.completed { color:#4ade80; }
+    .session-outcome.faulted { color:#f87171; }
+    .session-outcome.incomplete-recovered { color:#fbbf24; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1><span class="status-dot dot-off" id="dot"></span><span id="conn">Connecting…</span></h1>
+    <div class="speed"><span id="spd">—</span></div>
+    <div class="unit">KM/H</div>
+    <div class="stats">
+      <div class="stat"><div class="stat-label">DISTANCE</div><div class="stat-value" id="dist">—</div></div>
+      <div class="stat"><div class="stat-label">TIME</div><div class="stat-value" id="time">—</div></div>
+      <div class="stat"><div class="stat-label">STEPS</div><div class="stat-value" id="steps">—</div></div>
+    </div>
+    <div class="btn-row">
+      <button id="btn-start" onclick="api('start')">START</button>
+      <button id="btn-pause" onclick="api('pause')">PAUSE</button>
+      <button id="btn-resume" onclick="api('resume')">RESUME</button>
+    </div>
+    <br/>
+    <div class="btn-row">
+      <button class="stop-btn" onclick="api('stop')">STOP</button>
+    </div>
+    <div class="fault-msg" id="fault"></div>
+    <div class="sessions" id="sessions"></div>
+  </div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+async function api(action) {
+  try {
+    await fetch(`/api/${action}`, {method:'POST'});
+  } catch(e) { console.error(e); }
+}
+
+function fmt_time(s) {
+  if (!s) return '—';
+  const m = Math.floor(s/60), sec = Math.round(s%60);
+  return `${m}:${String(sec).padStart(2,'0')}`;
+}
+
+async function load_sessions() {
+  try {
+    const res = await fetch('/api/sessions');
+    const rows = await res.json();
+    $('sessions').innerHTML = rows.slice(0,8).map(r => {
+      const dist = r.distance_m ? (r.distance_m/1000).toFixed(2) + ' km' : '—';
+      const dur = fmt_time(r.duration_s);
+      return `<div class="session-row">
+        <span>${dist} · ${dur}</span>
+        <span class="session-outcome ${r.outcome}">${r.outcome}</span></div>`;
+    }).join('');
+  } catch(e) {}
+}
+load_sessions();
+setInterval(load_sessions, 15000);
+
+const ws = new WebSocket(`ws://${location.host}/ws`);
+ws.onopen = () => { $('dot').className='status-dot dot-on'; $('conn').textContent='Connected'; };
+ws.onclose = () => { $('dot').className='status-dot dot-off'; $('conn').textContent='Disconnected'; };
+ws.onmessage = ev => {
+  const d = JSON.parse(ev.data);
+  $('spd').textContent = d.current_speed_kmh != null ? d.current_speed_kmh.toFixed(1) : '—';
+  $('dist').textContent = d.distance_m != null ? (d.distance_m/1000).toFixed(2) + ' km' : '—';
+  $('time').textContent = fmt_time(d.elapsed_s);
+  $('steps').textContent = d.steps ?? '—';
+  $('fault').textContent = d.fault !== 'none' ? d.message || d.fault : '';
+};
+</script>
+</body>
+</html>
