@@ -23,12 +23,12 @@ qecho() { [[ $QUIET -eq 1 ]] || echo "$@"; }
 qecho "==> swift build -c release --arch arm64 (Z1MenuBar)"
 # Build quietly unless --quiet not set; tee to log for errors
 LOG=$(mktemp -t z1build.XXXXXX)
-if ! swift build -c release --arch arm64 --product Z1MenuBar >"$LOG" 2>&1; then
+if ! swift build -c release --arch arm64 --product Z1MenuBar --disable-sandbox >"$LOG" 2>&1; then
   cat "$LOG" >&2; rm -f "$LOG"; exit 1
 fi
 [[ $QUIET -eq 1 ]] || cat "$LOG" | tail -n 20
 rm -f "$LOG"
-BIN_DIR="$(swift build -c release --arch arm64 --show-bin-path 2>/dev/null)"
+BIN_DIR="$(swift build -c release --arch arm64 --show-bin-path --disable-sandbox 2>/dev/null)"
 
 qecho "==> bundling $APP"
 rm -rf "$APP"

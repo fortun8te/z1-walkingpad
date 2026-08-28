@@ -13,18 +13,6 @@ The WalkingPad Z1 (`KS-HD-Z1D`, firmware V0.0.6) speaks standard Bluetooth FTMS 
 
 Everything is documented well enough to build your own client in any language: see the [protocol quick reference](#quick-reference-build-your-own-cheat-sheet).
 
-![Platform](https://img.shields.io/badge/platform-macOS-blue)
-![Swift](https://img.shields.io/badge/swift-6-orange)
-![Python](https://img.shields.io/badge/python-%E2%89%A53.10-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
-
-The WalkingPad Z1 (`KS-HD-Z1D`, firmware V0.0.6) speaks standard Bluetooth FTMS — but locks it behind a vendor unlock handshake that stops every generic client cold. This project cracked that gate and ships two independent, production-ready implementations around it:
-
-- 🖥️ **macOS menu-bar app** — native SwiftUI, lives in your menu bar, Apple-clean UI
-- 🤖 **MCP server + CLI + Python library** — drive the treadmill from AI assistants (Claude, Kimi, …) or scripts
-
-Everything is documented well enough to build your own client in any language: see the [protocol quick reference](#quick-reference-build-your-own-cheat-sheet).
-
 ## Features
 
 - ▶️ Start / stop / pause, ±nudge steppers, and exact speed entry — type `3.1` or drag the slider (1.6–6.4 km/h)
@@ -82,8 +70,6 @@ MCP client config:
 ```
 
 Tools: `treadmill_status` · `treadmill_start` · `treadmill_set_speed` · `treadmill_speed_up` · `treadmill_speed_down` · `treadmill_pause` · `treadmill_stop` · `highscores` · `achievements` · `daily_totals` · `agent_data`
-
-
 
 ## SEO & discoverability
 

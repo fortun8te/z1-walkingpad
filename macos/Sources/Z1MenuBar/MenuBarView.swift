@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import Z1Core
 
+@MainActor
 struct MenuBarView: View {
     @ObservedObject var viewModel: TreadmillViewModel
 

@@ -18,6 +18,10 @@ public struct HighScores: Codable, Sendable, Equatable {
     public var totalDurationS: Int = 0
     public var streakDays: Int = 0
     public var bestStreakDays: Int = 0
+
+    public init(longestWalk: WalkSession? = nil, farthestWalk: WalkSession? = nil, mostStepsWalk: WalkSession? = nil, mostKcalWalk: WalkSession? = nil, mostStepsDay: DayTotalsCodable? = nil, mostKcalDay: DayTotalsCodable? = nil, mostDistanceDay: DayTotalsCodable? = nil, longestDayTime: DayTotalsCodable? = nil, totalWalks: Int = 0, totalDistanceM: Int = 0, totalSteps: Int = 0, totalKcal: Double = 0, totalDurationS: Int = 0, streakDays: Int = 0, bestStreakDays: Int = 0) {
+        self.longestWalk = longestWalk; self.farthestWalk = farthestWalk; self.mostStepsWalk = mostStepsWalk; self.mostKcalWalk = mostKcalWalk; self.mostStepsDay = mostStepsDay; self.mostKcalDay = mostKcalDay; self.mostDistanceDay = mostDistanceDay; self.longestDayTime = longestDayTime; self.totalWalks = totalWalks; self.totalDistanceM = totalDistanceM; self.totalSteps = totalSteps; self.totalKcal = totalKcal; self.totalDurationS = totalDurationS; self.streakDays = streakDays; self.bestStreakDays = bestStreakDays
+    }
 }
 
 /// Codable wrapper for DayTotals for agent export.

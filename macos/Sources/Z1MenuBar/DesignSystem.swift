@@ -753,8 +753,8 @@ struct SkyField: View {
         // First one soon after the window opens — a rare event nobody ever
         // sees is indistinguishable from a feature that does not exist (it
         // was, in fact, exactly that: an opacity bug kept every star at 0).
-        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { fireStar() }
-        Timer.scheduledTimer(withTimeInterval: 23, repeats: true) { _ in fireStar() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { Task { @MainActor in fireStar() } }
+        Timer.scheduledTimer(withTimeInterval: 23, repeats: true) { _ in Task { @MainActor in fireStar() } }
     }
 
     private func fireStar() {
