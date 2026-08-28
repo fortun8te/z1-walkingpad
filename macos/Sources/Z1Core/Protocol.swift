@@ -129,11 +129,17 @@ public enum Z1Protocol {
         let flags = Int(raw[raw.startIndex]) | (Int(raw[raw.startIndex + 1]) << 8)
         var off = raw.startIndex + 2
 
+        var truncated = false
         @discardableResult
         func take(_ n: Int) -> Data {
             let end = min(off + n, raw.endIndex)
             let chunk = Data(raw[off ..< end])
             off = end
+            // A field the flags promised but the packet cannot deliver means
+            // the frame arrived truncated. Decoding the missing tail as zero
+            // reads downstream as a counter reset and wipes the session —
+            // the whole frame must be dropped instead.
+            if chunk.count < n { truncated = true }
             return chunk
         }
         func u16(_ d: Data) -> Int {
@@ -167,6 +173,7 @@ public enum Z1Protocol {
         if flags & 0x2000 != 0 { // KingSmith extension: step count
             out.steps = u16(take(2))
         }
+        if truncated { return TreadmillData() }   // drop the frame whole
         return out
     }
 }

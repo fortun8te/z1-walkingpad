@@ -33,14 +33,17 @@ class SessionRecorder:
         self.sessions_dir = Path(sessions_dir)
         self.session_id: str | None = None
         self._started_at: float | None = None
+        self._last_session_id: str | None = None
 
     @property
     def journal_path(self) -> Path:
-        assert self.session_id is not None
-        return self.sessions_dir / f"{self.session_id}.journal.jsonl"
+        sid = self.session_id or self._last_session_id
+        assert sid is not None, "no session started"
+        return self.sessions_dir / f"{sid}.journal.jsonl"
 
     def start(self, meta: dict | None = None) -> str:
         self.session_id = f"{_utc_stamp()}-{uuid.uuid4().hex[:6]}"
+        self._last_session_id = self.session_id
         self._started_at = time.time()
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         record = {"kind": "start", "ts": self._started_at}
@@ -52,7 +55,7 @@ class SessionRecorder:
             os.fsync(f.fileno())
         return self.session_id
 
-    def log(self, kind: str, payload: dict | None = None) -> None:
+    def log(self, kind: str, payload: dict | None = None, *, _fsync: bool = True) -> None:
         if self.session_id is None:
             return
         record = {"kind": kind, "ts": time.time()}
@@ -60,11 +63,16 @@ class SessionRecorder:
             record.update(payload)
         with self.journal_path.open("a") as f:
             f.write(json.dumps(record) + "\n")
-            f.flush()
-            os.fsync(f.fileno())
+            if _fsync:
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass
 
     def log_telemetry(self, sample: dict) -> None:
-        self.log("telemetry", sample)
+        # perf: telemetry is 1Hz, no need to fsync each sample — fsync only on important events
+        self.log("telemetry", sample, _fsync=False)
 
     def finalize(self, outcome: str = "completed", summary: dict | None = None) -> Path:
         assert self.session_id is not None
@@ -76,16 +84,26 @@ class SessionRecorder:
             f.write(json.dumps(end_record) + "\n")
             f.flush()
             os.fsync(f.fileno())
+        sid_for_path = self.session_id
+        started_at = self._started_at
+        self.session_id = None
+        self._started_at = None
         ready = {
-            "session_id": self.session_id,
+            "session_id": sid_for_path,
             "outcome": outcome,
-            "started_at": self._started_at,
+            "started_at": started_at,
             "ended_at": ended_at,
         }
         if summary:
             ready.update(summary)
-        path = self.sessions_dir / f"session-{self.session_id}.json"
+        path = self.sessions_dir / f"session-{sid_for_path}.json"
         _atomic_write_json(path, ready)
+        # keep agent-data.json fresh for agents (no extra I/O if no sessions)
+        try:
+            from .highscores import write_agent_export
+            write_agent_export(self.sessions_dir)
+        except Exception:
+            pass
         return path
 
 

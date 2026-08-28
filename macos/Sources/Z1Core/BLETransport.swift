@@ -150,6 +150,26 @@ final class BLETransport: NSObject, @unchecked Sendable {
         }
     }
 
+    /// The identifier of the peripheral we are currently bound to, if any.
+    /// Persist it to skip the scan on the next launch.
+    var peripheralIdentifier: UUID? {
+        lock.withLock { peripheral?.identifier }
+    }
+
+    /// Re-adopt a peripheral macOS already knows by identifier, skipping the
+    /// scan entirely. Returns its name, or nil when the system has forgotten
+    /// it (or cannot tell us the name — which the unlock token is derived
+    /// from, so a nameless peripheral is useless to us).
+    ///
+    /// Requires the central to be powered on.
+    func adoptKnownPeripheral(identifier: UUID, namePrefix: String) -> String? {
+        guard let found = central.retrievePeripherals(withIdentifiers: [identifier]).first,
+              let name = found.name, name.hasPrefix(namePrefix)
+        else { return nil }
+        lock.withLock { peripheral = found }
+        return name
+    }
+
     /// Scan for the first peripheral whose name starts with `namePrefix`.
     /// Returns the device name; the peripheral is retained internally.
     func scan(namePrefix: String, timeout: TimeInterval) async throws -> String {
@@ -181,12 +201,33 @@ final class BLETransport: NSObject, @unchecked Sendable {
                 cont.resume(throwing: BLETransportError.notConnected)
                 return
             }
+            // Already linked (a pending connect from a previous attempt landed
+            // while we were not waiting) — CoreBluetooth would not call the
+            // delegate again, so resolve immediately.
+            if target.state == .connected {
+                if let cont = take(\.connectCont) {
+                    queue.async { target.delegate = self }
+                    cont.resume()
+                }
+                return
+            }
             queue.async {
                 target.delegate = self
                 self.central.connect(target, options: nil)
             }
+            // Deliberately does NOT cancel the underlying connect request on
+            // timeout: CoreBluetooth keeps it pending and links the moment the
+            // pad advertises again, so the next retry finds it already
+            // connected instead of starting over.
             scheduleTimeout(timeout) { [weak self] in
                 guard let self, let cont = self.take(\.connectCont) else { return }
+                // CoreBluetooth's connect() never times out on its own: the
+                // request stays queued forever. Abandoning it without
+                // cancelling leaves a pending connect for a peripheral that
+                // only accepts one central, so every later attempt queues
+                // behind the last dead one and the app slowly stops being
+                // able to connect at all.
+                self.central.cancelPeripheralConnection(target)
                 cont.resume(throwing: BLETransportError.timeout)
             }
         }
@@ -291,6 +332,15 @@ final class BLETransport: NSObject, @unchecked Sendable {
         } else {
             queue.async { target.writeValue(data, for: char, type: .withoutResponse) }
         }
+    }
+
+    /// Best-effort synchronous teardown for process exit, where there is no
+    /// time to await anything. The pad accepts a single central, so leaving
+    /// the link up on quit is what makes the *next* launch fail to connect.
+    func cancelConnectionNow() {
+        let target = lock.withLock { () -> CBPeripheral? in peripheral }
+        guard let target else { return }
+        central.cancelPeripheralConnection(target)
     }
 
     func disconnect() async {

@@ -16,26 +16,34 @@ import Foundation
 public struct StrideLearner: Sendable {
     public static let trustSpeedKmh = 3.0
     /// Minimum accumulated distance in a bucket before it's calibrated.
-    public static let minBucketDistanceM = 50.0
+    public static let minBucketDistanceM = 100.0
+    public static let minBucketWindows = 3.0
+    public static let minStrideM = 0.30
+    public static let maxStrideM = 1.50
 
     public static let defaultsKey = "z1.strideLearner"
 
-    /// bucket (0.5 km/h) -> (totalDistanceM, totalSteps)
-    public private(set) var buckets: [Double: (distance: Double, steps: Double)] = [:]
+    /// bucket (0.5 km/h) -> (totalDistanceM, totalSteps, acceptedWindows)
+    public private(set) var buckets: [Double: (distance: Double, steps: Double, windows: Double)] = [:]
     private let storageKey: String
 
     public init(userDefaultsKey: String = StrideLearner.defaultsKey) {
         storageKey = userDefaultsKey
         if let raw = UserDefaults.standard.dictionary(forKey: userDefaultsKey) as? [String: [Double]] {
-            for (k, v) in raw where v.count == 2 {
+            for (k, v) in raw where v.count >= 2 {
                 guard let b = Double(k) else { continue }
-                buckets[b] = (v[0], v[1])
+                buckets[b] = (v[0], v[1], v.count > 2 ? v[2] : 0)
             }
         }
     }
 
     public var calibrated: Bool {
-        buckets.values.contains { $0.distance >= Self.minBucketDistanceM }
+        buckets.values.contains {
+            $0.distance >= Self.minBucketDistanceM
+                && $0.windows >= Self.minBucketWindows
+                && $0.steps > 0
+                && (Self.minStrideM ... Self.maxStrideM).contains($0.distance / $0.steps)
+        }
     }
 
     static func bucket(_ speedKmh: Double) -> Double {
@@ -45,9 +53,11 @@ public struct StrideLearner: Sendable {
     /// Feed a trusted-zone segment (call only at >= trustSpeedKmh).
     public mutating func learn(distanceM: Double, steps: Double, speedKmh: Double) {
         guard speedKmh >= Self.trustSpeedKmh, distanceM > 0, steps > 0 else { return }
+        let stride = distanceM / steps
+        guard (Self.minStrideM ... Self.maxStrideM).contains(stride) else { return }
         let b = Self.bucket(speedKmh)
-        let e = buckets[b] ?? (0, 0)
-        buckets[b] = (e.distance + distanceM, e.steps + steps)
+        let e = buckets[b] ?? (0, 0, 0)
+        buckets[b] = (e.distance + distanceM, e.steps + steps, e.windows + 1)
         persist()
     }
 
@@ -55,7 +65,12 @@ public struct StrideLearner: Sendable {
     /// between neighbors, or nearest bucket. nil if uncalibrated.
     public func stride(for speedKmh: Double) -> Double? {
         let points = buckets
-            .filter { $0.value.distance >= Self.minBucketDistanceM && $0.value.steps > 0 }
+            .filter {
+                $0.value.distance >= Self.minBucketDistanceM
+                    && $0.value.windows >= Self.minBucketWindows
+                    && $0.value.steps > 0
+                    && (Self.minStrideM ... Self.maxStrideM).contains($0.value.distance / $0.value.steps)
+            }
             .map { (bucket: $0.key, stride: $0.value.distance / $0.value.steps) }
             .sorted { $0.bucket < $1.bucket }
         guard !points.isEmpty else { return nil }
@@ -74,7 +89,7 @@ public struct StrideLearner: Sendable {
     private func persist() {
         var raw: [String: [Double]] = [:]
         for (bucket, value) in buckets {
-            raw[String(bucket)] = [value.distance, value.steps]
+            raw[String(bucket)] = [value.distance, value.steps, value.windows]
         }
         UserDefaults.standard.set(raw, forKey: storageKey)
     }

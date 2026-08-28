@@ -3,17 +3,20 @@
 Run: python -m z1_walkingpad_mcp.server   (stdio transport)
 
 Set Z1_WEIGHT_KG for accurate calorie estimates (default 75).
-On stop, session summaries are appended to sessions.jsonl and written as
-per-session JSON files in the sessions directory (default
-~/.z1-walkingpad; override with Z1_SESSIONS_DIR — point it at an iCloud
-Drive folder to feed the iOS Shortcut bridge, see docs/apple-health.md).
+On stop, session summaries are appended to sessions.jsonl and validated
+Health queue files are written to iCloud Drive automatically on macOS (or a
+local subfolder elsewhere). Override with Z1_HEALTH_QUEUE_DIR if needed; see
+docs/apple-health.md.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import tempfile
 import time
+import uuid
+import sys
 from pathlib import Path
 
 from mcp.server.mcpserver import MCPServer
@@ -21,6 +24,9 @@ from mcp.server.mcpserver import MCPServer
 from . import strava
 from .client import Z1Error, Z1Treadmill
 from .governor import Governor
+from .health_automation import trigger_health_shortcut
+from .health_export import build_health_record
+from .highscores import compute_achievements, compute_highscores, export_agent_data, write_agent_export
 from .session_recorder import recover_incomplete
 
 mcp = MCPServer("z1-walkingpad")
@@ -29,6 +35,19 @@ governor = Governor(_treadmill)
 
 SESSIONS_DIR = Path(os.environ.get("Z1_SESSIONS_DIR", Path.home() / ".z1-walkingpad"))
 GOVERNOR_SESSIONS_DIR = governor.sessions_dir
+HEALTH_ROUTE = os.environ.get("Z1_HEALTH_ROUTE", "shortcut").strip().lower()
+# The Shortcuts app's own iCloud container -- the folder the Files app shows as
+# "iCloud Drive > Shortcuts". The Shortcuts "Get File" action resolves its path
+# relative to THIS folder, not to the iCloud Drive root, so a queue written
+# anywhere else is invisible to the iPhone Shortcut.
+_DEFAULT_HEALTH_QUEUE = (
+    Path.home()
+    / "Library/Mobile Documents/iCloud~is~workflow~my~workflows/Documents"
+    / "z1-walkingpad/health-queue"
+    if sys.platform == "darwin"
+    else SESSIONS_DIR / "health-queue"
+)
+HEALTH_QUEUE_DIR = Path(os.environ.get("Z1_HEALTH_QUEUE_DIR", _DEFAULT_HEALTH_QUEUE))
 
 
 async def _ensure_connected() -> Z1Treadmill:
@@ -114,7 +133,7 @@ async def sessions_recover() -> int:
 @mcp.tool()
 async def sessions_list() -> list[dict]:
     """List recorded session summaries (newest first)."""
-    files = sorted(GOVERNOR_SESSIONS_DIR.glob("*.ready.json"), reverse=True)
+    files = sorted(GOVERNOR_SESSIONS_DIR.glob("session-*.json"), reverse=True)
     out = []
     for f in files[:50]:
         try:
@@ -129,10 +148,38 @@ async def sessions_list() -> list[dict]:
 @mcp.tool()
 async def session_detail(session_id: str) -> dict:
     """Full summary for one session id."""
-    path = GOVERNOR_SESSIONS_DIR / f"{session_id}.ready.json"
+    path = GOVERNOR_SESSIONS_DIR / f"session-{session_id}.json"
     if not path.exists():
         raise ValueError(f"unknown session {session_id}")
     return json.loads(path.read_text())
+
+
+@mcp.tool()
+async def highscores() -> dict:
+    """Highscores: longest walk, farthest, most steps/kcal (single walk + best day), streaks, totals. Agent-readable."""
+    return compute_highscores(GOVERNOR_SESSIONS_DIR)
+
+@mcp.tool()
+async def achievements() -> list[dict]:
+    """Achievements / badges: unlocked + progress 0..1 for each."""
+    return compute_achievements(GOVERNOR_SESSIONS_DIR)
+
+@mcp.tool()
+async def daily_totals(days: int = 7) -> list[dict]:
+    """Daily aggregates for last N days (default 7, max 90)."""
+    days = max(1, min(int(days), 90))
+    hs = compute_highscores(GOVERNOR_SESSIONS_DIR)
+    return hs.get("daily_aggregates", [])[-days:]
+
+@mcp.tool()
+async def agent_data() -> dict:
+    """Full agent-readable export: sessions + highscores + achievements + daily_aggregates. Writes agent-data.json too."""
+    data = export_agent_data(GOVERNOR_SESSIONS_DIR)
+    try:
+        write_agent_export(GOVERNOR_SESSIONS_DIR)
+    except Exception:
+        pass
+    return data
 
 
 @mcp.tool()
@@ -171,28 +218,66 @@ async def treadmill_pause() -> str:
 async def treadmill_stop() -> dict:
     """Stop the belt, end the session, and return its summary:
     duration, distance, steps, average speed, estimated calories.
-    The summary is appended to sessions.jsonl, written as a
-    session-<timestamp>.json file, and uploaded to Strava if configured
-    (see docs/strava.md) — the Strava iOS app then syncs it to Apple Health."""
+    The summary is appended to sessions.jsonl and sent through exactly one
+    Health route: the iPhone Shortcut queue by default, or Strava only when
+    Z1_HEALTH_ROUTE=strava is explicitly configured."""
     t = await _ensure_connected()
-    summary = await t.stop()
-    record = {"ended_at": int(time.time()), **summary}
+    has_session = governor.session_id is not None or t.session_clock.started_at is not None
+    if not has_session:
+        return {"health_export_skipped": "no active session"}
+    summary = await governor.stop() if governor.session_id is not None else await t.stop()
+    ended_at = time.time()
+    session_id = uuid.uuid4().hex
+    record = {"session_id": session_id, "ended_at": ended_at, **summary}
     try:
         SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
         with (SESSIONS_DIR / "sessions.jsonl").open("a") as f:
             f.write(json.dumps(record) + "\n")
-        # per-session file for the iOS Shortcut / Apple Health bridge
-        with (SESSIONS_DIR / f"session-{record['ended_at']}.json").open("w") as f:
-            json.dump(record, f, indent=2)
     except OSError:
         pass
-    # best-effort Strava upload — never let a sync failure break stop
-    if strava.configured():
+
+    # Use exactly one Health route.  A successful Strava upload suppresses
+    # the Shortcut queue item; otherwise the validated file is the fallback.
+    strava_uploaded = False
+    if HEALTH_ROUTE == "strava" and strava.configured():
         try:
-            activity_id = strava.upload_walk(summary, record["ended_at"])
+            activity_id = strava.upload_walk(summary, int(ended_at))
             summary["strava_activity_id"] = activity_id
+            strava_uploaded = True
         except strava.StravaError as e:
             summary["strava_error"] = str(e)
+    elif HEALTH_ROUTE == "strava":
+        summary["strava_error"] = "Strava route selected but not configured"
+
+    health_record = build_health_record(summary, ended_at, session_id)
+    health_queued = False
+    if not strava_uploaded and health_record is not None:
+        try:
+            HEALTH_QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+            fd, tmp_name = tempfile.mkstemp(dir=HEALTH_QUEUE_DIR, suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(health_record, f, indent=2)
+                os.replace(tmp_name, HEALTH_QUEUE_DIR / f"health-{session_id}.json")
+                health_queued = True
+            except BaseException:
+                try:
+                    os.unlink(tmp_name)
+                except OSError:
+                    pass
+                raise
+        except OSError:
+            summary["health_export_error"] = "could not write Health queue file"
+    elif not strava_uploaded:
+        summary["health_export_skipped"] = "session too short or invalid"
+    if health_queued:
+        automation = trigger_health_shortcut()
+        if automation is not None:
+            summary["health_automation"] = automation
+    try:
+        write_agent_export(GOVERNOR_SESSIONS_DIR)
+    except Exception:
+        pass
     return summary
 
 

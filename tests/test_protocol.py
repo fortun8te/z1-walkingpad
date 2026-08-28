@@ -74,3 +74,15 @@ def test_sysinfo_frame_layout():
     assert frame[3:7] == (0x6A6AD4E1).to_bytes(4, "little")
     assert frame[7:11] == b"\x00\x00\x00\x00"
     assert frame[-1] == sum(frame[:-1]) & 0xFF
+
+
+def test_parse_treadmill_data_truncated_frame_dropped_whole():
+    # Flags claim distance+elapsed+steps, but the frame is cut short after
+    # speed: the missing tail must not decode as zeros (which read as a
+    # counter reset and would wipe calories/steps downstream).
+    raw = bytes.fromhex("0424fa00")  # speed present; flagged fields absent
+    d = p.parse_treadmill_data(raw)
+    assert d.speed_kmh == 2.5
+    assert d.distance_m is None
+    assert d.elapsed_s is None
+    assert d.steps is None

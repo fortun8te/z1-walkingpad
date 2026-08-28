@@ -26,3 +26,18 @@ def test_crash_recovery_once(tmp_path):
     assert len(first) == 1 and second == []
     data = json.loads(first[0].read_text())
     assert data["outcome"] == "incomplete-recovered"
+
+
+def test_finalize_closes_session(tmp_path):
+    import pytest as _pytest
+
+    from z1_walkingpad_mcp.session_recorder import SessionRecorder
+
+    rec = SessionRecorder(tmp_path)
+    rec.start()
+    path = rec.finalize("completed", {"distance_m": 1})
+    assert path.exists()
+    assert rec.session_id is None
+    assert rec._started_at is None
+    with _pytest.raises(AssertionError):
+        rec.finalize()  # double-finalize must fail closed, not append twice

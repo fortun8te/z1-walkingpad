@@ -53,5 +53,6 @@ Strava app next syncs.
   description.
 - Strava API rate limits (100/15 min, 1000/day) are irrelevant at one
   activity per session.
-- The iCloud/Shortcut bridge (`docs/apple-health.md`) still works as an
-  offline fallback — session files are written regardless.
+- The iCloud/Shortcut bridge (`docs/apple-health.md`) is the automatic
+  fallback when Strava is unavailable. A successful Strava upload suppresses
+  the queue file so Apple Health and WHOOP do not receive the same walk twice.

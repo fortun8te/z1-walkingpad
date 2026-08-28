@@ -180,15 +180,13 @@ under load (walking). Counters persist across BLE connections while the
 pad's session is open, and reset when the pad finalizes a session (Stop)
 or on its own schedule — clients display them as-is (pad-as-master).
 
-**Step accuracy note:** the pad's step counter (belt/motor dynamics) is
-unreliable at slow speeds — consumer counters err 20–40% below ~3 km/h
-(Beevi et al.). Both clients therefore display a corrected count: they
-learn the user's personal stride-vs-speed curve while speed ≥ 3 km/h
-(`stride = distance / steps` per 0.5 km/h bucket, persisted), and below
-that derive steps from the mechanically exact belt distance:
-`steps = distance / stride(speed)`. Raw pad steps are shown until the
-curve is calibrated. Distance and elapsed time are always exact and used
-as-is.
+**Step accuracy note:** the Z1's own error has not yet been measured; generic
+consumer-counter studies are not a Z1 validation. Both clients therefore keep
+every raw step at ≥3 km/h but learn stride only from stable 12-second windows.
+A 0.5 km/h bucket needs three accepted windows and 100 m, and impossible
+0.30–1.50 m/step outliers are rejected. Below 3 km/h, calibrated steps are
+derived from belt distance. The displayed total remains continuous before,
+during, and after calibration.
 
 ## Calories (computed locally)
 

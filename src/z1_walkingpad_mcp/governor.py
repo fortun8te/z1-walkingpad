@@ -81,6 +81,8 @@ class Governor:
         if self.fault is not FaultCode.NONE:
             self.fault = FaultCode.NONE
             self.message = "manual resume after fault"
+            self.state = GovernorState.READY
+            self._supervisor_task = None
             self.recorder.log("resume", {"after_fault": True})
         self._require_motion()
         return await self.start() if not self.treadmill.belt_running else None
@@ -109,8 +111,12 @@ class Governor:
             summary = {}
         try:
             await asyncio.wait_for(self.treadmill.stop(), self.config.command_timeout_s)
-        except Exception:
-            pass
+        except Exception as exc:
+            self.fault = FaultCode.COMMAND_TIMEOUT
+            self.message = f"stop failed: {exc}"
+            self.state = GovernorState.FAULTED
+            self.recorder.log("stop_failed", {"error": str(exc)})
+            raise
         if self._supervisor_task and not self._supervisor_task.done():
             self._supervisor_task.cancel()
         outcome = "faulted" if self.fault is not FaultCode.NONE else "completed"
@@ -118,6 +124,10 @@ class Governor:
             self.recorder.log("stop", {"outcome": outcome})
             self.recorder.finalize(outcome=outcome, summary={**summary, "fault": self.fault.value})
             self.recorder.session_id = None
+        self.session_id = None
+        self._prev_distance_m = None
+        self._prev_steps = None
+        self._step_off_armed = False
         self.state = GovernorState.READY
         return summary
 
@@ -187,7 +197,9 @@ class Governor:
         loop = asyncio.get_event_loop()
         last_ramp_ts = loop.time()
         while True:
-            await asyncio.sleep(0.05)
+            # adaptive: ramp needs 50ms, idle can be 200ms (less CPU wake)
+            delay = 0.05 if self.state is GovernorState.RAMPING else 0.2
+            await asyncio.sleep(delay)
             now = loop.time()
             s = self.treadmill.status
             active = self.state in {GovernorState.RAMPING, GovernorState.RUNNING}

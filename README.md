@@ -16,15 +16,21 @@ Everything is documented well enough to build your own client in any language: s
 
 ## Features
 
-- ▶️ Start / stop / pause, set speed, ±nudge steppers (1.6–6.4 km/h range)
-- 📊 Live telemetry: speed, distance, elapsed time, **steps** — self-calibrating estimate that learns your stride-vs-speed curve (pad counters are unreliable at slow speeds; belt distance is exact)
+- ▶️ Start / stop / pause, ±nudge steppers, and exact speed entry — type `3.1` or drag the slider (1.6–6.4 km/h)
+- 📊 Live telemetry: speed, distance, elapsed time, **steps** — stable-window estimate that learns your stride-vs-speed curve and rejects implausible samples
 - 🔥 Calorie estimate via the ACSM walking metabolic equation (research-backed; ±10–15%)
 - 🧠 The pad is the master — app reflects reality even when you use the physical remote
 - 🔁 Pad is the master for counters; calories and steps persist across reconnects (gap-credited) — or flip on "Persist stats across sessions" to accumulate until you hit Clear
 - 😴 Exit stops the belt and puts the pad in standby
 - 🔋 Zero measurable battery impact (0.0% CPU, 0.0 power score)
-- 🇺🇸 Imperial/metric units, synced to the pad's own display
-- 📝 Session history as JSON; Apple Health bridge via iCloud + iOS Shortcut
+- 🇺🇸 Imperial/metric units, synced to the pad's own display (metric distances are always km — no metre/km switching)
+- 📊 Configurable menu-bar readout (speed / elapsed / distance / steps / kcal / today's minutes / today's steps) and a daily goal — 120 minutes by default, or switch Settings to a step goal (8,000 by default)
+- 🏆 Records & achievements: longest walk, farthest, most steps/kcal (walk + day), streaks, 19 badges — derived from history, never loses data on update
+- 🤖 Agent-readable data: `agent-data.json` (Swift) + `~/.z1-walkingpad/agent-data.json` + MCP tools `highscores`/`achievements`/`daily_totals`/`agent_data` (schema v1)
+- 📅 Walk history on disk: today's totals, a seven-day chart, and the last walks in the popover (walks shorter than 2 minutes are not recorded)
+- 🌤️ Almanac card in the popover: click to toggle its tile strip between This week and 30 days (each tap resets the detail back to Today); every day renders as a small sky tile whose glow reflects that day's goal progress (sunrise/sunset computed locally, defaulting to Amersfoort, NL)
+- 🔌 Built to stay connected: start at login, instant reconnect on wake, and no idle sleep while the belt moves
+- 📝 Local session history as JSON on this Mac (no iCloud / Health / WHOOP queue by default)
 
 ## Quick start
 
@@ -35,7 +41,7 @@ Everything is documented well enough to build your own client in any language: s
 ```bash
 git clone https://github.com/slandau3/z1-walkingpad-mcp.git
 cd z1-walkingpad-mcp/macos
-bash build-app.sh --install    # builds + signs Z1WalkingPad.app → /Applications
+bash build-app.sh               # builds, stable codesign, ditto in place into /Applications (Bluetooth TCC survives rebuilds)
 ```
 
 Launch it, click the `figure.walk` menu-bar icon → **Connect**. Requires only the macOS Command Line Tools — no Xcode, no Python.
@@ -64,7 +70,7 @@ MCP client config:
 }
 ```
 
-Tools: `treadmill_status` · `treadmill_start` · `treadmill_set_speed` · `treadmill_speed_up` · `treadmill_speed_down` · `treadmill_pause` · `treadmill_stop`
+Tools: `treadmill_status` · `treadmill_start` · `treadmill_set_speed` · `treadmill_speed_up` · `treadmill_speed_down` · `treadmill_pause` · `treadmill_stop` · `highscores` · `achievements` · `daily_totals` · `agent_data`
 
 ## Contents
 
@@ -72,7 +78,7 @@ Tools: `treadmill_status` · `treadmill_start` · `treadmill_set_speed` · `trea
 - [Behavior nuances](#behavior-nuances-what-to-expect)
 - [Usage](#usage)
 - [Protocol](#how-it-works-the-protocol) — [quick reference](#quick-reference-build-your-own-cheat-sheet)
-- [Health metrics & Apple Health](#health-metrics)
+- [Health metrics](#health-metrics)
 - [Development](#development)
 - [Safety model](#safety-model)
 
@@ -83,9 +89,9 @@ Tools: `treadmill_status` · `treadmill_start` · `treadmill_set_speed` · `trea
 | Purpose | Manual daily control | AI-assistant control and scripts |
 | Code | Swift, CoreBluetooth (`macos/`) | Python, bleak (`src/z1_walkingpad_mcp/`) |
 | Install | `bash build-app.sh --install` | `uv pip install -e ".[mcp]"` |
-| Units | Imperial/metric setting (default Imperial) | km/h + kg; `Z1_WEIGHT_KG` env |
+| Units | Imperial/metric setting (default Metric) | km/h + kg; `Z1_WEIGHT_KG` env |
 | Session log | in-app summary | JSON in `~/.z1-walkingpad/` (or `Z1_SESSIONS_DIR`) |
-| Settings | units, body weight, speed step | env vars |
+| Settings | units, body weight, speed step, daily goal (minutes or steps) | env vars |
 
 Both talk to the pad directly and independently — neither needs the other. **Only one BLE connection at a time**: quit the app (or stop the MCP server) before using the other.
 
@@ -95,17 +101,18 @@ Both talk to the pad directly and independently — neither needs the other. **O
 - **Calories are the one thing we compute** (the pad reports none) — but they follow the same lifecycle: the estimate resets when the pad's counters reset, so the numbers never disagree about what "this session" is.
 - **Calories and steps persist across reconnects.** Saved every second; disconnect while the belt is still moving and both counts continue, with the disconnected gap estimated (avg-speed calories, stride-based steps) — because the pad's session never ended.
 - **Want a trip odometer instead?** Settings → **Persist stats across sessions** makes time/distance/steps/kcal keep accumulating across Stops (the pad's resets are folded in) until you hit the **Clear** button beside it. Off = pad-as-master.
-- **Step counts are corrected, not just relayed.** Consumer step counters degrade badly below ~3 km/h (research: 20–40% error at desk speeds), but belt distance is mechanically exact — so once you've walked at ≥3 km/h for a few minutes, the app has learned your personal stride-vs-speed curve and derives slow-speed steps from distance instead. Until then it shows the pad's raw count.
+- **Step counts are corrected, not just relayed.** At ≥3 km/h the app preserves every raw step but learns only from stable 12-second windows. It requires at least three accepted windows and 100 m, rejects impossible stride lengths, then derives slow-speed steps from belt distance. Until then it keeps a continuous raw total.
 - **Start on a moving belt is a no-op** (the pad refuses it) — `start()` skips the command when the belt is already moving.
 - **Exit stops the belt and sleeps the pad**, then quits — never hangs more than 3 s.
 - **Battery:** unmeasurable. 0.0% CPU / 0.0 power-impact; BLE at one small packet per second is designed for coin-cell devices.
 - **One user at a time:** the pad accepts a single BLE connection — if Connect spins forever, something else (phone app, the other frontend) is holding it.
+- **Typeface:** the UI is set in ABC Diatype, read from your font library as an unlicensed trial build (personal use only; it must be licensed before any distribution). If the face is missing, the app falls back to the system font.
 
 ## Usage
 
 ### macOS menu-bar app
 
-Click the menu-bar icon → Connect. Big speed readout with −/+ steppers, Start/Stop, live elapsed/distance/steps/kcal grid, last-session line. Settings (expandable): Imperial/Metric (also syncs the pad's own LED units), body weight, speed per −/+ tap. **Exit** stops the belt and sleeps the pad. Details: `macos/README.md`.
+Click the menu-bar icon → Connect. Big speed readout with −/+ steppers, Start/Stop, live elapsed/distance/steps/kcal grid, last-session line, and an almanac card whose tile strip toggles between This week and 30 days on click. Settings (expandable): Imperial/Metric (also syncs the pad's own LED units), body weight, speed per −/+ tap, daily goal in minutes (120) or steps (8,000). **Exit** stops the belt and sleeps the pad. Details: `macos/README.md`.
 
 ### CLI
 
@@ -118,7 +125,7 @@ Click the menu-bar icon → Connect. Big speed readout with −/+ steppers, Star
 .venv/bin/python -m z1_walkingpad_mcp stop                      # stop + session summary
 ```
 
-`treadmill_stop` / CLI `stop` returns the session summary (duration, distance, steps, avg speed, kcal) and writes it to `~/.z1-walkingpad/` (`sessions.jsonl` + per-session JSON; override with `Z1_SESSIONS_DIR`).
+MCP `treadmill_stop` returns the session summary (duration, distance, steps, avg speed, kcal) and appends `sessions.jsonl` locally. The menu-bar app records finished walks to Application Support on this Mac only. There is no default iCloud Drive, Shortcuts Health, or WHOOP queue.
 
 ## How it works (the protocol)
 
@@ -236,7 +243,9 @@ kcal/min        = VO2 × weight_kg / 200
 
 Continuous in speed; chosen over the Compendium MET table because research shows fixed MET buckets misclassify intensity at slow walking speeds (PubMed 35876127). Expect ±10–15% real-world error. Weight: `Z1_WEIGHT_KG` (Python) or the in-app setting (macOS).
 
-**Apple Health:** HealthKit is unavailable on macOS (verified: `HKHealthStore.isHealthDataAvailable()` → `false`), so sessions reach Health via the iPhone: point `Z1_SESSIONS_DIR` at an iCloud Drive folder and use the iOS Shortcut recipe in `docs/apple-health.md`.
+**Local history only (default):** the menu-bar app writes walks to `~/Library/Application Support/Z1 WalkingPad/sessions.json`. Bluetooth permission is asked **once** when the app is signed with the same identity and installed in place (see `macos/build-app.sh`). Optional Apple Health / WHOOP / iCloud Shortcuts paths in `docs/` are not the default.
+
+**Auto-speed:** the Z1 exposes speed, distance, elapsed time, and cumulative steps, but no front/middle/back position signal. Its generic firmware has a mode property, but the Z1 is not sold with foot-sensitive speed control. Do not enable that hidden value blindly; see `docs/z1-sensors-and-auto-mode.md` for the safe route.
 
 ## Development
 

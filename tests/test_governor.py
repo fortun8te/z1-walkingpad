@@ -1,7 +1,7 @@
 import asyncio
+from types import SimpleNamespace
 
 import pytest
-from types import SimpleNamespace
 
 from z1_walkingpad_mcp.config import GovernorConfig
 from z1_walkingpad_mcp.governor import Governor
@@ -16,10 +16,12 @@ class FakeTreadmill:
         self.device_name = "fake-z1"
         self.status = SimpleNamespace(speed_kmh=0.0, distance_m=0.0, elapsed_s=0, steps=0)
         self.calls = []
+        self.fail_stop = False
         self._status_cbs = []
         self._disconnect_cbs = []
-        from z1_walkingpad_mcp.stride import StrideLearner
         import tempfile
+
+        from z1_walkingpad_mcp.stride import StrideLearner
         self.stride = StrideLearner(state_file=__import__("pathlib").Path(tempfile.mkdtemp()) / "stride.json")
 
     async def connect(self): self.connected = True
@@ -27,6 +29,8 @@ class FakeTreadmill:
     async def start(self): self.calls.append("start"); self.belt_running = True; self.status.speed_kmh = self.min_speed
     async def pause(self): self.calls.append("pause")
     async def stop(self):
+        if self.fail_stop:
+            raise RuntimeError("stop did not land")
         self.calls.append("stop"); self.belt_running = False; self.status.speed_kmh = 0.0
     async def set_speed(self, kmh): self.calls.append(("set_speed", kmh)); self.status.speed_kmh = kmh
     def session_summary(self):
@@ -61,8 +65,12 @@ def test_start_and_ramp(tmp_path):
             g.treadmill.tick(dist=g.treadmill.status.distance_m + 2, steps=g.treadmill.status.steps + 3)
         assert g.state.value == "ramping" or g.state.value == "running"
         await g.stop()
+        assert g.session_id is None
+        await g.start()
+        assert g.session_id is not None
+        await g.stop()
         ready = list(tmp_path.glob("session-*.json"))
-        assert len(ready) == 1 and "completed" in ready[0].read_text()
+        assert len(ready) == 2 and all("completed" in path.read_text() for path in ready)
     asyncio.run(run())
 
 
@@ -112,4 +120,38 @@ def test_cap_enforcement(tmp_path):
         g = make_gov(tmp_path)
         target = await g.set_speed(9.9)
         assert target == g.config.max_speed_kmh
+    asyncio.run(run())
+
+
+def test_failed_stop_keeps_session_open_and_faults(tmp_path):
+    async def run():
+        g = make_gov(tmp_path)
+        await g.treadmill.connect()
+        await g.start()
+        session_id = g.session_id
+        g.treadmill.fail_stop = True
+        with pytest.raises(RuntimeError, match="stop did not land"):
+            await g.stop()
+        assert g.session_id == session_id
+        assert g.recorder.session_id == session_id
+        assert g.state.value == "faulted"
+        assert not list(tmp_path.glob("session-*.json"))
+
+    asyncio.run(run())
+
+
+def test_resume_after_fault_can_start_new_session(tmp_path):
+    async def run():
+        g = make_gov(tmp_path)
+        await g.treadmill.connect()
+        await g.start()
+        g.treadmill.tick()
+        await asyncio.sleep(0.15)  # stale telemetry -> faulted
+        assert g.fault.value != "none"
+        await g.resume()  # belt stopped by fault-stop
+        await asyncio.sleep(0.05)
+        assert g.state.value in ("ramping", "running")
+        assert g.fault.value == "none"
+        await g.stop()
+
     asyncio.run(run())

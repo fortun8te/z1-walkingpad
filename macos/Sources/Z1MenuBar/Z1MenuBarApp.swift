@@ -3,8 +3,10 @@ import SwiftUI
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Menu-bar-only app: no Dock icon, no app switcher entry.
-        NSApp.setActivationPolicy(.accessory)
+        // Menu-bar-first: no Dock icon and no app-switcher entry unless the
+        // user asks for one (Settings → Show in Dock).
+        let wantsDock = UserDefaults.standard.bool(forKey: TreadmillViewModel.dockKey)
+        NSApp.setActivationPolicy(wantsDock ? .regular : .accessory)
     }
 }
 
@@ -17,12 +19,20 @@ struct Z1MenuBarApp: App {
         MenuBarExtra {
             MenuBarView(viewModel: viewModel)
         } label: {
-            HStack(spacing: 3) {
-                Image(systemName: "figure.walk")
-                if viewModel.status.beltRunning {
-                    Text(viewModel.displaySpeed, format: .number.precision(.fractionLength(1)))
-                        .monospacedDigit()
+            // Never put TimelineView / Canvas / custom NSImage animation in
+            // this label. SwiftUI rasterizes it into NSStatusItem.setImage
+            // on every frame and the process climbs to multiple GB of RAM
+            // while the extra never paints.
+            Label {
+                if let readout = viewModel.menuBarText {
+                    Text(readout).monospacedDigit()
+                } else {
+                    Text("Z1")
                 }
+            } icon: {
+                Image(systemName: viewModel.status.beltRunning
+                      ? "figure.walk.motion"
+                      : "figure.walk")
             }
         }
         .menuBarExtraStyle(.window)

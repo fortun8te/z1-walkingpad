@@ -92,6 +92,8 @@ public actor Z1Treadmill {
         public var distanceM = 0
         public var elapsedS = 0
         public var steps = 0
+        /// Metres per step implied by the live numbers, once meaningful.
+        public var impliedStrideM: Double?
         public var caloriesKcal = 0.0
         public var minSpeedKmh = 1.6
         public var maxSpeedKmh = 6.4
@@ -121,23 +123,63 @@ public actor Z1Treadmill {
     private var calorieTracker = CalorieTracker()
     private var statOffsets = (elapsed: 0, distance: 0, steps: 0)
     public private(set) var persistStats = false
-    private var strideLearner = StrideLearner()
+    private var stepEstimator = StepEstimator()
     private var correctedSteps = 0.0
+    private var stepBaselined = false
+    public private(set) var lastStepsDelta = 0.0
+    public private(set) var lastStepSource = StepSource.unknown
 
-    /// Step count to display: distance-derived estimate once the stride
-    /// curve is calibrated, pad count (with persistStats offsets) before that.
+    /// A hand-measured stride in metres, or nil to trust the pad's counter.
+    ///
+    /// The pad's step sensor cannot be validated over BLE — the learned stride
+    /// curve is derived *from* that counter, so if the pad over-counts, the
+    /// learner simply converges on a correspondingly short stride and every
+    /// number stays self-consistent and wrong. Belt distance, by contrast, is
+    /// exact. So the honest correction is to let the walker count their own
+    /// steps once and derive the rest from distance.
+    public private(set) var strideOverrideM: Double?
+
+    /// Step count to display: a hand-measured stride wins, then the
+    /// distance-derived estimate once the stride curve is calibrated, then the
+    /// pad's raw count (with persistStats offsets).
     public var stepsDisplay: Int {
-        strideLearner.calibrated
+        if let strideOverrideM, strideOverrideM > 0 {
+            let metres = displayStat(telemetry.distanceM, statOffsets.distance)
+            return Int((Double(metres) / strideOverrideM).rounded())
+        }
+        return stepBaselined
             ? Int(correctedSteps.rounded())
             : displayStat(telemetry.steps, statOffsets.steps)
     }
+
+    /// Metres per step the current numbers imply — what to compare against a
+    /// hand count. Nil until there is enough distance to be meaningful.
+    public var impliedStrideM: Double? {
+        let metres = displayStat(telemetry.distanceM, statOffsets.distance)
+        let steps = stepsDisplay
+        guard metres >= 100, steps > 0 else { return nil }
+        return Double(metres) / Double(steps)
+    }
+
+    public func setStrideOverride(_ metres: Double?) {
+        if let metres, metres > 0.3, metres < 1.5 {
+            strideOverrideM = metres
+        } else {
+            strideOverrideM = nil
+        }
+        emitStatus()
+    }
     private var calorieStateRestored = false
     private var lastTargetSpeed: Double?
+    /// After Start, keep beltRunning true for a beat so omitted-speed
+    /// telemetry cannot flip the button back to Start before the belt moves.
+    private var startHoldUntil: ContinuousClock.Instant?
     private var hasControl = false
     private var unlocked = false
     private var expectingDisconnect = false
     private var lastVendorWrite: ContinuousClock.Instant?
     private var lastControlWrite: ContinuousClock.Instant?
+    private var lastTelemetryInstant: ContinuousClock.Instant?
 
     struct Frame: Sendable {
         var cmd0: UInt8
@@ -204,12 +246,18 @@ public actor Z1Treadmill {
         }
         do {
             try await transport.waitPoweredOn()
-            let name = try await transport.scan(
-                namePrefix: Z1Constants.deviceNamePrefix,
-                timeout: Z1Constants.scanTimeout
-            )
+            let (name, adopted) = try await resolvePeripheral()
             mutate { $0.phase = .connecting; $0.deviceName = name }
-            try await transport.connect(timeout: Z1Constants.connectTimeout)
+            do {
+                try await transport.connect(timeout: Z1Constants.connectTimeout)
+            } catch {
+                // A remembered peripheral that will not answer is stale (pad
+                // re-paired, or a different Mac wrote the identifier) — forget
+                // it so the next attempt falls back to a scan.
+                if adopted { forgetPeripheral() }
+                throw error
+            }
+            rememberPeripheral()
             try await transport.discoverProfile(
                 services: [Z1Constants.fitnessMachineService, Z1Constants.supplementService],
                 characteristics: [
@@ -273,8 +321,12 @@ public actor Z1Treadmill {
         }
     }
 
-    public func disconnect() async {
-        if hasControl, unlocked {
+    /// Drop the BLE link. `stopBelt` defaults to false: disconnecting is not
+    /// a reason to stop someone's walk — the pad keeps running under its own
+    /// remote, exactly as it does when the app was never connected. The quit
+    /// path that *does* want the belt stopped calls `sleep()` first.
+    public func disconnect(stopBelt: Bool = false) async {
+        if stopBelt, hasControl, unlocked {
             _ = try? await stop()
         }
         expectingDisconnect = true
@@ -300,8 +352,11 @@ public actor Z1Treadmill {
         unlocked = false
         hasControl = false
         lastTargetSpeed = nil
+        startHoldUntil = nil
         telemetry = Z1Protocol.TreadmillData()
         calorieStateRestored = false
+        stepBaselined = false
+        lastTelemetryInstant = nil
         mutate { $0.beltRunning = false }
     }
 
@@ -310,12 +365,15 @@ public actor Z1Treadmill {
     public func start() async throws {
         try requireReady()
         try await ensureControl()
-        // the pad refuses START (result 4) when the belt is already moving —
-        // e.g. started by the physical remote. Nothing to do in that case.
-        if (telemetry.speedKmh ?? 0) <= 0 {
+        // Skip only when the pad itself is already moving. Do not use last
+        // reported speed: FTMS packets often omit the speed field, and we
+        // then keep the previous value — a leftover 3 km/h after Stop made
+        // Start a no-op and the belt never moved.
+        if !status.beltRunning {
             try await controlCommand(Data([Z1Constants.opStartOrResume]), tunnelOp: 0x07)
         }
         lastTargetSpeed = nil // belt restarts at minimum speed
+        startHoldUntil = ContinuousClock.now + .seconds(5)
         mutate { $0.beltRunning = true }
     }
 
@@ -328,6 +386,8 @@ public actor Z1Treadmill {
         try await controlCommand(
             Data([Z1Constants.opStopOrPause, Z1Constants.stopParamStop]), tunnelOp: 0x08, tunnelParams: Data([0x01])
         )
+        telemetry.speedKmh = 0
+        startHoldUntil = nil
         mutate { $0.beltRunning = false }
         return summary
     }
@@ -338,6 +398,8 @@ public actor Z1Treadmill {
         try await controlCommand(
             Data([Z1Constants.opStopOrPause, Z1Constants.stopParamPause]), tunnelOp: 0x08, tunnelParams: Data([0x02])
         )
+        telemetry.speedKmh = 0
+        startHoldUntil = nil
         mutate { $0.beltRunning = false }
     }
 
@@ -366,14 +428,14 @@ public actor Z1Treadmill {
     }
 
     private func nudgeSpeed(_ delta: Double) async throws -> Double {
-        // prefer the last commanded target: telemetry lags ~1s, so rapid
-        // successive nudges would otherwise re-read the stale speed
+        // prefer the last commanded target: telemetry lags ~1s
         let current = lastTargetSpeed ?? telemetry.speedKmh ?? status.minSpeedKmh
-        var target = ((current + delta) * 10).rounded() / 10 // pad steps are 0.1 km/h
+        // delta already snapped to 0.1 kmh by ViewModel; just add and snap
+        var target = ((current + delta) * 10).rounded() / 10
         if target == current {
-            // a display-unit step (e.g. 0.1 mph ≈ 0.16 km/h) can round back to
-            // the current speed — force at least one 0.1 km/h pad step
-            target = ((current + (delta >= 0 ? 0.1 : -0.1)) * 10).rounded() / 10
+            // tiny delta rounded away — force exactly one pad step in delta direction
+            let step = delta >= 0 ? 0.1 : -0.1
+            target = ((current + step) * 10).rounded() / 10
         }
         target = max(status.minSpeedKmh, min(status.maxSpeedKmh, target))
         try await setSpeed(target)
@@ -439,6 +501,8 @@ public actor Z1Treadmill {
         if !on {
             // back to pad-as-master: drop the accumulated offsets
             statOffsets = (elapsed: 0, distance: 0, steps: 0)
+            correctedSteps = Double(telemetry.steps ?? 0)
+            stepBaselined = telemetry.steps != nil
         }
         emitStatus()
     }
@@ -450,7 +514,7 @@ public actor Z1Treadmill {
         calorieTracker.reset()
         correctedSteps = 0
         UserDefaults.standard.removeObject(forKey: Self.calorieStateKey)
-        persistCalorieState()
+        persistCalorieState(force: true)
         emitStatus()
     }
 
@@ -487,8 +551,13 @@ public actor Z1Treadmill {
             // when no treadmill-data frames flow (e.g. belt fully stopped)
             guard let op = data.first else { return }
             switch op {
-            case 4: mutate { $0.beltRunning = true } // started
-            case 1, 2: mutate { $0.beltRunning = false } // safety-key / user stop or pause
+            case 4:
+                startHoldUntil = nil
+                mutate { $0.beltRunning = true } // started
+            case 1, 2:
+                startHoldUntil = nil
+                telemetry.speedKmh = 0
+                mutate { $0.beltRunning = false } // safety-key / user stop or pause
             default: break
             }
         default:
@@ -497,16 +566,34 @@ public actor Z1Treadmill {
     }
 
     private func handleTelemetry(_ data: Data) {
+        let telemetryNow = ContinuousClock.now
         let prev = telemetry
-        telemetry = Z1Protocol.parseTreadmillData(data)
+        var parsed = Z1Protocol.parseTreadmillData(data)
+        // FTMS packets may omit counters. Preserve their last values rather
+        // than treating omission as zero and later adding the whole session.
+        if parsed.speedKmh == nil { parsed.speedKmh = prev.speedKmh }
+        if parsed.distanceM == nil { parsed.distanceM = prev.distanceM }
+        if parsed.elapsedS == nil { parsed.elapsedS = prev.elapsedS }
+        if parsed.steps == nil { parsed.steps = prev.steps }
+        if parsed.calories == nil { parsed.calories = prev.calories }
+        telemetry = parsed
+
+        if !calorieStateRestored {
+            calorieStateRestored = true
+            restoreCalorieState()
+        }
+        let firstCounters = prev.distanceM == nil || prev.steps == nil
+        if firstCounters && !stepBaselined {
+            correctedSteps = Double(telemetry.steps ?? 0)
+            stepBaselined = true
+        }
         // pad counter reset (Stop finalizes the pad session, or the pad's
         // own timer). Default: the pad is the master — stats follow it down.
         // With persistStats on: fold the final values into the offsets and
         // keep accumulating instead.
-        let regressed: Bool = {
-            guard let prevElapsed = prev.elapsedS, let curElapsed = telemetry.elapsedS else { return false }
-            return curElapsed < prevElapsed
-        }()
+        let regressed = (prev.elapsedS != nil && telemetry.elapsedS! < prev.elapsedS!)
+            || (prev.distanceM != nil && telemetry.distanceM! < prev.distanceM!)
+            || (prev.steps != nil && telemetry.steps! < prev.steps!)
         if regressed {
             if persistStats {
                 statOffsets.elapsed += prev.elapsedS ?? 0
@@ -515,36 +602,34 @@ public actor Z1Treadmill {
             } else {
                 calorieTracker.reset()
                 correctedSteps = 0
+                stepBaselined = true
             }
+            lastStepsDelta = 0
+            lastStepSource = .unknown
         } else {
-            // step estimation: trust the pad's count at >= 3 km/h (and learn
-            // the personal stride curve from it); below that, derive steps
-            // from the exact belt distance and the learned stride
-            let dDist = Double((telemetry.distanceM ?? 0) - (prev.distanceM ?? 0))
-            let dSteps = Double((telemetry.steps ?? 0) - (prev.steps ?? 0))
-            let speed = telemetry.speedKmh ?? 0
-            if speed >= StrideLearner.trustSpeedKmh, dDist > 0, dSteps > 0 {
-                strideLearner.learn(distanceM: dDist, steps: dSteps, speedKmh: speed)
-                correctedSteps += dSteps
-            } else if dDist > 0 {
-                if let stride = strideLearner.stride(for: speed) {
-                    correctedSteps += dDist / stride
-                } else {
-                    correctedSteps += max(dSteps, 0)
-                }
+            let result = stepEstimator.feed(
+                previous: prev,
+                current: telemetry,
+                intervalSpeedKmh: prev.speedKmh
+            )
+            if !firstCounters { correctedSteps += result.delta }
+            lastStepsDelta = firstCounters ? 0 : result.delta
+            lastStepSource = result.source
+        }
+        // Credit only normal live telemetry intervals. A long gap is a pause
+        // or disconnect, not many minutes of walking at the last known speed.
+        if let last = lastTelemetryInstant,
+           let prevSpeed = prev.speedKmh, prevSpeed > 0,
+           let currentSpeed = telemetry.speedKmh, currentSpeed > 0
+        {
+            let gap = telemetryNow - last
+            let gapS = Double(gap.components.seconds)
+                + Double(gap.components.attoseconds) / 1_000_000_000_000_000_000
+            if gapS > 0, gapS <= 5 {
+                calorieTracker.addSample(speedKmh: prevSpeed, elapsedS: gapS)
             }
         }
-        if !calorieStateRestored {
-            calorieStateRestored = true
-            restoreCalorieState()
-        }
-        // credit calorie burn for the interval just elapsed, while moving
-        if let prevElapsed = prev.elapsedS,
-           let curElapsed = telemetry.elapsedS,
-           let prevSpeed = prev.speedKmh, prevSpeed > 0
-        {
-            calorieTracker.addSample(speedKmh: prevSpeed, elapsedS: Double(curElapsed - prevElapsed))
-        }
+        lastTelemetryInstant = telemetryNow
         persistCalorieState()
         emitStatus()
     }
@@ -555,13 +640,60 @@ public actor Z1Treadmill {
     // distance) survive reconnects, so we persist the kcal total keyed
     // against them and restore on the next connection.
 
+    private static let knownPeripheralKey = "z1.knownPeripheralID"
+
+    /// Prefer re-adopting the peripheral macOS already knows (instant) over a
+    /// fresh scan (seconds, and it wakes every BLE radio in the room). Returns
+    /// the device name and whether it came from the remembered identifier.
+    private func resolvePeripheral() async throws -> (name: String, adopted: Bool) {
+        if let saved = UserDefaults.standard.string(forKey: Self.knownPeripheralKey),
+           let identifier = UUID(uuidString: saved),
+           let name = transport.adoptKnownPeripheral(
+               identifier: identifier,
+               namePrefix: Z1Constants.deviceNamePrefix
+           )
+        {
+            return (name, true)
+        }
+        let name = try await transport.scan(
+            namePrefix: Z1Constants.deviceNamePrefix,
+            timeout: Z1Constants.scanTimeout
+        )
+        return (name, false)
+    }
+
+    private func rememberPeripheral() {
+        guard let identifier = transport.peripheralIdentifier else { return }
+        UserDefaults.standard.set(identifier.uuidString, forKey: Self.knownPeripheralKey)
+        // Flushed deliberately: this is only worth anything on the *next*
+        // launch, and an unsynchronised write is lost if the process is killed
+        // rather than quit — which is precisely when you want the fast path.
+        _ = UserDefaults.standard.synchronize()
+    }
+
+    private func forgetPeripheral() {
+        UserDefaults.standard.removeObject(forKey: Self.knownPeripheralKey)
+        _ = UserDefaults.standard.synchronize()
+    }
+
+    /// Drop the BLE link immediately, without awaiting anything. For process
+    /// exit only.
+    public nonisolated func cancelConnectionNow() {
+        transport.cancelConnectionNow()
+    }
+
     private static let calorieStateKey = "z1.calorieState"
 
-    private func persistCalorieState() {
+    private var lastPersistInstant: ContinuousClock.Instant?
+    private func persistCalorieState(force: Bool = false) {
+        // throttle UserDefaults writes — not every 1Hz telemetry tick needs a flush
+        if !force, let last = lastPersistInstant, ContinuousClock.now - last < .seconds(5) { return }
+        lastPersistInstant = ContinuousClock.now
         UserDefaults.standard.set(
             [
                 "totalKcal": calorieTracker.totalKcal,
                 "correctedSteps": correctedSteps,
+                "rawSteps": telemetry.steps ?? 0,
                 "elapsedS": telemetry.elapsedS ?? 0,
                 "distanceM": telemetry.distanceM ?? 0,
             ],
@@ -577,29 +709,41 @@ public actor Z1Treadmill {
         guard curElapsed >= savedElapsed else { return } // pad counters reset (power cycle) — fresh
         calorieTracker.totalKcal = state["totalKcal"] as? Double ?? 0
         correctedSteps = state["correctedSteps"] as? Double ?? 0
+        stepBaselined = true
         // credit the gap while we were disconnected, if the belt kept moving
         let gapS = curElapsed - savedElapsed
         let gapD = (telemetry.distanceM ?? 0) - (state["distanceM"] as? Int ?? 0)
         if gapS > 0, gapD > 0 {
             let avgKmh = Double(gapD) / Double(gapS) * 3.6
             calorieTracker.addSample(speedKmh: avgKmh, elapsedS: Double(gapS))
-            if let stride = strideLearner.stride(for: avgKmh) {
+            if let stride = stepEstimator.stride(for: avgKmh) {
                 correctedSteps += Double(gapD) / stride
+            } else if let savedRaw = state["rawSteps"] as? Int {
+                correctedSteps += Double(max(0, (telemetry.steps ?? 0) - savedRaw))
+            } else {
+                correctedSteps = Double(telemetry.steps ?? 0)
             }
         }
     }
 
+    private var lastEmittedStatus: Status?
     private func emitStatus() {
         var s = status
         s.speedKmh = telemetry.speedKmh ?? 0
-        // belt state is derived from the pad (the master): it may have been
-        // started/stopped by the physical remote between our commands
-        s.beltRunning = (telemetry.speedKmh ?? 0) > 0
+        let moving = s.speedKmh > 0
+        if moving { startHoldUntil = nil }
+        // hold beltRunning for 5s after Start so omitted-speed telemetry can't flip button back
+        let holding = startHoldUntil.map { ContinuousClock.now < $0 } ?? false
+        s.beltRunning = moving || holding
         s.distanceM = displayStat(telemetry.distanceM, statOffsets.distance)
         s.elapsedS = displayStat(telemetry.elapsedS, statOffsets.elapsed)
         s.steps = stepsDisplay
+        s.impliedStrideM = impliedStrideM
         s.caloriesKcal = calorieTracker.totalKcal
         s.hasTelemetry = true
+        // perf: skip duplicate yields (telemetry may re-emit same values)
+        if let last = lastEmittedStatus, last == s { return }
+        lastEmittedStatus = s
         status = s
         statusYield.yield(s)
     }

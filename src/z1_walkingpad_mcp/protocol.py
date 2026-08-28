@@ -99,35 +99,42 @@ def parse_treadmill_data(raw: bytes) -> TreadmillData:
 
     def take(n: int) -> bytes:
         nonlocal off
+        if off + n > len(raw):
+            raise IndexError("FTMS frame truncated before a flagged field")
         chunk = raw[off : off + n]
         off += n
         return chunk
 
-    if not flags & 0x01:  # "more data" bit clear -> instantaneous speed present
-        out.speed_kmh = int.from_bytes(take(2), "little") / 100
-    if flags & 0x02:  # average speed
-        take(2)
-    if flags & 0x04:  # total distance, u24 meters
-        out.distance_m = int.from_bytes(take(3) + b"\x00", "little")
-    if flags & 0x08:  # inclination + ramp angle
-        take(4)
-    if flags & 0x10:  # elevation gain/loss
-        take(2)
-    if flags & 0x20:  # instantaneous pace
-        take(1)
-    if flags & 0x40:  # average pace
-        take(1)
-    if flags & 0x80:  # expended energy: total u16, per hour u16, per minute u8
-        out.calories = int.from_bytes(take(2), "little")
-        take(3)
-    if flags & 0x100:  # heart rate
-        take(1)
-    if flags & 0x200:  # metabolic equivalent
-        take(1)
-    if flags & 0x400:  # elapsed time
-        out.elapsed_s = int.from_bytes(take(2), "little")
-    if flags & 0x800:  # remaining time
-        take(2)
-    if flags & 0x2000:  # KingSmith extension: step count
-        out.steps = int.from_bytes(take(2), "little")
+    try:
+        if not flags & 0x01:  # "more data" bit clear -> instantaneous speed present
+            out.speed_kmh = int.from_bytes(take(2), "little") / 100
+        if flags & 0x02:  # average speed
+            take(2)
+        if flags & 0x04:  # total distance, u24 meters
+            out.distance_m = int.from_bytes(take(3) + b"\x00", "little")
+        if flags & 0x08:  # inclination + ramp angle
+            take(4)
+        if flags & 0x10:  # elevation gain/loss
+            take(2)
+        if flags & 0x20:  # instantaneous pace
+            take(1)
+        if flags & 0x40:  # average pace
+            take(1)
+        if flags & 0x80:  # expended energy: total u16, per hour u16, per minute u8
+            out.calories = int.from_bytes(take(2), "little")
+            take(3)
+        if flags & 0x100:  # heart rate
+            take(1)
+        if flags & 0x200:  # metabolic equivalent
+            take(1)
+        if flags & 0x400:  # elapsed time
+            out.elapsed_s = int.from_bytes(take(2), "little")
+        if flags & 0x800:  # remaining time
+            take(2)
+        if flags & 0x2000:  # KingSmith extension: step count
+            out.steps = int.from_bytes(take(2), "little")
+    except IndexError:
+        # Truncated FTMS frame: drop it whole rather than decoding the missing
+        # tail as zero (a fake counter reset would wipe calories/steps).
+        pass
     return out

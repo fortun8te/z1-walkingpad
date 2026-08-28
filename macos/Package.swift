@@ -12,7 +12,11 @@ let package = Package(
     targets: [
         .target(name: "Z1Core"),
         .target(name: "Z1CoreTestSuite", dependencies: ["Z1Core"]),
-        .executableTarget(name: "Z1MenuBar", dependencies: ["Z1Core"]),
+        .executableTarget(
+            name: "Z1MenuBar",
+            dependencies: ["Z1Core"],
+            exclude: ["Z1WalkingPad.entitlements"]
+        ),
         .executableTarget(name: "Z1Smoke", dependencies: ["Z1Core"]),
         .executableTarget(name: "z1tests", dependencies: ["Z1CoreTestSuite"]),
         .testTarget(name: "Z1CoreTests", dependencies: ["Z1Core", "Z1CoreTestSuite"]),

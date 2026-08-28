@@ -159,6 +159,22 @@ public func unitsTests(_ t: TestRunner) {
 /// Stride-curve estimator tests.
 public func strideTests(_ t: TestRunner) {
     t.suite("stride") { t in
+        func calibrate(_ learner: inout StrideLearner, speed: Double = 3.5, stride: Double = 0.75) {
+            for _ in 0 ..< 3 {
+                learner.learn(distanceM: 40, steps: 40 / stride, speedKmh: speed)
+            }
+        }
+
+        // Truncated telemetry: flags promise steps but the bytes end early —
+        // the whole frame must drop (all nil), never decode as zeros.
+        do {
+            let truncated = Data([0x04, 0x24, 0xfa, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00])
+            let parsed = Z1Protocol.parseTreadmillData(truncated)
+            t.check(parsed.steps == nil, "truncated frame drops steps")
+            t.check(parsed.distanceM == nil, "truncated frame drops distance")
+            t.check(parsed.speedKmh == nil, "truncated frame drops speed")
+        }
+
         let key = "z1.strideLearner.test"
         defer { UserDefaults.standard.removeObject(forKey: key) }
 
@@ -171,27 +187,282 @@ public func strideTests(_ t: TestRunner) {
         fresh.learn(distanceM: 100, steps: 0, speedKmh: 4.0)
         t.check(!fresh.calibrated, "invalid segments ignored")
 
-        fresh.learn(distanceM: 120, steps: 160, speedKmh: 3.5) // stride 0.75
+        calibrate(&fresh)
         t.check(fresh.calibrated, "calibrated after valid segment")
         t.expectEqual(fresh.stride(for: 3.5)!, 0.75, accuracy: 1e-9, "bucket readback")
 
         var two = StrideLearner(userDefaultsKey: key + ".two")
         defer { UserDefaults.standard.removeObject(forKey: key + ".two") }
-        two.learn(distanceM: 140, steps: 200, speedKmh: 3.0) // 0.70
-        two.learn(distanceM: 160, steps: 200, speedKmh: 4.0) // 0.80
+        calibrate(&two, speed: 3.0, stride: 0.70)
+        calibrate(&two, speed: 4.0, stride: 0.80)
         t.expectEqual(two.stride(for: 3.5)!, 0.75, accuracy: 1e-9, "interpolation")
         t.expectEqual(two.stride(for: 1.6)!, 0.70, accuracy: 1e-9, "extrapolate low -> nearest")
         t.expectEqual(two.stride(for: 6.4)!, 0.80, accuracy: 1e-9, "extrapolate high -> nearest")
 
         var threshold = StrideLearner(userDefaultsKey: key + ".min")
         defer { UserDefaults.standard.removeObject(forKey: key + ".min") }
-        threshold.learn(distanceM: 30, steps: 40, speedKmh: 3.5)
-        t.expectNil(threshold.stride(for: 3.5), "below 50m threshold not calibrated")
-        threshold.learn(distanceM: 30, steps: 40, speedKmh: 3.5) // 60m cumulative
+        threshold.learn(distanceM: 50, steps: 50 / 0.75, speedKmh: 3.5)
+        t.expectNil(threshold.stride(for: 3.5), "one window not calibrated")
+        threshold.learn(distanceM: 50, steps: 50 / 0.75, speedKmh: 3.5)
+        t.expectNil(threshold.stride(for: 3.5), "two windows not calibrated")
+        threshold.learn(distanceM: 10, steps: 10 / 0.75, speedKmh: 3.5)
         t.expectEqual(threshold.stride(for: 3.5)!, 0.75, accuracy: 1e-9, "cumulative crosses threshold")
+
+        var outlier = StrideLearner(userDefaultsKey: key + ".outlier")
+        defer { UserDefaults.standard.removeObject(forKey: key + ".outlier") }
+        outlier.learn(distanceM: 100, steps: 1, speedKmh: 4.0)
+        t.check(outlier.buckets.isEmpty, "impossible stride rejected")
 
         let reloaded = StrideLearner(userDefaultsKey: key)
         t.expectEqual(reloaded.stride(for: 3.5)!, 0.75, accuracy: 1e-9, "persistence roundtrip")
+    }
+}
+
+/// Physical-remote session merging tests.
+public func automaticHealthExportTests(_ t: TestRunner) {
+    t.suite("automatic-health-export") { t in
+        func status(
+            running: Bool,
+            elapsed: Int,
+            distance: Int,
+            steps: Int,
+            hasTelemetry: Bool = true
+        ) -> Z1Treadmill.Status {
+            var value = Z1Treadmill.Status()
+            value.phase = .ready
+            value.hasTelemetry = hasTelemetry
+            value.beltRunning = running
+            value.speedKmh = running ? 3.2 : 0
+            value.elapsedS = elapsed
+            value.distanceM = distance
+            value.steps = steps
+            return value
+        }
+
+        let base = Date(timeIntervalSince1970: 2_000_000_000)
+        var tracker = RemoteSessionTracker()
+
+        // Establish a stopped baseline so stale pad totals are not imported.
+        _ = tracker.observe(status(running: false, elapsed: 100, distance: 50, steps: 70), at: base)
+        _ = tracker.observe(
+            status(running: true, elapsed: 101, distance: 51, steps: 72),
+            at: base.addingTimeInterval(1),
+            newSessionID: { "remote-session-1" }
+        )
+        _ = tracker.observe(
+            status(running: true, elapsed: 700, distance: 550, steps: 900),
+            at: base.addingTimeInterval(600)
+        )
+        let stoppedAt = base.addingTimeInterval(601)
+        let stopped = tracker.observe(
+            status(running: false, elapsed: 700, distance: 550, steps: 900),
+            at: stoppedAt
+        )
+        t.expectEqual(
+            stopped.finalizationDeadline,
+            stoppedAt.addingTimeInterval(600),
+            "remote Stop sets one ten-minute deadline"
+        )
+
+        // More zero-speed frames do not move the deadline.
+        let repeatedZero = tracker.observe(
+            status(running: false, elapsed: 700, distance: 550, steps: 900),
+            at: stoppedAt.addingTimeInterval(300)
+        )
+        t.expectEqual(
+            repeatedZero.finalizationDeadline,
+            stoppedAt.addingTimeInterval(600),
+            "repeated zero telemetry does not extend grace"
+        )
+
+        // Restart one second before expiry. Reset counters are folded into the
+        // same session instead of finalizing a second workout.
+        let resumed = tracker.observe(
+            status(running: true, elapsed: 1, distance: 1, steps: 2),
+            at: stoppedAt.addingTimeInterval(599)
+        )
+        t.expectNil(resumed.finalizationDeadline, "restart within grace cancels finalization")
+        t.check(resumed.completed.isEmpty, "restart within grace does not log a walk")
+        _ = tracker.observe(
+            status(running: true, elapsed: 301, distance: 201, steps: 450),
+            at: stoppedAt.addingTimeInterval(899)
+        )
+        let finalStop = stoppedAt.addingTimeInterval(900)
+        _ = tracker.observe(
+            status(running: false, elapsed: 301, distance: 201, steps: 450),
+            at: finalStop
+        )
+        t.check(
+            tracker.finalizeIfDue(at: finalStop.addingTimeInterval(599)).completed.isEmpty,
+            "session is not logged early"
+        )
+        let due = tracker.finalizeIfDue(at: finalStop.addingTimeInterval(600))
+        t.expectEqual(due.completed.count, 1, "one merged workout is offered to the history")
+        if let walk = due.completed.first {
+            t.expectEqual(walk.id, "remote-session-1", "history entry shares the session ID")
+            t.expectEqual(walk.activeDurationS, 901, "active time excludes the break")
+            t.expectEqual(walk.distanceM, 701, "distance spans both walking segments")
+            t.check(!walk.offeredToHealth, "local history never claims a Health export")
+            tracker.acknowledgeLog(sessionID: walk.id)
+        }
+        t.check(
+            tracker.finalizeIfDue(at: finalStop.addingTimeInterval(600)).completed.isEmpty,
+            "an acknowledged history entry is not offered twice"
+        )
+
+        // A pending stopped session survives relaunch and keeps the original
+        // deadline and ID.
+        var persisted = RemoteSessionTracker()
+        _ = persisted.observe(
+            status(running: true, elapsed: 600, distance: 500, steps: 700),
+            at: base,
+            newSessionID: { "persisted-session" }
+        )
+        _ = persisted.observe(
+            status(running: false, elapsed: 600, distance: 500, steps: 700),
+            at: base.addingTimeInterval(600)
+        )
+        do {
+            let data = try JSONEncoder().encode(persisted)
+            var restored = try JSONDecoder().decode(RemoteSessionTracker.self, from: data)
+            let restoredDue = restored.finalizeIfDue(at: base.addingTimeInterval(1_200))
+            t.expectEqual(restoredDue.completed.first?.id, "persisted-session", "relaunch restores pending session")
+        } catch {
+            t.check(false, "tracker persistence roundtrip: \(error)")
+        }
+    }
+}
+
+/// Walks too small for Apple Health must still reach the local history, and
+/// state written by an older build must keep decoding.
+func historyAndCompatibilityTests(_ t: TestRunner) {
+    t.suite("short walks + tracker compatibility") { t in
+        func status(running: Bool, elapsed: Int, distance: Int, steps: Int) -> Z1Treadmill.Status {
+            var value = Z1Treadmill.Status()
+            value.phase = .ready
+            value.hasTelemetry = true
+            value.beltRunning = running
+            value.speedKmh = running ? 3.2 : 0
+            value.elapsedS = elapsed
+            value.distanceM = distance
+            value.steps = steps
+            return value
+        }
+
+        // A five-minute walk: below Health's ten-minute floor, above the
+        // history's one-minute noise floor.
+        let base = Date(timeIntervalSince1970: 2_100_000_000)
+        var tracker = RemoteSessionTracker()
+        _ = tracker.observe(status(running: false, elapsed: 0, distance: 0, steps: 0), at: base)
+        _ = tracker.observe(
+            status(running: true, elapsed: 1, distance: 1, steps: 2),
+            at: base.addingTimeInterval(1),
+            newSessionID: { "short-walk" }
+        )
+        _ = tracker.observe(
+            status(running: true, elapsed: 300, distance: 260, steps: 400),
+            at: base.addingTimeInterval(300)
+        )
+        let stopped = base.addingTimeInterval(301)
+        _ = tracker.observe(status(running: false, elapsed: 300, distance: 260, steps: 400), at: stopped)
+        let due = tracker.finalizeIfDue(at: stopped.addingTimeInterval(600))
+        t.expectEqual(due.completed.count, 1, "a five-minute walk still reaches the history")
+        t.check(
+            due.completed.first?.offeredToHealth == false,
+            "local history never claims a Health export"
+        )
+
+        // A ten-second nudge of the belt is noise, not a walk.
+        var noise = RemoteSessionTracker()
+        _ = noise.observe(status(running: false, elapsed: 0, distance: 0, steps: 0), at: base)
+        _ = noise.observe(
+            status(running: true, elapsed: 1, distance: 1, steps: 1),
+            at: base.addingTimeInterval(1),
+            newSessionID: { "nudge" }
+        )
+        _ = noise.observe(
+            status(running: false, elapsed: 10, distance: 8, steps: 12),
+            at: base.addingTimeInterval(10)
+        )
+        t.check(
+            noise.finalizeIfDue(at: base.addingTimeInterval(700)).completed.isEmpty,
+            "a ten-second belt nudge is not recorded as a walk"
+        )
+
+        // State saved before the history queue existed must still decode,
+        // rather than resetting the tracker and losing a walk in flight.
+        let legacyState: [String: Any] = [
+            "pendingSessions": [],
+            "idleCounters": ["elapsedS": 5, "distanceM": 4, "steps": 3],
+        ]
+        if let legacy = try? JSONSerialization.data(withJSONObject: legacyState),
+           let restored = try? JSONDecoder().decode(RemoteSessionTracker.self, from: legacy)
+        {
+            t.check(!restored.hasPendingLogs, "legacy state decodes with an empty history queue")
+        } else {
+            t.check(false, "state saved by an older build must still decode")
+        }
+    }
+}
+
+/// The on-disk walk history.
+func sessionStoreTests(_ t: TestRunner) {
+    t.suite("session store") { t in
+        let temp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("z1-history-\(UUID().uuidString)")
+            .appendingPathComponent("sessions.json")
+        defer { try? FileManager.default.removeItem(at: temp.deletingLastPathComponent()) }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        let noon = Date(timeIntervalSince1970: 2_000_000_000)
+
+        func walk(_ id: String, at start: Date, minutes: Int, meters: Int, steps: Int) -> WalkSession {
+            WalkSession(
+                id: id,
+                startedAt: start,
+                endedAt: start.addingTimeInterval(Double(minutes) * 60),
+                activeDurationS: minutes * 60,
+                distanceM: meters,
+                steps: steps,
+                caloriesKcal: 100,
+                exportedToHealth: true
+            )
+        }
+
+        let store = SessionStore(url: temp)
+        t.check(store.append(walk("a", at: noon, minutes: 30, meters: 2_000, steps: 3_000)), "first walk stored")
+        t.check(
+            !store.append(walk("a", at: noon, minutes: 30, meters: 2_000, steps: 3_000)),
+            "the same walk is never stored twice"
+        )
+        t.check(
+            store.append(walk("b", at: noon.addingTimeInterval(3_600), minutes: 15, meters: 1_000, steps: 1_500)),
+            "a second walk on the same day is stored"
+        )
+        _ = store.append(walk("c", at: noon.addingTimeInterval(-86_400), minutes: 20, meters: 1_400, steps: 2_000))
+
+        let today = store.totals(on: noon, calendar: calendar)
+        t.expectEqual(today.walks, 2, "today counts both of today's walks")
+        t.expectEqual(today.activeDurationS, 45 * 60, "today sums active time")
+        t.expectEqual(today.distanceM, 3_000, "today sums distance")
+        t.expectEqual(today.steps, 4_500, "today sums steps")
+
+        let week = store.recentDays(7, endingOn: noon, calendar: calendar)
+        t.expectEqual(week.count, 7, "the week chart always has seven days")
+        t.expectEqual(week.last?.walks, 2, "the last bar is today")
+        t.check(week.first?.isEmpty == true, "days with no walks are empty, not missing")
+        t.expectEqual(week[5].walks, 1, "yesterday keeps its own walk")
+
+        // Reload from disk: the history must survive a relaunch.
+        let reopened = SessionStore(url: temp)
+        t.expectEqual(reopened.sessions.count, 3, "history is reloaded from disk")
+        t.expectEqual(reopened.mostRecent(2).first?.id, "b", "most recent is newest first")
+        t.expectEqual(
+            reopened.totals(on: noon, calendar: calendar).distanceM,
+            3_000,
+            "totals survive a reload"
+        )
     }
 }
 
@@ -203,10 +474,80 @@ public func runAllZ1CoreTests() -> Int32 {
     metricsTests(runner)
     unitsTests(runner)
     strideTests(runner)
+    automaticHealthExportTests(runner)
+    historyAndCompatibilityTests(runner)
+    sessionStoreTests(runner)
+    openMeteoTests(runner)
     if runner.failures == 0 {
         print("PASS: \(runner.checks) checks, 0 failures")
         return 0
     }
     print("FAILED: \(runner.checks) checks, \(runner.failures) failures")
     return 1
+}
+
+/// Moon phase math and weather-snapshot flag/JSON tests.
+func openMeteoTests(_ t: TestRunner) {
+    t.suite("open-meteo") { t in
+        // New moon anchor: 2000-01-06 18:14 UTC.
+        let epoch = Date(timeIntervalSince1970: 947_182_440)
+        let synodic = 29.530588853 * 86_400
+        t.expectEqual(MoonPhase.fraction(at: epoch), 0.0, accuracy: 0.01, "new moon at anchor epoch")
+        t.expectEqual(
+            MoonPhase.fraction(at: epoch.addingTimeInterval(14.765294 * 86_400)),
+            0.5,
+            accuracy: 0.01,
+            "full moon half a cycle later"
+        )
+        t.expectEqual(
+            MoonPhase.fraction(at: epoch.addingTimeInterval(synodic)),
+            0.0,
+            accuracy: 0.01,
+            "phase wraps to new moon after one synodic month"
+        )
+
+        // A 1990s date (before the anchor) must still land in [0, 1).
+        let ninetiesFraction = MoonPhase.fraction(at: Date(timeIntervalSince1970: 788_918_400))
+        t.check(ninetiesFraction >= 0 && ninetiesFraction < 1, "pre-epoch date stays in [0,1)")
+
+        t.expectEqual(MoonPhase.illumination(at: epoch), 0.0, accuracy: 0.01, "no light at new moon")
+        t.expectEqual(
+            MoonPhase.illumination(at: epoch.addingTimeInterval(14.765294 * 86_400)),
+            1.0,
+            accuracy: 0.01,
+            "full disc at full moon"
+        )
+
+        // The memberwise initializer stays internal, so snapshots are built
+        // through the same Codable path the app already relies on.
+        func snapshot(code: Int = 0, precipitation: Double = 0, cloudCover: Double = 0) -> WeatherSnapshot {
+            let json = "{\"cloudCover\":\(cloudCover),\"precipitation\":\(precipitation),\"weatherCode\":\(code),\"fetchedAt\":0}"
+            do {
+                return try JSONDecoder().decode(WeatherSnapshot.self, from: Data(json.utf8))
+            } catch {
+                fatalError("test snapshot fixture failed to decode: \(error)")
+            }
+        }
+        t.check(snapshot(code: 71).isSnow, "code 71 is snow")
+        t.check(snapshot(code: 85).isSnow, "code 85 is snow")
+        t.check(!snapshot(code: 61).isSnow, "code 61 is not snow")
+
+        let rain = snapshot(code: 61, precipitation: 0.2)
+        t.check(rain.isRaining && !rain.isSnowing, "rainy code with water is rain only")
+        let snowfall = snapshot(code: 71, precipitation: 0.2)
+        t.check(snowfall.isSnowing, "snow code with precipitation snows")
+        t.check(
+            snapshot(cloudCover: 0.3).isClear && !snapshot(cloudCover: 0.5).isClear,
+            "clear threshold sits below 45% cloud"
+        )
+
+        do {
+            let original = snapshot(code: 71, precipitation: 0.2, cloudCover: 0.6)
+            let data = try JSONEncoder().encode(original)
+            let restored = try JSONDecoder().decode(WeatherSnapshot.self, from: data)
+            t.expectEqual(restored, original, "weather JSON roundtrip unchanged")
+        } catch {
+            t.check(false, "weather JSON roundtrip: \(error)")
+        }
+    }
 }
