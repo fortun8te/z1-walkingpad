@@ -134,7 +134,7 @@ def _auth(client_id: str, client_secret: str) -> None:
             "scope": "activity:write",
         }
     )
-    print(f"Open this URL, approve, and you'll be redirected to a dead localhost page:")
+    print("Open this URL, approve, and you'll be redirected to a dead localhost page:")
     print(f"\n  {AUTH_URL}?{params}\n")
     print("Copy the 'code' parameter from the redirect URL's query string.")
     code = input("code: ").strip()

@@ -668,12 +668,10 @@ public actor Z1Treadmill {
         // Flushed deliberately: this is only worth anything on the *next*
         // launch, and an unsynchronised write is lost if the process is killed
         // rather than quit — which is precisely when you want the fast path.
-        _ = UserDefaults.standard.synchronize()
     }
 
     private func forgetPeripheral() {
         UserDefaults.standard.removeObject(forKey: Self.knownPeripheralKey)
-        _ = UserDefaults.standard.synchronize()
     }
 
     /// Drop the BLE link immediately, without awaiting anything. For process

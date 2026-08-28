@@ -102,7 +102,7 @@ class SessionRecorder:
         try:
             from .highscores import write_agent_export
             write_agent_export(self.sessions_dir)
-        except Exception:
+        except (OSError, RuntimeError):
             pass
         return path
 

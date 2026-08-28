@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+from itertools import pairwise
 from pathlib import Path
 
 TRUST_SPEED_KMH = 3.0
@@ -80,7 +81,7 @@ class StrideLearner:
             return points[0][1]
         if target >= points[-1][0]:
             return points[-1][1]
-        for (b0, s0), (b1, s1) in zip(points, points[1:]):
+        for (b0, s0), (b1, s1) in pairwise(points):
             if b0 <= target <= b1:
                 frac = (target - b0) / (b1 - b0)
                 return s0 + frac * (s1 - s0)

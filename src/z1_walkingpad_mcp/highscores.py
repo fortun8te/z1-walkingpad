@@ -24,7 +24,7 @@ def _load_sessions(sessions_dir: Path) -> list[dict[str, Any]]:
             try:
                 data = json.loads(p.read_text())
                 sessions.append(data)
-            except Exception:
+            except (OSError, ValueError, json.JSONDecodeError):
                 continue
         # Fallback: sessions.jsonl (legacy CLI/Governor stop)
         alt = Path.home() / ".z1-walkingpad" / "sessions.jsonl"
@@ -34,9 +34,9 @@ def _load_sessions(sessions_dir: Path) -> list[dict[str, Any]]:
                     if line.strip():
                         try:
                             sessions.append(json.loads(line))
-                        except Exception:
+                        except (OSError, ValueError, json.JSONDecodeError):
                             continue
-            except Exception:
+            except (OSError, ValueError, json.JSONDecodeError):
                 pass
     # Also check Swift sessions.json for shared agent data (always, even if sessions_dir missing)
     swift_path = Path.home() / "Library/Application Support/Z1 WalkingPad/sessions.json"
@@ -61,9 +61,8 @@ def _load_sessions(sessions_dir: Path) -> list[dict[str, Any]]:
                         "calories_kcal": entry.get("caloriesKcal"),
                         "source": "swift",
                     })
-        except Exception as e:
+        except (OSError, ValueError, json.JSONDecodeError) as e:
             print(f"swift load err {e}")
-            pass
     return sessions
 
 
@@ -127,7 +126,7 @@ def compute_highscores(sessions_dir: Path | None = None) -> dict[str, Any]:
                 day = raw[:10]
             else:
                 day = _parse_day(float(s.get("ended_at") or 0))
-        except Exception:
+        except (OSError, ValueError, json.JSONDecodeError):
             continue
         agg = by_day[day]
         agg["day"] = day
@@ -152,7 +151,7 @@ def compute_highscores(sessions_dir: Path | None = None) -> dict[str, Any]:
     for ds in dates:
         try:
             cur_date = date.fromisoformat(ds)
-        except Exception:
+        except (OSError, ValueError, json.JSONDecodeError):
             continue
         if prev and (cur_date - prev).days == 1:
             cur += 1
@@ -171,7 +170,7 @@ def compute_highscores(sessions_dir: Path | None = None) -> dict[str, Any]:
             d = date.fromisoformat(cursor)
             from datetime import timedelta
             cursor = (d - timedelta(days=1)).isoformat()
-        except Exception:
+        except (OSError, ValueError, json.JSONDecodeError):
             break
 
     return {
@@ -226,7 +225,7 @@ def compute_achievements(sessions_dir: Path | None = None, highscores: dict | No
         try:
             unlocked = bool(cond(highscores, sessions))
             p = float(prog(highscores, sessions)) if not unlocked else 1.0
-        except Exception:
+        except (OSError, ValueError, json.JSONDecodeError):
             unlocked = False
             p = 0.0
         out.append({"id": key, "title": title, "emoji": emoji, "unlocked": unlocked, "progress": round(min(1, max(0, p)), 3)})
@@ -235,7 +234,7 @@ def compute_achievements(sessions_dir: Path | None = None, highscores: dict | No
         from datetime import datetime
         has_early = any(datetime.fromisoformat(str(s.get("started_at") or s.get("ended_at") or "")[:19]).hour < 7 for s in sessions if s.get("started_at"))
         has_night = any(datetime.fromisoformat(str(s.get("started_at") or s.get("ended_at") or "")[:19]).hour >= 22 for s in sessions if s.get("started_at"))
-    except Exception:
+    except (ValueError, OSError):
         has_early = has_night = False
     out.append({"id": "early_bird", "title": "Early Bird", "emoji": "🌅", "unlocked": has_early, "progress": 1 if has_early else 0})
     out.append({"id": "night_owl", "title": "Night Owl", "emoji": "🌙", "unlocked": has_night, "progress": 1 if has_night else 0})
@@ -266,13 +265,13 @@ def write_agent_export(sessions_dir: Path | None = None) -> Path | None:
     try:
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(data, indent=2))
-    except Exception:
+    except OSError:
         pass
     # Mirror to Swift location for shared view
     alt = Path.home() / "Library/Application Support/Z1 WalkingPad/agent-data.json"
     try:
         alt.parent.mkdir(parents=True, exist_ok=True)
         alt.write_text(json.dumps(data, indent=2))
-    except Exception:
+    except OSError:
         pass
     return out

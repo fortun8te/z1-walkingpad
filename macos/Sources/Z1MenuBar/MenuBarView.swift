@@ -186,7 +186,7 @@ struct MenuBarView: View {
 
     private var speedText: String {
         let shown = isPickingSpeed ? speedDraft : viewModel.displaySpeed
-        return shown.formatted(.number.precision(.fractionLength(1)))
+        return String(format: "%.1f", shown)
     }
 
     // MARK: - header

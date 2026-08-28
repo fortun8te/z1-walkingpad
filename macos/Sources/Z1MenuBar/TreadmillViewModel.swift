@@ -545,7 +545,6 @@ final class TreadmillViewModel: ObservableObject {
         log.append(line)
         if log.count > 40 { log.removeFirst(log.count - 40) }
         UserDefaults.standard.set(log, forKey: Self.connectionLogKey)
-        _ = UserDefaults.standard.synchronize()
     }
 
     /// One build briefly registered a login item on the user's behalf. Reverse
@@ -750,7 +749,7 @@ final class TreadmillViewModel: ObservableObject {
         guard status.beltRunning || menuBarAlwaysVisible else { return nil }
         switch menuBarReadout {
         case .none: return nil
-        case .speed: return displaySpeed.formatted(.number.precision(.fractionLength(1)))
+        case .speed: return String(format: "%.1f", displaySpeed)
         case .elapsed: return formatElapsed(status.elapsedS)
         case .distance: return formatDistance(status.distanceM)
         case .steps: return status.steps.formatted(.number)

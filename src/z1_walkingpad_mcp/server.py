@@ -92,7 +92,7 @@ async def governor_status() -> dict:
     if not _treadmill.connected:
         try:
             await governor.connect()
-        except Exception:
+        except Exception:  # BLE connect can raise many transport errors
             pass
     return governor.status_dict()
 
@@ -177,7 +177,7 @@ async def agent_data() -> dict:
     data = export_agent_data(GOVERNOR_SESSIONS_DIR)
     try:
         write_agent_export(GOVERNOR_SESSIONS_DIR)
-    except Exception:
+    except OSError:
         pass
     return data
 
@@ -276,7 +276,7 @@ async def treadmill_stop() -> dict:
             summary["health_automation"] = automation
     try:
         write_agent_export(GOVERNOR_SESSIONS_DIR)
-    except Exception:
+    except OSError:
         pass
     return summary
 
