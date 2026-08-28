@@ -180,6 +180,10 @@ public actor Z1Treadmill {
     private var lastVendorWrite: ContinuousClock.Instant?
     private var lastControlWrite: ContinuousClock.Instant?
     private var lastTelemetryInstant: ContinuousClock.Instant?
+    private var stepInterpolationTask: Task<Void, Never>?
+    private var lastStepsInterpolationBase: Double = 0
+    private var lastStepsInterpolationSpeed: Double = 0
+    private var lastStepsStrideM: Double = 0.72
 
     struct Frame: Sendable {
         var cmd0: UInt8
@@ -558,6 +562,7 @@ public actor Z1Treadmill {
                 startHoldUntil = nil
                 telemetry.speedKmh = 0
                 mutate { $0.beltRunning = false } // safety-key / user stop or pause
+                self.stopStepInterpolation()
             default: break
             }
         default:
@@ -606,6 +611,7 @@ public actor Z1Treadmill {
             }
             lastStepsDelta = 0
             lastStepSource = .unknown
+            stopStepInterpolation()
         } else {
             let result = stepEstimator.feed(
                 previous: prev,
@@ -630,8 +636,19 @@ public actor Z1Treadmill {
             }
         }
         lastTelemetryInstant = telemetryNow
+        // Snapshot for high-freq step interpolation: estimate until next 1Hz packet.
+        lastStepsInterpolationBase = correctedSteps
+        lastStepsInterpolationSpeed = telemetry.speedKmh ?? status.speedKmh
+        if let so = strideOverrideM, so > 0 {
+            lastStepsStrideM = so
+        } else if let s = stepEstimator.stride(for: lastStepsInterpolationSpeed) {
+            lastStepsStrideM = s
+        } else if let imp = impliedStrideM, imp > 0.3, imp < 1.5 {
+            lastStepsStrideM = imp
+        }
         persistCalorieState()
         emitStatus()
+        startStepInterpolationIfNeeded()
     }
 
     // MARK: - calorie state persistence
@@ -744,6 +761,50 @@ public actor Z1Treadmill {
         lastEmittedStatus = s
         status = s
         statusYield.yield(s)
+    }
+
+    private func startStepInterpolationIfNeeded() {
+        guard status.beltRunning, (telemetry.speedKmh ?? 0) > 0 else {
+            stepInterpolationTask?.cancel()
+            stepInterpolationTask = nil
+            return
+        }
+        guard stepInterpolationTask == nil else { return }
+        stepInterpolationTask = Task { [weak self] in
+            guard let self else { return }
+            await self.stepInterpolationLoop()
+        }
+    }
+
+    private func stepInterpolationLoop() async {
+        while !Task.isCancelled {
+            let running = status.beltRunning
+            guard running else { break }
+            try? await Task.sleep(for: .milliseconds(180))
+            guard !Task.isCancelled else { break }
+            interpolateStepsTick()
+        }
+    }
+
+    private func interpolateStepsTick() {
+        guard status.beltRunning, lastStepsInterpolationSpeed > 0, lastStepsStrideM > 0.3 else { return }
+        guard let lastInstant = lastTelemetryInstant else { return }
+        let elapsed = ContinuousClock.now - lastInstant
+        let secs = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+        // Only interpolate within the 1Hz window; beyond 1.2s the pad is late and we hold.
+        guard secs > 0.08, secs < 1.2 else { return }
+        let expectedSteps = lastStepsInterpolationSpeed / 3.6 * secs / lastStepsStrideM
+        let target = lastStepsInterpolationBase + expectedSteps
+        // Only ever go forward, never backward; and never jump more than 3 steps per tick.
+        let delta = min(3.0, max(0, target - correctedSteps))
+        guard delta >= 0.08 else { return }
+        correctedSteps += delta
+        emitStatus()
+    }
+
+    private func stopStepInterpolation() {
+        stepInterpolationTask?.cancel()
+        stepInterpolationTask = nil
     }
 
     private func mutate(_ body: (inout Status) -> Void) {

@@ -24,6 +24,7 @@ struct MenuBarView: View {
     @State private var weather: WeatherSnapshot? = nil
     @State private var kp: Double = 0
     @State private var showHighScores = false
+    @State private var recordsExpanded = false
     @AppStorage("z1.hasSeenIntro") private var hasSeenIntro = false
 
     var body: some View {
@@ -209,7 +210,7 @@ struct MenuBarView: View {
             .frame(width: 14, height: 14)
             VStack(alignment: .leading, spacing: 1) {
                 Text(viewModel.status.deviceName ?? "WalkingPad Z1")
-                    .font(Z1Type.medium(12))
+                    .font(Z1Type.medium(13))
                     .foregroundStyle(Z1.ink)
                     .lineLimit(1)
                 if !viewModel.isConnected {
@@ -336,8 +337,8 @@ struct MenuBarView: View {
     private func nudge(_ symbol: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(Z1Type.medium(8))
-                .frame(width: 18, height: 18)
+                .font(.system(size: 10, weight: .semibold))
+                .frame(width: 22, height: 22)
         }
         .buttonStyle(.plain)
         .foregroundStyle(viewModel.status.beltRunning ? Z1.ink : Z1.faint)
@@ -409,12 +410,12 @@ struct MenuBarView: View {
     private func walkStat(_ value: String, _ label: String, measured: Bool = true) -> some View {
         VStack(spacing: 2) {
             Text(value)
-                .font(Z1Type.medium(15))
+                .font(Z1Type.medium(16))
                 .foregroundStyle(Z1.ink)
                 .contentTransition(.numericText())
                 .lineLimit(1)
             Text(measured ? label : "\(label) est.")
-                .font(Z1Type.regular(10))
+                .font(Z1Type.regular(11))
                 .foregroundStyle(Z1.faint)
                 .lineLimit(1)
         }
@@ -594,23 +595,57 @@ struct MenuBarView: View {
         let hs = viewModel.highScores
         guard hs.totalWalks > 0 else { return AnyView(EmptyView()) }
         return AnyView(
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Text("Records").font(Z1Type.medium(11)).foregroundStyle(Z1.dim)
-                    Spacer()
-                    Text(achievementsSummary).font(Z1Type.regular(10)).foregroundStyle(Z1.faint)
+            VStack(alignment: .leading, spacing: 8) {
+                Button {
+                    withAnimation(.smooth(duration: 0.24)) { recordsExpanded.toggle() }
+                } label: {
+                    HStack(spacing: 8) {
+                        Text("Records").font(Z1Type.medium(13)).foregroundStyle(Z1.ink)
+                        Image(systemName: recordsExpanded ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(Z1.faint)
+                        Spacer()
+                        Text(achievementsSummary).font(Z1Type.regular(11)).foregroundStyle(Z1.faint)
+                    }
+                    .contentShape(.rect)
                 }
+                .buttonStyle(.plain)
                 HStack(spacing: 0) {
-                    recordStat(icon: "⏱️", value: formatLongest(hs.longestWalk), label: "Longest")
+                    recordStat(systemName: "timer", value: formatLongest(hs.longestWalk), label: "Longest")
                     divider
-                    recordStat(icon: "👣", value: hs.mostStepsDay.map { "\($0.steps.formatted())" } ?? "—", label: "Best Day Steps")
+                    recordStat(systemName: "shoeprints.fill", value: hs.mostStepsDay.map { "\($0.steps.formatted())" } ?? "—", label: "Best Day")
                     divider
-                    recordStat(icon: "🔥", value: hs.mostKcalDay.map { "\(Int($0.caloriesKcal.rounded()))" } ?? "—", label: "Best Kcal")
+                    recordStat(systemName: "flame.fill", value: hs.mostKcalDay.map { "\(Int($0.caloriesKcal.rounded()))" } ?? "—", label: "Best Kcal")
+                }
+                if recordsExpanded {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Rectangle().fill(Z1.hairline).frame(height: 0.7).padding(.top, 4)
+                        ForEach(highScoreRows, id: \.label) { row in
+                            HStack(spacing: 8) {
+                                Image(systemName: row.systemName)
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(Z1.dim)
+                                    .frame(width: 18)
+                                Text(row.label).font(Z1Type.regular(12)).foregroundStyle(Z1.dim)
+                                Spacer()
+                                Text(row.value).font(Z1Type.medium(12)).foregroundStyle(Z1.ink)
+                            }
+                        }
+                        if hs.bestStreakDays > 1 {
+                            HStack(spacing: 8) {
+                                Image(systemName: "flame.fill").font(.system(size: 12, weight: .medium)).foregroundStyle(Z1.live).frame(width: 18)
+                                Text("Best streak").font(Z1Type.regular(12)).foregroundStyle(Z1.dim)
+                                Spacer()
+                                Text("\(hs.bestStreakDays) days").font(Z1Type.medium(12)).foregroundStyle(Z1.ink)
+                            }
+                        }
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .top)))
                 }
             }
-            .padding(10)
+            .padding(11)
             .z1Card(radius: 10)
-            .opacity(0.92)
+            .opacity(0.96)
         )
     }
 
@@ -625,11 +660,22 @@ struct MenuBarView: View {
         return viewModel.formatDuration(s.activeDurationS)
     }
 
+    private func recordStat(systemName: String, value: String, label: String) -> some View {
+        VStack(spacing: 4) {
+            Image(systemName: systemName)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Z1.ink)
+                .frame(height: 16)
+            Text(value).font(Z1Type.medium(12)).foregroundStyle(Z1.ink).lineLimit(1).minimumScaleFactor(0.7)
+            Text(label).font(Z1Type.regular(10)).foregroundStyle(Z1.faint).lineLimit(1)
+        }.frame(maxWidth: .infinity)
+    }
+    // Legacy emoji bridge (kept for Achievements grid)
     private func recordStat(icon: String, value: String, label: String) -> some View {
-        VStack(spacing: 2) {
-            Text(icon).font(.system(size: 10))
-            Text(value).font(Z1Type.medium(11)).foregroundStyle(Z1.ink).lineLimit(1).minimumScaleFactor(0.7)
-            Text(label).font(Z1Type.regular(9)).foregroundStyle(Z1.faint).lineLimit(1)
+        VStack(spacing: 4) {
+            Text(icon).font(.system(size: 14))
+            Text(value).font(Z1Type.medium(12)).foregroundStyle(Z1.ink).lineLimit(1).minimumScaleFactor(0.7)
+            Text(label).font(Z1Type.regular(10)).foregroundStyle(Z1.faint).lineLimit(1)
         }.frame(maxWidth: .infinity)
     }
 
@@ -643,7 +689,7 @@ struct MenuBarView: View {
                 Text("Single Walk").font(Z1Type.medium(11)).foregroundStyle(Z1.ink)
                 ForEach(highScoreRows, id: \.label) { row in
                     HStack {
-                        Text(row.icon).font(.system(size: 11))
+                        Image(systemName: row.systemName).font(.system(size: 12, weight: .medium)).foregroundStyle(Z1.dim)
                         Text(row.label).font(Z1Type.regular(11)).foregroundStyle(Z1.dim)
                         Spacer()
                         Text(row.value).font(Z1Type.medium(11)).foregroundStyle(Z1.ink)
@@ -668,7 +714,7 @@ struct MenuBarView: View {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 6)], spacing: 6) {
                     ForEach(viewModel.achievements) { ach in
                         VStack(spacing: 3) {
-                            Text(ach.kind.emoji).font(.system(size: 16)).opacity(ach.unlocked ? 1 : 0.25)
+                            Text(ach.kind.emoji).font(.system(size: 18)).opacity(ach.unlocked ? 1 : 0.25)
                             Text(ach.kind.title).font(Z1Type.medium(9)).foregroundStyle(ach.unlocked ? Z1.ink : Z1.faint).lineLimit(1).minimumScaleFactor(0.7)
                             GeometryReader { geo in
                                 ZStack(alignment: .leading) {
@@ -688,13 +734,13 @@ struct MenuBarView: View {
         .padding(.top, 7)
     }
 
-    private var highScoreRows: [(icon: String, label: String, value: String)] {
+    private var highScoreRows: [(systemName: String, label: String, value: String)] {
         let hs = viewModel.highScores
         var rows: [(String,String,String)] = []
-        if let w = hs.longestWalk { rows.append(("⏱️","Longest walk", viewModel.formatDuration(w.activeDurationS) + " · " + viewModel.formatDistance(w.distanceM))) }
-        if let w = hs.farthestWalk { rows.append(("📏","Farthest", viewModel.formatDistance(w.distanceM) + " · " + viewModel.formatDuration(w.activeDurationS))) }
-        if let w = hs.mostStepsWalk { rows.append(("👣","Most steps", "\(w.steps.formatted())")) }
-        if let w = hs.mostKcalWalk { rows.append(("🔥","Most kcal", "\(Int(w.caloriesKcal.rounded())) kcal")) }
+        if let w = hs.longestWalk { rows.append(("timer","Longest walk", viewModel.formatDuration(w.activeDurationS) + " · " + viewModel.formatDistance(w.distanceM))) }
+        if let w = hs.farthestWalk { rows.append(("ruler","Farthest", viewModel.formatDistance(w.distanceM) + " · " + viewModel.formatDuration(w.activeDurationS))) }
+        if let w = hs.mostStepsWalk { rows.append(("shoeprints.fill","Most steps", "\(w.steps.formatted())")) }
+        if let w = hs.mostKcalWalk { rows.append(("flame.fill","Most kcal", "\(Int(w.caloriesKcal.rounded())) kcal")) }
         return rows
     }
 
@@ -729,7 +775,7 @@ struct MenuBarView: View {
                     .font(.system(size: 7, weight: .semibold))
                     .rotationEffect(.degrees(open.wrappedValue ? 90 : 0))
                 Text(title)
-                    .font(Z1Type.regular(12))
+                    .font(Z1Type.regular(13))
             }
             .foregroundStyle(Z1.dim)
             .contentShape(.rect)
