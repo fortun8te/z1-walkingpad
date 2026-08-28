@@ -1,6 +1,17 @@
-# Z1 WalkingPad
+# Z1 WalkingPad — KingSmith WalkingPad Z1 Mac Control (Bluetooth FTMS, MCP, CLI)
 
-**Control a KingSmith WalkingPad Z1 treadmill from your Mac — menu-bar app, CLI, or AI assistant.** Reverse-engineered BLE protocol, fully documented.
+> **macOS menu-bar app + Python MCP server + CLI for KingSmith WalkingPad Z1 (KS-HD-Z1D).** Reverse-engineered Bluetooth FTMS unlock, fully documented protocol, local-first walks, 1,500+ distance stories, highscores & achievements.
+
+![Platform](https://img.shields.io/badge/platform-macOS%2014%2B-blue) ![Swift 6](https://img.shields.io/badge/Swift-6-orange) ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue) ![BLE FTMS](https://img.shields.io/badge/BLE-FTMS%20%2B%20KingSmith%20unlock-0a84ff) ![MCP](https://img.shields.io/badge/MCP-Claude%20%7C%20Kimi-8a2be2) ![License MIT](https://img.shields.io/badge/license-MIT-green)
+
+**Keywords:** `kingsmith walkingpad z1` · `walkingpad z1 mac` · `walkingpad bluetooth` · `FTMS treadmill macOS` · `walkingpad cli` · `walkingpad MCP` · `treadmill menu bar app` · `walkingpad API`
+
+The WalkingPad Z1 (`KS-HD-Z1D`, firmware V0.0.6) speaks standard Bluetooth FTMS (`0x1826`) — but locks it behind a vendor unlock handshake that stops every generic client cold. This project cracked that gate and ships two independent, production-ready implementations around it:
+
+- 🖥️ **macOS menu-bar app** — native SwiftUI, one-screen intro, silent re-sign, stays connected, 1,500 equivalences
+- 🤖 **MCP server + CLI + Python library** — drive the treadmill from AI assistants (Claude, Kimi, …) or scripts — agent-readable `agent-data.json`
+
+Everything is documented well enough to build your own client in any language: see the [protocol quick reference](#quick-reference-build-your-own-cheat-sheet).
 
 ![Platform](https://img.shields.io/badge/platform-macOS-blue)
 ![Swift](https://img.shields.io/badge/swift-6-orange)
@@ -39,8 +50,8 @@ Everything is documented well enough to build your own client in any language: s
 ![The Z1 WalkingPad menu-bar app: live speed, controls, session stats, and settings](docs/assets/popover.svg)
 
 ```bash
-git clone https://github.com/slandau3/z1-walkingpad-mcp.git
-cd z1-walkingpad-mcp/macos
+git clone https://github.com/fortun8te/z1-walkingpad.git
+cd z1-walkingpad/macos
 bash build-app.sh               # builds, stable codesign, ditto in place into /Applications (Bluetooth TCC survives rebuilds)
 ```
 
@@ -71,6 +82,21 @@ MCP client config:
 ```
 
 Tools: `treadmill_status` · `treadmill_start` · `treadmill_set_speed` · `treadmill_speed_up` · `treadmill_speed_down` · `treadmill_pause` · `treadmill_stop` · `highscores` · `achievements` · `daily_totals` · `agent_data`
+
+
+
+## SEO & discoverability
+
+**Repo description (copy to GitHub → Settings → About):**
+> KingSmith WalkingPad Z1 control for Mac — menu-bar app (SwiftUI) + Python MCP/CLI, reverse-engineered BLE FTMS unlock, local walk history, 1500+ equivalences, highscores & achievements.
+
+**Suggested GitHub topics:** `kingsmith` `walkingpad` `walkingpad-z1` `treadmill` `bluetooth` `ble` `ftms` `macos` `swiftui` `menubar` `mcp` `claude` `health` `fitness` `walking-desk` `under-desk-treadmill`
+
+**Search phrases this README targets:** KingSmith WalkingPad Z1 Mac app, WalkingPad Z1 Bluetooth Mac, FTMS treadmill control, WalkingPad Z1 API, WalkingPad MCP server, WalkingPad CLI.
+
+**Social preview:** `docs/assets/popover.svg` + `docs/assets/og-walkingpad.png` (1200×630, add if missing).
+
+**Indexing:** This README uses keyword-rich H1/H2, first-100-words summary, and structured Features/Quick start/Protocol sections for crawlers.
 
 ## Contents
 

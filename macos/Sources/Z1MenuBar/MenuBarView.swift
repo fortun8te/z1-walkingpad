@@ -23,8 +23,22 @@ struct MenuBarView: View {
     @State private var weather: WeatherSnapshot? = nil
     @State private var kp: Double = 0
     @State private var showHighScores = false
+    @AppStorage("z1.hasSeenIntro") private var hasSeenIntro = false
 
     var body: some View {
+        ZStack {
+            if !hasSeenIntro {
+                OnboardingView(onContinue: { hasSeenIntro = true })
+                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
+            } else {
+                mainPopover
+                    .transition(.opacity)
+            }
+        }
+        .animation(.smooth(duration: 0.28), value: hasSeenIntro)
+    }
+
+    private var mainPopover: some View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 12) {
                 header
@@ -177,44 +191,79 @@ struct MenuBarView: View {
     // MARK: - header
 
     private var header: some View {
-        HStack(spacing: 7) {
-            Circle()
-                .fill(viewModel.isConnected ? Z1.ink : Z1.faint)
-                .frame(width: 5, height: 5)
-            Text(viewModel.status.deviceName ?? "WalkingPad Z1")
-                .font(Z1Type.medium(12))
-                .foregroundStyle(Z1.ink)
-                .lineLimit(1)
-                .layoutPriority(1)
-            if !viewModel.isConnected {
-                Text(phaseLabel)
-                    .font(Z1Type.regular(11))
-                    .foregroundStyle(Z1.faint)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.85)
+        HStack(spacing: 8) {
+            ZStack {
+                Circle()
+                    .fill(viewModel.isConnected ? Z1.live : (viewModel.isConnecting ? Z1.ink.opacity(0.6) : Z1.faint))
+                    .frame(width: 7, height: 7)
+                    .scaleEffect(viewModel.isConnecting ? 1.18 : 1)
+                    .animation(.easeInOut(duration: 0.7).repeatForever(autoreverses: true), value: viewModel.isConnecting)
+                if viewModel.isConnecting {
+                    Circle()
+                        .strokeBorder(Z1.ink.opacity(0.25), lineWidth: 0.7)
+                        .frame(width: 14, height: 14)
+                        .opacity(0.9)
+                }
             }
+            .frame(width: 14, height: 14)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(viewModel.status.deviceName ?? "WalkingPad Z1")
+                    .font(Z1Type.medium(12))
+                    .foregroundStyle(Z1.ink)
+                    .lineLimit(1)
+                if !viewModel.isConnected {
+                    Text(phaseLabel)
+                        .font(Z1Type.regular(10))
+                        .foregroundStyle(viewModel.failedAttempts >= 2 ? Z1.ink.opacity(0.7) : Z1.faint)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                        .contentTransition(.opacity)
+                } else if viewModel.status.beltRunning {
+                    Text("Walk in progress — controls live")
+                        .font(Z1Type.regular(10))
+                        .foregroundStyle(Z1.live.opacity(0.9))
+                        .lineLimit(1)
+                } else {
+                    Text("Ready — tap Start or use remote")
+                        .font(Z1Type.regular(10))
+                        .foregroundStyle(Z1.faint)
+                        .lineLimit(1)
+                }
+            }
+            .layoutPriority(1)
             Spacer(minLength: 4)
-            Button(viewModel.isConnected ? "Disconnect" : "Connect") {
-                viewModel.connectTapped()
+            Button(action: { viewModel.connectTapped() }) {
+                HStack(spacing: 5) {
+                    if viewModel.isConnecting {
+                        ProgressView().scaleEffect(0.55).tint(Z1.ink)
+                    } else {
+                        Image(systemName: viewModel.isConnected ? "xmark" : "bolt.fill")
+                            .font(.system(size: 8, weight: .bold))
+                    }
+                    Text(viewModel.isConnected ? "Disconnect" : (viewModel.isConnecting ? "Linking…" : "Connect"))
+                        .font(Z1Type.medium(11))
+                }
             }
             .buttonStyle(HairlineButtonStyle())
-            .disabled(viewModel.busy)
+            .disabled(viewModel.busy && !viewModel.isConnecting)
+            .animation(.smooth(duration: 0.2), value: viewModel.isConnecting)
+            .animation(.smooth(duration: 0.2), value: viewModel.isConnected)
         }
     }
 
-    /// After a couple of failed rounds, stop saying "scanning" — the app has
-    /// looked, repeatedly, and found nothing. Say the thing the user can act
-    /// on instead.
     private var phaseLabel: String {
-        if viewModel.failedAttempts >= 2, viewModel.status.phase != .ready {
-            return "pad off?"
+        if viewModel.failedAttempts >= 3 {
+            return "Pad off or busy — power on, close phone app"
+        }
+        if viewModel.failedAttempts == 2 {
+            return "Still looking — is pad on? (one connection only)"
         }
         switch viewModel.status.phase {
-        case .disconnected: return "not connected"
-        case .scanning: return "scanning"
-        case .connecting: return "connecting"
-        case .ready: return "connected"
-        case .error: return "no pad found"
+        case .disconnected: return "Tap Connect to link"
+        case .scanning: return "Finding your Z1…"
+        case .connecting: return "Handshaking — unlocking pad"
+        case .ready: return "Connected"
+        case .error: return viewModel.status.errorMessage ?? "No pad found — tap retry"
         }
     }
 

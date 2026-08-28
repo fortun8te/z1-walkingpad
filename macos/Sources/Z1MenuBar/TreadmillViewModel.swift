@@ -239,6 +239,7 @@ final class TreadmillViewModel: ObservableObject {
     // task are torn down by process exit.
 
     var isConnected: Bool { status.phase == .ready }
+    var isConnecting: Bool { status.phase == .scanning || status.phase == .connecting }
 
     // MARK: - display-unit helpers
 

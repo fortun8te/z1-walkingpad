@@ -210,6 +210,7 @@ public final class SessionStore {
         sessions = decoded.sorted { $0.startedAt < $1.startedAt }
     }
 
+    /// Save atomically; called from background — safe to run while swift build holds lock.
     private func save() {
         do {
             try FileManager.default.createDirectory(

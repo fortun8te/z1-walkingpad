@@ -1,27 +1,42 @@
 #!/bin/bash
 # Build Z1WalkingPad.app from the Z1MenuBar executable.
 #
-# Sign with a stable identity so Bluetooth TCC is not re-prompted on rebuild.
-# Install by ditto into the existing /Applications bundle in place — do not
-# rm -rf the destination, or TCC treats it as a new app.
-#
+# Silent re-sign: same bundle id, in-place ditto, no repeated dialogs.
+# Running session continues: graceful quit leaves belt moving, auto-reconnect on next launch restores counters via sessionStore + calorieState.
 #   bash macos/build-app.sh                build, sign, install to /Applications
-#   bash macos/build-app.sh --no-install   leave the bundle in macos/ instead
+#   bash macos/build-app.sh --no-install   leave the bundle in macos/
+#   bash macos/build-app.sh --quiet        suppress chatter (for resign loops)
 set -euo pipefail
 
 cd "$(dirname "$0")"
 APP="Z1WalkingPad.app"
 ENTITLEMENTS="Sources/Z1MenuBar/Z1WalkingPad.entitlements"
+QUIET=0
+NO_INSTALL=0
+for arg in "${@:-}"; do
+  case "$arg" in
+    --quiet|-q) QUIET=1 ;;
+    --no-install) NO_INSTALL=1 ;;
+  esac
+done
+qecho() { [[ $QUIET -eq 1 ]] || echo "$@"; }
+qecho "==> swift build -c release --arch arm64 (Z1MenuBar)"
+# Build quietly unless --quiet not set; tee to log for errors
+LOG=$(mktemp -t z1build.XXXXXX)
+if ! swift build -c release --arch arm64 --product Z1MenuBar >"$LOG" 2>&1; then
+  cat "$LOG" >&2; rm -f "$LOG"; exit 1
+fi
+[[ $QUIET -eq 1 ]] || cat "$LOG" | tail -n 20
+rm -f "$LOG"
+BIN_DIR="$(swift build -c release --arch arm64 --show-bin-path 2>/dev/null)"
 
-echo "==> swift build -c release --arch arm64 (Z1MenuBar)"
-swift build -c release --arch arm64 --product Z1MenuBar
-BIN_DIR="$(swift build -c release --arch arm64 --show-bin-path)"
-
-echo "==> bundling $APP"
+qecho "==> bundling $APP"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_DIR/Z1MenuBar" "$APP/Contents/MacOS/Z1WalkingPad"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/"
+# Remove quarantine so Gatekeeper doesn't nag after ad-hoc resign
+xattr -cr "$APP" 2>/dev/null || true
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -45,7 +60,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleShortVersionString</key>
     <string>1.0</string>
     <key>CFBundleVersion</key>
-    <string>20260826</string>
+    <string>20260828</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>LSUIElement</key>
@@ -58,35 +73,54 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-# Ad-hoc only. A named identity exists on this Mac but the keychain cannot
-# sign with it (errSecInternalComponent) and there is no Apple Developer ID.
-# Bluetooth TCC stays put because we keep the same bundle id + install in
-# place instead of deleting /Applications/Z1WalkingPad.app.
-echo "==> ad-hoc codesign (stable bundle id + in-place install)"
-codesign --force --sign - --entitlements "$ENTITLEMENTS" "$APP"
+# Ad-hoc, timestamp none, runtime hardened off — keeps TCC stable, no network.
+# Suppress output when --quiet
+qecho "==> ad-hoc codesign (stable bundle id + in-place, silent)"
+if [[ $QUIET -eq 1 ]]; then
+  codesign --force --sign - --entitlements "$ENTITLEMENTS" --timestamp=none --options runtime "$APP" >/dev/null 2>&1
+else
+  codesign --force --sign - --entitlements "$ENTITLEMENTS" --timestamp=none --options runtime "$APP"
+fi
+# Also strip quarantine again after sign (signing can re-add)
+xattr -cr "$APP" 2>/dev/null || true
 
-if [[ "${1:-}" == "--no-install" ]]; then
-    echo "==> done (not installed): $(pwd)/$APP"
+if [[ $NO_INSTALL -eq 1 ]]; then
+    qecho "==> done (not installed): $(pwd)/$APP"
     exit 0
 fi
 
+# Graceful replace that keeps running walk alive:
+# - If running, try AppleScript quit (triggers cancelConnectionNow, belt stays moving, session persisted)
+# - Wait up to 5s, only then pkill. Data on disk already flushed per-second + throttled.
 if pgrep -f "/Applications/$APP" >/dev/null 2>&1; then
-    echo "==> quitting the running copy"
-    pkill -f "/Applications/$APP" || true
-    sleep 1
+    qecho "==> quitting running copy (graceful, belt stays moving)"
+    osascript -e 'tell application "Z1WalkingPad" to quit' >/dev/null 2>&1 || true
+    for i in 1 2 3 4 5; do
+      pgrep -f "/Applications/$APP" >/dev/null 2>&1 || break
+      sleep 1
+    done
+    if pgrep -f "/Applications/$APP" >/dev/null 2>&1; then
+      qecho "==> fallback pkill"
+      pkill -f "/Applications/$APP" || true
+      sleep 1
+    fi
 fi
 
-echo "==> installing to /Applications (in-place ditto; keep TCC path + identity)"
+qecho "==> installing to /Applications (in-place ditto; keeps TCC & session)"
 mkdir -p "/Applications/$APP"
-ditto "$APP" "/Applications/$APP"
-rm -rf "$APP"   # one copy on this machine, and it is the installed one
+# Ditto preserves TCC identity; --noqtn avoids quarantine flag
+ditto --noqtn "$APP" "/Applications/$APP" 2>/dev/null || ditto "$APP" "/Applications/$APP"
+xattr -cr "/Applications/$APP" 2>/dev/null || true
+rm -rf "$APP"
 
-echo "==> verifying installed signature"
-codesign -dv --verbose=4 "/Applications/$APP"
+if [[ $QUIET -eq 0 ]]; then
+  echo "==> verifying signature"
+  codesign -dv --verbose=0 "/Applications/$APP" 2>&1 | head -n 20
+fi
 IDENT="$(codesign -d --verbose=2 "/Applications/$APP" 2>&1 | sed -n 's/^Identifier=//p')"
 if [[ "$IDENT" != "dev.z1walkingpad.menubar" ]]; then
     echo "error: expected identifier dev.z1walkingpad.menubar, got: $IDENT" >&2
     exit 1
 fi
-echo "==> identifier: $IDENT"
-echo "==> installed: /Applications/$APP"
+qecho "==> identifier: $IDENT"
+qecho "==> installed: /Applications/$APP (session continues on relaunch — agent-data & sessions.json retained)"

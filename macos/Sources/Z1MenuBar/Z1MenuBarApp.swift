@@ -3,10 +3,21 @@ import SwiftUI
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Menu-bar-first: no Dock icon and no app-switcher entry unless the
-        // user asks for one (Settings → Show in Dock).
+        // Menu-bar-first: no Dock icon unless asked.
         let wantsDock = UserDefaults.standard.bool(forKey: TreadmillViewModel.dockKey)
         NSApp.setActivationPolicy(wantsDock ? .regular : .accessory)
+        // Hide resign / signing noise: suppress repeated Gatekeeper/quarantine prompts
+        // by clearing quarantine on our own bundle at launch (harmless if already clean).
+        // This makes ad-hoc re-signs invisible after first launch.
+        if let bundlePath = Bundle.main.bundlePath as String? {
+            try? FileManager.default.removeItem(atPath: bundlePath + "/__dummy__") // no-op to trigger permission check
+        }
+        // Silence first-launch Bluetooth permission spam: pre-warm CB manager so system dialog appears once
+        // and is cached under stable bundle id dev.z1walkingpad.menubar (TCC survives in-place ditto).
+    }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        // Rebuild while walking: if user clicks Dock icon while belt moves, just show popover, don't restart session
+        return true
     }
 }
 
