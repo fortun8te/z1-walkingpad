@@ -533,14 +533,24 @@ struct MenuBarView: View {
     private func kcalSparkline(for day: Date) -> some View {
         let bins = viewModel.hourlyKcal(for: day)
         let peak = max(bins.max() ?? 0, 1)
-        return HStack(alignment: .bottom, spacing: 2) {
-            ForEach(0..<24, id: \.self) { hour in
-                Capsule()
-                    .fill(bins[hour] > 0 ? Z1.ink.opacity(0.85) : Z1.unlit)
-                    .frame(height: max(2, 28 * bins[hour] / peak))
+        return Canvas { context, size in
+            let n = 24
+            let gap: CGFloat = 1
+            let barW = max(1, (size.width - gap * CGFloat(n - 1)) / CGFloat(n))
+            let floor: CGFloat = 1
+            for hour in 0..<n {
+                let x = CGFloat(hour) * (barW + gap)
+                let h = bins[hour] > 0
+                    ? max(floor, size.height * CGFloat(bins[hour] / peak))
+                    : floor
+                let rect = CGRect(x: x, y: size.height - h, width: barW, height: h)
+                context.fill(
+                    Path(rect),
+                    with: .color(bins[hour] > 0 ? Z1.ink.opacity(0.88) : Z1.unlit)
+                )
             }
         }
-        .frame(height: 28)
+        .frame(height: 32)
         .help("kcal by hour")
     }
 
