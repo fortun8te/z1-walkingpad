@@ -12,14 +12,21 @@ from mcp.server.mcpserver import MCPServer
 
 mcp = MCPServer("z1")
 
-ROOT = Path(
-    os.environ.get(
-        "Z1_SESSIONS_DIR",
-        Path.home() / "Library/Application Support/Z1 WalkingPad"
-        if sys.platform == "darwin"
-        else Path.home() / ".z1-walkingpad",
-    )
-)
+def _root() -> Path:
+    paths = []
+    env = os.environ.get("Z1_SESSIONS_DIR")
+    if env:
+        paths.append(Path(env))
+    if sys.platform == "darwin":
+        paths.append(Path.home() / "Library/Application Support/Z1 WalkingPad")
+    paths.append(Path.home() / ".z1-walkingpad")
+    for p in paths:
+        if (p / "sessions.json").is_file() or (p / "live.json").is_file():
+            return p
+    return paths[0]
+
+
+ROOT = _root()
 
 
 def _j(name: str) -> dict | list | None:
