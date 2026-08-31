@@ -741,8 +741,8 @@ final class TreadmillViewModel: ObservableObject {
         case .day:
             return calendar.startOfDay(for: anchor)
         case .week:
-            return calendar.dateInterval(of: .weekOfYear, for: anchor)?.start
-                ?? calendar.startOfDay(for: anchor)
+            let end = periodEnd(lens: .week, anchor: anchor, calendar: calendar)
+            return calendar.date(byAdding: .day, value: -6, to: end) ?? end
         case .month:
             return calendar.dateInterval(of: .month, for: anchor)?.start
                 ?? calendar.startOfDay(for: anchor)
@@ -750,21 +750,30 @@ final class TreadmillViewModel: ObservableObject {
     }
 
     func periodEnd(lens: AlmanacLens, anchor: Date, calendar: Calendar = .current) -> Date {
-        let start = periodStart(lens: lens, anchor: anchor, calendar: calendar)
         switch lens {
         case .day:
-            return start
+            return calendar.startOfDay(for: anchor)
         case .week:
-            return calendar.date(byAdding: .day, value: 6, to: start) ?? start
+            let day = calendar.startOfDay(for: anchor)
+            let today = calendar.startOfDay(for: Date())
+            return day > today ? today : day
         case .month:
+            let start = calendar.dateInterval(of: .month, for: anchor)?.start
+                ?? calendar.startOfDay(for: anchor)
             let next = calendar.date(byAdding: .month, value: 1, to: start) ?? start
             return calendar.date(byAdding: .day, value: -1, to: next) ?? start
         }
     }
 
     func shiftedAnchor(lens: AlmanacLens, anchor: Date, by steps: Int, calendar: Calendar = .current) -> Date {
-        let unit: Calendar.Component = lens == .month ? .month : (lens == .week ? .weekOfYear : .day)
-        return calendar.date(byAdding: unit, value: steps, to: anchor) ?? anchor
+        switch lens {
+        case .month:
+            return calendar.date(byAdding: .month, value: steps, to: anchor) ?? anchor
+        case .week:
+            return calendar.date(byAdding: .day, value: steps * 7, to: anchor) ?? anchor
+        case .day:
+            return calendar.date(byAdding: .day, value: steps, to: anchor) ?? anchor
+        }
     }
 
     func canGoForward(lens: AlmanacLens, anchor: Date, calendar: Calendar = .current) -> Bool {

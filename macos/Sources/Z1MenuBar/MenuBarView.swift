@@ -596,8 +596,8 @@ struct MenuBarView: View {
             let start = viewModel.periodStart(lens: .week, anchor: almanacAnchor)
             let end = viewModel.periodEnd(lens: .week, anchor: almanacAnchor)
             let today = calendar.startOfDay(for: Date())
-            if today >= calendar.startOfDay(for: start), today <= calendar.startOfDay(for: end) {
-                return "This week"
+            if calendar.isDate(end, inSameDayAs: Date()) {
+                return "Last 7 days"
             }
             return "\(start.formatted(.dateTime.day().month(.abbreviated)))–\(end.formatted(.dateTime.day().month(.abbreviated)))"
         case .month:
