@@ -311,6 +311,7 @@ public actor Z1Treadmill {
         if stopBelt, hasControl, unlocked {
             _ = try? await stop()
         }
+        persistCalorieState(force: true)
         expectingDisconnect = true
         await transport.disconnect()
         resetConnectionState()
@@ -322,6 +323,7 @@ public actor Z1Treadmill {
             expectingDisconnect = false
             return
         }
+        persistCalorieState(force: true)
         resetConnectionState()
         failAllWaiters(Z1Error.notConnected)
         mutate {
@@ -352,6 +354,10 @@ public actor Z1Treadmill {
         // then keep the previous value — a leftover 3 km/h after Stop made
         // Start a no-op and the belt never moved.
         if !status.beltRunning {
+            if !persistStats {
+                statOffsets = (elapsed: 0, distance: 0, steps: 0)
+                calorieTracker.reset()
+            }
             try await controlCommand(Data([Z1Constants.opStartOrResume]), tunnelOp: 0x07)
         }
         lastTargetSpeed = nil // belt restarts at minimum speed
@@ -498,7 +504,7 @@ public actor Z1Treadmill {
     }
 
     private func displayStat(_ cur: Int?, _ offset: Int) -> Int {
-        persistStats ? max(0, (cur ?? 0) + offset) : (cur ?? 0)
+        max(0, (cur ?? 0) + offset)
     }
 
     // MARK: - telemetry
@@ -584,13 +590,11 @@ public actor Z1Treadmill {
             || (prev.distanceM != nil && telemetry.distanceM! < prev.distanceM!)
             || (prev.steps != nil && telemetry.steps! < prev.steps!)
         if regressed {
-            if persistStats {
-                statOffsets.elapsed += prev.elapsedS ?? 0
-                statOffsets.distance += prev.distanceM ?? 0
-                statOffsets.steps += max(0, (prev.steps ?? 0) - stepSession.origin)
-            } else {
-                calorieTracker.reset()
-            }
+            // Disconnect / pad counter reset is not a new walk. Carry the
+            // previous totals; calories stay. User Start on a stopped belt
+            // is what zeros this.
+            statOffsets.elapsed += prev.elapsedS ?? 0
+            statOffsets.distance += prev.distanceM ?? 0
             lastStepsDelta = 0
             lastStepSource = .unknown
         } else {
@@ -676,28 +680,34 @@ public actor Z1Treadmill {
         UserDefaults.standard.set(
             [
                 "totalKcal": calorieTracker.totalKcal,
-                "correctedSteps": Double(telemetry.steps ?? 0),
-                "rawSteps": telemetry.steps ?? 0,
                 "elapsedS": telemetry.elapsedS ?? 0,
                 "distanceM": telemetry.distanceM ?? 0,
+                "offsetElapsed": statOffsets.elapsed,
+                "offsetDistance": statOffsets.distance,
             ],
             forKey: Self.calorieStateKey
         )
     }
 
     private func restoreCalorieState() {
-        guard let state = UserDefaults.standard.dictionary(forKey: Self.calorieStateKey),
-              let curElapsed = telemetry.elapsedS
-        else { return }
+        guard let state = UserDefaults.standard.dictionary(forKey: Self.calorieStateKey) else { return }
         let savedElapsed = state["elapsedS"] as? Int ?? 0
-        guard curElapsed >= savedElapsed else { return } // pad counters reset (power cycle) — fresh
-        calorieTracker.totalKcal = state["totalKcal"] as? Double ?? 0
-        // Steps come from the pad, not this file. Only kcal is client-side.
+        let savedDistance = state["distanceM"] as? Int ?? 0
+        let curElapsed = telemetry.elapsedS ?? 0
+        let curDistance = telemetry.distanceM ?? 0
+        statOffsets.elapsed = state["offsetElapsed"] as? Int ?? statOffsets.elapsed
+        statOffsets.distance = state["offsetDistance"] as? Int ?? statOffsets.distance
+        calorieTracker.totalKcal = state["totalKcal"] as? Double ?? calorieTracker.totalKcal
+        if curElapsed < savedElapsed || curDistance < savedDistance {
+            // Pad reset while this walk is still the same walk.
+            statOffsets.elapsed += savedElapsed
+            statOffsets.distance += savedDistance
+            return
+        }
         let gapS = curElapsed - savedElapsed
-        let gapD = (telemetry.distanceM ?? 0) - (state["distanceM"] as? Int ?? 0)
+        let gapD = curDistance - savedDistance
         if gapS > 0, gapD > 0 {
-            let avgKmh = Double(gapD) / Double(gapS) * 3.6
-            calorieTracker.addSample(speedKmh: avgKmh, elapsedS: Double(gapS))
+            calorieTracker.addSample(speedKmh: Double(gapD) / Double(gapS) * 3.6, elapsedS: Double(gapS))
         }
     }
 
