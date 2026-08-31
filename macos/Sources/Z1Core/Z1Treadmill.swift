@@ -715,6 +715,25 @@ public actor Z1Treadmill {
             ],
             forKey: Self.calorieStateKey
         )
+        persistLiveSnapshot()
+    }
+
+    /// Tiny file the MCP reads. No BLE in the agent.
+    private func persistLiveSnapshot() {
+        let url = SessionStore.defaultURL()
+            .deletingLastPathComponent()
+            .appendingPathComponent("live.json")
+        let obj: [String: Any] = [
+            "kmh": telemetry.speedKmh ?? 0,
+            "on": status.beltRunning,
+            "m": displayStat(telemetry.distanceM, statOffsets.distance),
+            "s": displayStat(telemetry.elapsedS, statOffsets.elapsed),
+            "steps": stepsDisplay,
+            "kcal": (calorieTracker.totalKcal * 10).rounded() / 10,
+            "t": Int(Date().timeIntervalSince1970),
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: obj) else { return }
+        try? data.write(to: url, options: .atomic)
     }
 
     private func restoreCalorieState() {
