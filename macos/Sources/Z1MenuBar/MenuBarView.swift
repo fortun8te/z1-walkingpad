@@ -486,12 +486,19 @@ struct MenuBarView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var todayCard: some View {
+    private var focusedDay: Date {
         let calendar = Calendar.current
-        let focus = selectedDay ?? (almanacLens == .day ? calendar.startOfDay(for: almanacAnchor) : nil)
-        let totals = focus.map { viewModel.totals(for: $0) }
-            ?? viewModel.periodTotals(lens: almanacLens, anchor: almanacAnchor)
-        let sparkDay = focus ?? calendar.startOfDay(for: almanacAnchor)
+        if let selectedDay { return calendar.startOfDay(for: selectedDay) }
+        if almanacLens == .day { return calendar.startOfDay(for: almanacAnchor) }
+        let today = calendar.startOfDay(for: Date())
+        let start = viewModel.periodStart(lens: almanacLens, anchor: almanacAnchor)
+        let end = viewModel.periodEnd(lens: almanacLens, anchor: almanacAnchor)
+        if today >= start, today <= end { return today }
+        return end
+    }
+
+    private var todayCard: some View {
+        let totals = viewModel.totals(for: focusedDay)
         return VStack(alignment: .leading, spacing: 9) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(periodTitle)
@@ -541,9 +548,7 @@ struct MenuBarView: View {
             }
 
             dayGoalLine(totals)
-            if almanacLens == .day || selectedDay != nil {
-                kcalSparkline(for: sparkDay)
-            }
+            kcalSparkline(for: focusedDay)
             tileStrip
             HStack(spacing: 0) {
                 walkStat(viewModel.formatDistance(totals.distanceM), "Distance")
@@ -593,12 +598,7 @@ struct MenuBarView: View {
         case .day:
             return dayTitle(almanacAnchor)
         case .week:
-            let start = viewModel.periodStart(lens: .week, anchor: almanacAnchor)
-            let end = viewModel.periodEnd(lens: .week, anchor: almanacAnchor)
-            if calendar.isDate(end, inSameDayAs: Date()) {
-                return "Last 7 days"
-            }
-            return "\(start.formatted(.dateTime.day().month(.abbreviated)))–\(end.formatted(.dateTime.day().month(.abbreviated)))"
+            return dayTitle(focusedDay)
         case .month:
             if calendar.isDate(almanacAnchor, equalTo: Date(), toGranularity: .month) {
                 return "This month"
@@ -639,12 +639,12 @@ struct MenuBarView: View {
 
     private var weekStrip: some View {
         let days = viewModel.almanacDays(lens: .week, anchor: almanacAnchor)
-        let selected = selectedDay ?? (almanacLens == .day ? Calendar.current.startOfDay(for: almanacAnchor) : nil)
+        let selected = focusedDay
         let barHeight: CGFloat = 32
         return HStack(spacing: 3) {
             ForEach(days) { day in
                 let progress = min(1, max(0, viewModel.goalProgress(for: day)))
-                let isSelected = selected.map { Calendar.current.isDate(day.day, inSameDayAs: $0) } ?? false
+                let isSelected = Calendar.current.isDate(day.day, inSameDayAs: selected)
                 let isToday = Calendar.current.isDateInToday(day.day)
                 VStack(spacing: 3) {
                     ZStack(alignment: .bottom) {
@@ -685,9 +685,7 @@ struct MenuBarView: View {
         let pad = (firstWeekday - calendar.firstWeekday + 7) % 7
         let cells: [DayTotals?] = Array(repeating: nil, count: pad) + days.map { Optional($0) }
         let columns = Array(repeating: GridItem(.flexible(), spacing: 3), count: 7)
-        let focused = selectedDay
-            ?? (calendar.isDate(almanacAnchor, equalTo: Date(), toGranularity: .month)
-                ? calendar.startOfDay(for: Date()) : nil)
+        let focused = focusedDay
         let weekdaySymbols = calendar.veryShortWeekdaySymbols
         let orderedWeekdays: [String] = {
             let start = calendar.firstWeekday - 1
@@ -707,7 +705,7 @@ struct MenuBarView: View {
                     if let day = cell {
                         let p = min(1, max(0, viewModel.goalProgress(for: day)))
                         let isToday = calendar.isDateInToday(day.day)
-                        let isFocused = focused.map { calendar.isDate(day.day, inSameDayAs: $0) } ?? false
+                        let isFocused = calendar.isDate(day.day, inSameDayAs: focused)
                         let showNum = isFocused || isToday
                         ZStack {
                             RoundedRectangle(cornerRadius: 3, style: .continuous)
@@ -738,24 +736,14 @@ struct MenuBarView: View {
                     }
                 }
             }
-            if let focused {
-                Text(focused.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated)))
-                    .font(Z1Type.regular(10))
-                    .foregroundStyle(Z1.faint)
-            }
+            Text(focused.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated)))
+                .font(Z1Type.regular(10))
+                .foregroundStyle(Z1.faint)
         }
     }
 
     private func pickDay(_ day: Date) {
-        if Calendar.current.isDateInToday(day), almanacLens == .week {
-            selectedDay = nil
-            almanacAnchor = Date()
-            return
-        }
-        selectedDay = day
-        almanacAnchor = day
-        if almanacLens == .month { return }
-        almanacLens = .day
+        selectedDay = Calendar.current.startOfDay(for: day)
     }
 
     private func dayHelp(_ day: DayTotals) -> String {
