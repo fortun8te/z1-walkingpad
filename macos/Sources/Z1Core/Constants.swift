@@ -5,6 +5,8 @@ import Foundation
 /// Mirrors `src/z1_walkingpad_mcp/constants.py`; see docs/protocol.md.
 public enum Z1Constants {
     public static let deviceNamePrefix = "KS-HD-Z1"
+    /// Older WalkingPads still advertise this family of names.
+    public static let kingSmithPrefixes = ["KS-HD", "KS-", "WalkingPad", "KINGSMITH", "KingSmith"]
 
     // Standard FTMS service (16-bit aliases expand to 0000xxxx-0000-1000-8000-00805f9b34fb)
     public static let fitnessMachineService = CBUUID(string: "1826")

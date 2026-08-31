@@ -675,6 +675,26 @@ public func stepSanityTests(_ t: TestRunner) {
     }
 }
 
+public func treadmillMatchTests(_ t: TestRunner) {
+    t.suite("treadmill-match") { t in
+        t.check(TreadmillMatch.accepts(name: "KS-HD-Z1E", serviceUUIDs: []), "Z1 by name")
+        t.check(TreadmillMatch.accepts(name: "UREVO URTM025", serviceUUIDs: []), "Urevo by name")
+        t.check(TreadmillMatch.accepts(name: "WalkingPad C2", serviceUUIDs: []), "WalkingPad C2")
+        t.check(
+            TreadmillMatch.accepts(name: "Desk Treadmill", serviceUUIDs: []),
+            "generic desk treadmill name"
+        )
+        t.check(
+            !TreadmillMatch.accepts(name: "KICKR BIKE", serviceUUIDs: [Z1Constants.fitnessMachineService]),
+            "indoor bike rejected"
+        )
+        t.check(
+            TreadmillMatch.accepts(name: nil, serviceUUIDs: [Z1Constants.fitnessMachineService]),
+            "unnamed FTMS accepted"
+        )
+    }
+}
+
 public func releaseDistTests(_ t: TestRunner) {
     t.suite("release-dist") { t in
         let tmp = FileManager.default.temporaryDirectory
@@ -740,6 +760,7 @@ public func runAllZ1CoreTests() -> Int32 {
     healthWeightTests(runner)
     gaitModelTests(runner)
     stepSanityTests(runner)
+    treadmillMatchTests(runner)
     releaseDistTests(runner)
     updateFeedTests(runner)
     openMeteoTests(runner)

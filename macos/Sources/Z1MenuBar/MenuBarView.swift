@@ -257,7 +257,7 @@ struct MenuBarView: View {
             }
             .frame(width: 14, height: 14)
             VStack(alignment: .leading, spacing: 1) {
-                Text(viewModel.status.deviceName ?? "WalkingPad Z1")
+                Text(viewModel.status.deviceName ?? "Treadmill")
                     .font(Z1Type.medium(13))
                     .foregroundStyle(Z1.ink)
                     .lineLimit(1)
@@ -312,7 +312,7 @@ struct MenuBarView: View {
         }
         switch viewModel.status.phase {
         case .disconnected: return "Tap Connect to link"
-        case .scanning: return "Finding your Z1…"
+        case .scanning: return "Looking for a treadmill…"
         case .connecting: return "Handshaking — unlocking pad"
         case .ready: return "Connected"
         case .error: return viewModel.status.errorMessage ?? "No pad found — tap retry"

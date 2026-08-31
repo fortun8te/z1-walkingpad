@@ -17,7 +17,7 @@ struct OnboardingView: View {
                     Text("Z1 WalkingPad")
                         .font(Z1Type.medium(22))
                         .foregroundStyle(Z1.ink)
-                    Text("KingSmith Z1 · Bluetooth FTMS · macOS menu bar")
+                    Text("FTMS walking pads · KingSmith, Urevo, and others")
                         .font(Z1Type.regular(11))
                         .foregroundStyle(Z1.faint)
                 }

@@ -1,6 +1,8 @@
 # macOS — Z1 WalkingPad menu-bar app
 
-Native macOS control for the KingSmith WalkingPad Z1 treadmill over BLE.
+Native macOS control for FTMS walking pads over BLE (KingSmith WalkingPad Z1
+and other 0x1826 treadmills). KingSmith still gets the vendor unlock. Everyone
+else uses the standard start/stop/speed control point.
 Swift 6, no third-party dependencies. The wire protocol is specified in
 [`../docs/protocol.md`](../docs/protocol.md) — read it before changing any
 frame code. **Never** send frames starting with `0xE8` (OTA, brick risk) and

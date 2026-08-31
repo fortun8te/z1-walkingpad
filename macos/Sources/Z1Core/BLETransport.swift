@@ -36,6 +36,7 @@ final class BLETransport: NSObject, @unchecked Sendable {
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
     private var scanPrefix = ""
+    private var scanByMatch = false
 
     // Pending one-shot operations (all guarded by `lock`).
     private var poweredOnConts: [CheckedContinuation<Void, Error>] = []
@@ -163,11 +164,14 @@ final class BLETransport: NSObject, @unchecked Sendable {
     ///
     /// Requires the central to be powered on.
     func adoptKnownPeripheral(identifier: UUID, namePrefix: String) -> String? {
-        guard let found = central.retrievePeripherals(withIdentifiers: [identifier]).first,
-              let name = found.name, name.hasPrefix(namePrefix)
-        else { return nil }
+        guard let found = central.retrievePeripherals(withIdentifiers: [identifier]).first else {
+            return nil
+        }
+        let name = found.name ?? ""
+        let ok = name.hasPrefix(namePrefix) || TreadmillMatch.accepts(name: found.name, serviceUUIDs: [])
+        guard ok else { return nil }
         lock.withLock { peripheral = found }
-        return name
+        return name.isEmpty ? "Treadmill" : name
     }
 
     /// Scan for the first peripheral whose name starts with `namePrefix`.
@@ -177,6 +181,7 @@ final class BLETransport: NSObject, @unchecked Sendable {
         return try await withCheckedThrowingContinuation { cont in
             lock.withLock {
                 scanPrefix = namePrefix
+                scanByMatch = false
                 scanCont = cont
             }
             queue.async {
@@ -188,6 +193,31 @@ final class BLETransport: NSObject, @unchecked Sendable {
                 cont.resume(throwing: BLETransportError.timeout)
             }
         }
+    }
+
+    /// Scan for any FTMS treadmill / walking pad we know how to drive.
+    func scanForTreadmill(timeout: TimeInterval) async throws -> String {
+        try await waitPoweredOn()
+        return try await withCheckedThrowingContinuation { cont in
+            lock.withLock {
+                scanPrefix = ""
+                scanByMatch = true
+                scanCont = cont
+            }
+            queue.async {
+                // Nil services: KingSmith often omits 0x1826 from the advert.
+                self.central.scanForPeripherals(withServices: nil, options: nil)
+            }
+            scheduleTimeout(timeout) { [weak self] in
+                guard let self, let cont = self.take(\.scanCont) else { return }
+                self.central.stopScan()
+                cont.resume(throwing: BLETransportError.timeout)
+            }
+        }
+    }
+
+    func hasCharacteristic(_ uuid: CBUUID) -> Bool {
+        lock.withLock { characteristics[uuid] != nil }
     }
 
     func connect(timeout: TimeInterval) async throws {
@@ -251,18 +281,15 @@ final class BLETransport: NSObject, @unchecked Sendable {
             }
         }
         for serviceUUID in services {
+            let found = lock.withLock { () -> (CBPeripheral, CBService)? in
+                guard let peripheral,
+                      let service = peripheral.services?.first(where: { $0.uuid == serviceUUID })
+                else { return nil }
+                return (peripheral, service)
+            }
+            guard let (target, service) = found else { continue }
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-                let found = lock.withLock { () -> (CBPeripheral, CBService)? in
-                    guard let peripheral,
-                          let service = peripheral.services?.first(where: { $0.uuid == serviceUUID })
-                    else { return nil }
-                    charsConts[serviceUUID] = cont
-                    return (peripheral, service)
-                }
-                guard let (target, service) = found else {
-                    cont.resume(throwing: BLETransportError.missingCharacteristics)
-                    return
-                }
+                lock.withLock { charsConts[serviceUUID] = cont }
                 queue.async { target.discoverCharacteristics(chars, for: service) }
                 scheduleTimeout(Z1Constants.gattOpTimeout) { [weak self] in
                     guard let self else { return }
@@ -274,9 +301,12 @@ final class BLETransport: NSObject, @unchecked Sendable {
                 }
             }
         }
-        // Verify everything we need is present.
         try lock.withLock {
-            for uuid in chars where characteristics[uuid] == nil {
+            let required: [CBUUID] = [
+                Z1Constants.charTreadmillData,
+                Z1Constants.charControlPoint,
+            ]
+            for uuid in required where characteristics[uuid] == nil {
                 throw BLETransportError.missingCharacteristics
             }
         }
@@ -391,12 +421,20 @@ extension BLETransport: CBCentralManagerDelegate {
         rssi RSSI: NSNumber
     ) {
         let name = peripheral.name ?? advertisementData[CBAdvertisementDataLocalNameKey] as? String
-        let prefix = lock.withLock { scanPrefix }
-        guard let name, name.hasPrefix(prefix) else { return }
+        let services = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? [])
+            + (advertisementData[CBAdvertisementDataOverflowServiceUUIDsKey] as? [CBUUID] ?? [])
+        let (prefix, byMatch) = lock.withLock { (scanPrefix, scanByMatch) }
+        let ok: Bool
+        if byMatch {
+            ok = TreadmillMatch.accepts(name: name, serviceUUIDs: services)
+        } else {
+            ok = name?.hasPrefix(prefix) == true
+        }
+        guard ok else { return }
         central.stopScan()
         lock.withLock { self.peripheral = peripheral }
         if let cont = take(\.scanCont) {
-            cont.resume(returning: name)
+            cont.resume(returning: name ?? "Treadmill")
         }
     }
 

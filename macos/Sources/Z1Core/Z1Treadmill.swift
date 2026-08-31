@@ -13,7 +13,7 @@ public enum Z1Error: Error, Equatable, LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .notFound:
-            "Z1 treadmill not found (is it on and not connected to another app?)"
+            "No treadmill found (is it on, and is the phone app disconnected?)"
         case .notConnected:
             "not connected/unlocked — call connect() first"
         case .unlockTimeout:
@@ -174,6 +174,8 @@ public actor Z1Treadmill {
     private var startHoldUntil: ContinuousClock.Instant?
     private var hasControl = false
     private var unlocked = false
+    /// KingSmith supplement channel. Generic FTMS pads leave this false.
+    private var usesVendor = false
     private var expectingDisconnect = false
     private var lastVendorWrite: ContinuousClock.Instant?
     private var lastControlWrite: ContinuousClock.Instant?
@@ -268,41 +270,46 @@ public actor Z1Treadmill {
                 ]
             )
 
-            // 1. supplement notify FIRST — before any vendor write
-            try await transport.setNotify(Z1Constants.charSupplementNotify, enable: true)
-            // telemetry (informational; stays silent pre-unlock)
             try? await transport.setNotify(Z1Constants.charTreadmillData, enable: true)
             try? await transport.setNotify(Z1Constants.charFitnessMachineStatus, enable: true)
 
-            // 2. unlock — write without response; success arrives as 71 80
+            usesVendor = transport.hasCharacteristic(Z1Constants.charSupplementWrite)
+                && transport.hasCharacteristic(Z1Constants.charSupplementNotify)
             unlocked = false
-            _ = try await vendorRoundtrip(
-                Z1Protocol.unlockFrame(deviceName: name),
-                pred: { $0.cmd0 == Z1Constants.vopUnlock && $0.cmd1 == 0x80 },
-                timeout: Z1Constants.unlockTimeout
-            )
+            if usesVendor {
+                try await transport.setNotify(Z1Constants.charSupplementNotify, enable: true)
+                _ = try await vendorRoundtrip(
+                    Z1Protocol.unlockFrame(deviceName: name),
+                    pred: { $0.cmd0 == Z1Constants.vopUnlock && $0.cmd1 == 0x80 },
+                    timeout: Z1Constants.unlockTimeout
+                )
+                _ = try? await vendorRoundtrip(
+                    Z1Protocol.sysInfoFrame(unixTime: UInt32(Date().timeIntervalSince1970)),
+                    pred: { $0.cmd0 == Z1Constants.vopUnlock && $0.cmd1 == 0x81 }
+                )
+                if let reply = try? await vendorRoundtrip(
+                    Z1Protocol.settingGetFrame(),
+                    pred: { $0.cmd0 == Z1Constants.vopProperty && $0.cmd1 == 0x80 }
+                ) {
+                    let props = Z1Protocol.parsePropertyRecords(reply.data)
+                    mutate { $0.properties = props }
+                }
+            }
             unlocked = true
 
-            // 3. extension init (best-effort: pad still works if these time out)
-            _ = try? await vendorRoundtrip(
-                Z1Protocol.sysInfoFrame(unixTime: UInt32(Date().timeIntervalSince1970)),
-                pred: { $0.cmd0 == Z1Constants.vopUnlock && $0.cmd1 == 0x81 }
-            )
-            if let reply = try? await vendorRoundtrip(
-                Z1Protocol.settingGetFrame(),
-                pred: { $0.cmd0 == Z1Constants.vopProperty && $0.cmd1 == 0x80 }
-            ) {
-                let props = Z1Protocol.parsePropertyRecords(reply.data)
-                mutate { $0.properties = props }
-            }
-
             // FTMS statics + control point indications
-            if let range = try? await transport.read(Z1Constants.charSupportedSpeedRange), range.count >= 4 {
+            if transport.hasCharacteristic(Z1Constants.charSupportedSpeedRange),
+               let range = try? await transport.read(Z1Constants.charSupportedSpeedRange), range.count >= 4 {
                 let lo = Int(range[range.startIndex]) | (Int(range[range.startIndex + 1]) << 8)
                 let hi = Int(range[range.startIndex + 2]) | (Int(range[range.startIndex + 3]) << 8)
                 mutate {
                     $0.minSpeedKmh = Double(lo) / 100
                     $0.maxSpeedKmh = Double(hi) / 100
+                }
+            } else if !usesVendor {
+                mutate {
+                    $0.minSpeedKmh = 0.5
+                    $0.maxSpeedKmh = 12.0
                 }
             }
             try await transport.setNotify(Z1Constants.charControlPoint, enable: true)
@@ -350,6 +357,7 @@ public actor Z1Treadmill {
 
     private func resetConnectionState() {
         unlocked = false
+        usesVendor = false
         hasControl = false
         lastTargetSpeed = nil
         startHoldUntil = nil
@@ -452,6 +460,7 @@ public actor Z1Treadmill {
     /// SETTING_GET dump (default 0 if absent).
     public func setDisplayUnits(imperial: Bool) async throws {
         try requireReady()
+        guard usesVendor else { return }
         let current = status.properties[1] ?? 0
         let value = Z1Units.displayUnitsValue(current: current, imperial: imperial)
         _ = try await vendorRoundtrip(
@@ -470,6 +479,7 @@ public actor Z1Treadmill {
         if status.beltRunning {
             _ = try await stop()
         }
+        guard usesVendor else { return }
         let current = status.properties[10] ?? 0
         let value = (current & ~0xE0) | (2 << 5)
         _ = try await vendorRoundtrip(
@@ -666,10 +676,7 @@ public actor Z1Treadmill {
         {
             return (name, true)
         }
-        let name = try await transport.scan(
-            namePrefix: Z1Constants.deviceNamePrefix,
-            timeout: Z1Constants.scanTimeout
-        )
+        let name = try await transport.scanForTreadmill(timeout: Z1Constants.scanTimeout)
         return (name, false)
     }
 
@@ -856,7 +863,11 @@ public actor Z1Treadmill {
             do {
                 _ = try await cpCommand(cpBytes)
             } catch Z1Error.controlRefused(_, 4) {
-                try await vendorControl(tunnelOp, params: tunnelParams)
+                if usesVendor {
+                    try await vendorControl(tunnelOp, params: tunnelParams)
+                } else {
+                    throw Z1Error.controlRefused(op: tunnelOp, result: 4)
+                }
             }
         }
     }
