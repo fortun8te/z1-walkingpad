@@ -530,6 +530,14 @@ func sessionStoreTests(_ t: TestRunner) {
             + GaitModel.steps(distanceM: 1_000, durationS: 15 * 60)
         t.expectEqual(today.steps, expectedTodaySteps, "today steps from gait model")
 
+        let span = store.days(
+            from: calendar.date(byAdding: .day, value: -1, to: noon)!,
+            through: noon,
+            calendar: calendar
+        )
+        t.expectEqual(span.count, 2, "inclusive day range")
+        t.expectEqual(span.last?.walks, 2, "range end is today")
+
         let week = store.recentDays(7, endingOn: noon, calendar: calendar)
         t.expectEqual(week.count, 7, "the week chart always has seven days")
         t.expectEqual(week.last?.walks, 2, "the last bar is today")

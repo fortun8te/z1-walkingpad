@@ -17,9 +17,9 @@ struct MenuBarView: View {
     @State private var showSettings = false
 
     /// The almanac card's range, and which day inside it is selected.
-    /// nil selection = today. Every popover open starts fresh on today.
-    enum AlmanacLens { case week, month }
-    @State private var almanacLens: AlmanacLens = .week
+    /// nil selection = the whole visible period. Popover open starts on today.
+    @State private var almanacLens: TreadmillViewModel.AlmanacLens = .week
+    @State private var almanacAnchor = Date()
     @State private var selectedDay: Date?
     @State private var weather: WeatherSnapshot? = nil
     @State private var kp: Double = 0
@@ -487,31 +487,58 @@ struct MenuBarView: View {
     }
 
     private var todayCard: some View {
-        let day = selectedDay ?? Calendar.current.startOfDay(for: Date())
-        let totals = viewModel.totals(for: day)
+        let calendar = Calendar.current
+        let focus = selectedDay ?? (almanacLens == .day ? calendar.startOfDay(for: almanacAnchor) : nil)
+        let totals = focus.map { viewModel.totals(for: $0) }
+            ?? viewModel.periodTotals(lens: almanacLens, anchor: almanacAnchor)
+        let sparkDay = focus ?? calendar.startOfDay(for: almanacAnchor)
         return VStack(alignment: .leading, spacing: 9) {
-            Button {
-                almanacLens = almanacLens == .week ? .month : .week
-                selectedDay = nil
-            } label: {
-                HStack(spacing: 5) {
-                    Text(dayTitle(day))
+            HStack(spacing: 6) {
+                Button { stepAlmanac(-1) } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 10, weight: .semibold))
+                        .frame(width: 22, height: 22)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Z1.ink)
+                .background(Circle().strokeBorder(Z1.hairline, lineWidth: 0.7))
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(periodTitle)
                         .font(Z1Type.medium(16))
                         .foregroundStyle(Z1.ink)
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 7, weight: .semibold))
-                        .foregroundStyle(Z1.faint)
-                    Spacer()
+                        .lineLimit(1)
                     Text(viewModel.goalText(for: totals))
-                        .font(Z1Type.regular(12))
+                        .font(Z1Type.regular(11))
                         .foregroundStyle(Z1.ink.opacity(0.55))
                 }
-                .contentShape(.rect)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Button { stepAlmanac(1) } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .frame(width: 22, height: 22)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(viewModel.canGoForward(lens: almanacLens, anchor: almanacAnchor) ? Z1.ink : Z1.faint)
+                .background(Circle().strokeBorder(Z1.hairline, lineWidth: 0.7))
+                .disabled(!viewModel.canGoForward(lens: almanacLens, anchor: almanacAnchor))
             }
-            .buttonStyle(.plain)
+
+            Picker("", selection: $almanacLens) {
+                ForEach(TreadmillViewModel.AlmanacLens.allCases) { lens in
+                    Text(lens.label).tag(lens)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .controlSize(.mini)
+            .onChange(of: almanacLens) { _, _ in selectedDay = nil }
 
             dayGoalLine(totals)
-            kcalSparkline(for: day)
+            if almanacLens == .day || selectedDay != nil {
+                kcalSparkline(for: sparkDay)
+            }
             tileStrip
             HStack(spacing: 0) {
                 walkStat(viewModel.formatDistance(totals.distanceM), "Distance")
@@ -555,6 +582,31 @@ struct MenuBarView: View {
         return day.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated))
     }
 
+    private var periodTitle: String {
+        let calendar = Calendar.current
+        switch almanacLens {
+        case .day:
+            return dayTitle(almanacAnchor)
+        case .week:
+            let start = viewModel.periodStart(lens: .week, anchor: almanacAnchor)
+            let end = viewModel.periodEnd(lens: .week, anchor: almanacAnchor)
+            if calendar.isDate(end, inSameDayAs: Date()) { return "This week" }
+            return "\(start.formatted(.dateTime.day().month(.abbreviated)))–\(end.formatted(.dateTime.day().month(.abbreviated)))"
+        case .month:
+            if calendar.isDate(almanacAnchor, equalTo: Date(), toGranularity: .month) {
+                return "This month"
+            }
+            return almanacAnchor.formatted(.dateTime.month(.wide).year())
+        }
+    }
+
+    private func stepAlmanac(_ delta: Int) {
+        let next = viewModel.shiftedAnchor(lens: almanacLens, anchor: almanacAnchor, by: delta)
+        if delta > 0, !viewModel.canGoForward(lens: almanacLens, anchor: almanacAnchor) { return }
+        almanacAnchor = next
+        selectedDay = nil
+    }
+
     private func dayGoalLine(_ totals: DayTotals) -> some View {
         let progress = viewModel.goalProgress(for: totals)
         return GeometryReader { geometry in
@@ -569,31 +621,37 @@ struct MenuBarView: View {
         .frame(height: 2.5)
     }
 
+    @ViewBuilder
     private var tileStrip: some View {
-        let days = (almanacLens == .week ? viewModel.weekDays : viewModel.monthDays)
-            .map { viewModel.totals(for: $0.day) }
-        let labelled = almanacLens == .week
-        let selected = selectedDay ?? Calendar.current.startOfDay(for: Date())
-        let barHeight: CGFloat = labelled ? 32 : 44
-        let corner: CGFloat = labelled ? 4 : 2
-        return HStack(spacing: labelled ? 3 : 1.5) {
+        if almanacLens == .month {
+            monthGrid
+        } else {
+            weekStrip
+        }
+    }
+
+    private var weekStrip: some View {
+        let days = viewModel.almanacDays(lens: .week, anchor: almanacAnchor)
+        let selected = selectedDay ?? (almanacLens == .day ? Calendar.current.startOfDay(for: almanacAnchor) : nil)
+        let barHeight: CGFloat = 32
+        return HStack(spacing: 3) {
             ForEach(days) { day in
                 let progress = min(1, max(0, viewModel.goalProgress(for: day)))
-                let isSelected = Calendar.current.isDate(day.day, inSameDayAs: selected)
+                let isSelected = selected.map { Calendar.current.isDate(day.day, inSameDayAs: $0) } ?? false
                 let isToday = Calendar.current.isDateInToday(day.day)
                 VStack(spacing: 3) {
                     ZStack(alignment: .bottom) {
-                        RoundedRectangle(cornerRadius: corner, style: .continuous)
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
                             .fill(Z1.unlit)
                         if !day.isEmpty {
-                            RoundedRectangle(cornerRadius: corner, style: .continuous)
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
                                 .fill(isToday ? Z1.ink.opacity(0.88) : Z1.ink.opacity(0.28))
                                 .frame(height: max(3, barHeight * CGFloat(progress)))
                         }
                     }
                     .frame(height: barHeight)
                     .overlay(
-                        RoundedRectangle(cornerRadius: corner, style: .continuous)
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
                             .strokeBorder(
                                 isSelected
                                     ? Z1.ink.opacity(0.7)
@@ -601,20 +659,66 @@ struct MenuBarView: View {
                                 lineWidth: isSelected ? 1 : 0.7
                             )
                     )
-                    if labelled {
-                        Text(day.day, format: .dateTime.weekday(.narrow))
-                            .font(Z1Type.regular(9))
-                            .foregroundStyle(isToday ? Z1.ink : Z1.faint)
-                    }
+                    Text(day.day, format: .dateTime.weekday(.narrow))
+                        .font(Z1Type.regular(9))
+                        .foregroundStyle(isToday ? Z1.ink : Z1.faint)
                 }
                 .contentShape(.rect)
-                .onTapGesture {
-                    selectedDay = Calendar.current.isDateInToday(day.day) ? nil : day.day
-                }
+                .onTapGesture { pickDay(day.day) }
                 .help(dayHelp(day))
             }
         }
         .frame(height: 44)
+    }
+
+    private var monthGrid: some View {
+        let days = viewModel.almanacDays(lens: .month, anchor: almanacAnchor)
+        let calendar = Calendar.current
+        let firstWeekday = days.first.map { calendar.component(.weekday, from: $0.day) } ?? calendar.firstWeekday
+        let pad = (firstWeekday - calendar.firstWeekday + 7) % 7
+        let cells: [DayTotals?] = Array(repeating: nil, count: pad) + days.map { Optional($0) }
+        let columns = Array(repeating: GridItem(.flexible(), spacing: 3), count: 7)
+        let selected = selectedDay
+        return LazyVGrid(columns: columns, spacing: 3) {
+            ForEach(Array(cells.enumerated()), id: \.offset) { _, cell in
+                if let day = cell {
+                    let p = min(1, max(0, viewModel.goalProgress(for: day)))
+                    let isToday = calendar.isDateInToday(day.day)
+                    let isSelected = selected.map { calendar.isDate(day.day, inSameDayAs: $0) } ?? false
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .fill(
+                            day.isEmpty
+                                ? Z1.unlit
+                                : (isToday ? Z1.ink.opacity(0.88) : Z1.ink.opacity(0.22 + 0.5 * p))
+                        )
+                        .frame(height: 14)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                .strokeBorder(
+                                    isSelected ? Z1.ink.opacity(0.75) : (isToday ? Z1.ink.opacity(0.35) : .clear),
+                                    lineWidth: 0.8
+                                )
+                        )
+                        .contentShape(.rect)
+                        .onTapGesture { pickDay(day.day) }
+                        .help(dayHelp(day))
+                } else {
+                    Color.clear.frame(height: 14)
+                }
+            }
+        }
+    }
+
+    private func pickDay(_ day: Date) {
+        if Calendar.current.isDateInToday(day), almanacLens == .week {
+            selectedDay = nil
+            almanacAnchor = Date()
+            return
+        }
+        selectedDay = day
+        almanacAnchor = day
+        if almanacLens == .month { return }
+        almanacLens = .day
     }
 
     private func dayHelp(_ day: DayTotals) -> String {

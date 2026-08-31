@@ -724,6 +724,71 @@ final class TreadmillViewModel: ObservableObject {
         refreshHistory()
     }
 
+    enum AlmanacLens: String, CaseIterable, Identifiable {
+        case day, week, month
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .day: return "Day"
+            case .week: return "Week"
+            case .month: return "Month"
+            }
+        }
+    }
+
+    func periodStart(lens: AlmanacLens, anchor: Date, calendar: Calendar = .current) -> Date {
+        switch lens {
+        case .day:
+            return calendar.startOfDay(for: anchor)
+        case .week:
+            return calendar.dateInterval(of: .weekOfYear, for: anchor)?.start
+                ?? calendar.startOfDay(for: anchor)
+        case .month:
+            return calendar.dateInterval(of: .month, for: anchor)?.start
+                ?? calendar.startOfDay(for: anchor)
+        }
+    }
+
+    func periodEnd(lens: AlmanacLens, anchor: Date, calendar: Calendar = .current) -> Date {
+        let start = periodStart(lens: lens, anchor: anchor, calendar: calendar)
+        switch lens {
+        case .day:
+            return start
+        case .week:
+            return calendar.date(byAdding: .day, value: 6, to: start) ?? start
+        case .month:
+            let next = calendar.date(byAdding: .month, value: 1, to: start) ?? start
+            return calendar.date(byAdding: .day, value: -1, to: next) ?? start
+        }
+    }
+
+    func shiftedAnchor(lens: AlmanacLens, anchor: Date, by steps: Int, calendar: Calendar = .current) -> Date {
+        let unit: Calendar.Component = lens == .month ? .month : (lens == .week ? .weekOfYear : .day)
+        return calendar.date(byAdding: unit, value: steps, to: anchor) ?? anchor
+    }
+
+    func canGoForward(lens: AlmanacLens, anchor: Date, calendar: Calendar = .current) -> Bool {
+        let next = shiftedAnchor(lens: lens, anchor: anchor, by: 1, calendar: calendar)
+        return calendar.startOfDay(for: next) <= calendar.startOfDay(for: Date())
+    }
+
+    func almanacDays(lens: AlmanacLens, anchor: Date) -> [DayTotals] {
+        let calendar = Calendar.current
+        let start = periodStart(lens: lens, anchor: anchor, calendar: calendar)
+        let end = periodEnd(lens: lens, anchor: anchor, calendar: calendar)
+        return sessionStore.days(from: start, through: end, calendar: calendar).map {
+            totals(for: $0.day)
+        }
+    }
+
+    func periodTotals(lens: AlmanacLens, anchor: Date) -> DayTotals {
+        var sum = DayTotals(day: periodStart(lens: lens, anchor: anchor))
+        for day in almanacDays(lens: lens, anchor: anchor) {
+            sum.addDay(day)
+        }
+        return sum
+    }
+
     func hourlyKcal(for day: Date) -> [Double] {
         var extra: WalkSession?
         if Calendar.current.isDateInToday(day), let open = openWalk, !sessionStore.contains(id: open.id) {

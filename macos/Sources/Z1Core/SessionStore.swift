@@ -63,6 +63,14 @@ public struct DayTotals: Equatable, Sendable, Identifiable {
         steps += session.steps
         caloriesKcal += session.caloriesKcal
     }
+
+    public mutating func addDay(_ other: DayTotals) {
+        walks += other.walks
+        activeDurationS += other.activeDurationS
+        distanceM += other.distanceM
+        steps += other.steps
+        caloriesKcal += other.caloriesKcal
+    }
 }
 
 /// Durable walk history on disk.
@@ -163,6 +171,30 @@ public final class SessionStore {
         for offset in 0..<count {
             guard let day = calendar.date(byAdding: .day, value: -offset, to: today) else { continue }
             byDay[day] = DayTotals(day: day)
+        }
+        for session in sessions {
+            let day = calendar.startOfDay(for: session.startedAt)
+            guard byDay[day] != nil else { continue }
+            byDay[day]?.add(session)
+        }
+        return byDay.values.sorted { $0.day < $1.day }
+    }
+
+    /// Inclusive calendar days from `start` through `end`.
+    public func days(
+        from start: Date,
+        through end: Date,
+        calendar: Calendar = .current
+    ) -> [DayTotals] {
+        let from = calendar.startOfDay(for: start)
+        let to = calendar.startOfDay(for: end)
+        guard to >= from else { return [] }
+        var byDay: [Date: DayTotals] = [:]
+        var cursor = from
+        while cursor <= to {
+            byDay[cursor] = DayTotals(day: cursor)
+            guard let next = calendar.date(byAdding: .day, value: 1, to: cursor) else { break }
+            cursor = next
         }
         for session in sessions {
             let day = calendar.startOfDay(for: session.startedAt)
