@@ -327,8 +327,7 @@ struct MenuBarView: View {
                 if isTypingSpeed {
                     TextField("", value: $speedDraft, format: .number.precision(.fractionLength(0...1)))
                         .textFieldStyle(.plain)
-                        .font(.system(size: 34, weight: .semibold))
-                        .monospacedDigit()
+                        .font(Z1Type.light(30))
                         .multilineTextAlignment(.center)
                         .foregroundStyle(Z1.ink)
                         .frame(width: 88)
@@ -339,21 +338,24 @@ struct MenuBarView: View {
                         }
                         .onExitCommand { isTypingSpeed = false }
                 } else {
-                    Text(speedText)
-                        .font(.system(size: 34, weight: .semibold))
-                        .monospacedDigit()
-                        .foregroundStyle(viewModel.isConnected ? Z1.ink : Z1.faint)
-                        .onTapGesture {
-                            guard viewModel.isConnected else { return }
-                            isTypingSpeed = true
-                            speedFieldFocused = true
-                        }
-                        .help("Click to type an exact speed")
+                    DotMatrixText(
+                        text: speedText,
+                        dot: 3.5,
+                        gap: 1.7,
+                        color: Z1.ink,
+                        lit: viewModel.isConnected
+                    )
+                    .onTapGesture {
+                        guard viewModel.isConnected else { return }
+                        isTypingSpeed = true
+                        speedFieldFocused = true
+                    }
+                    .help("Click to type an exact speed")
                 }
                 Text(viewModel.speedUnitLabel)
-                    .font(.system(size: 13, weight: .regular))
+                    .font(Z1Type.regular(11))
                     .foregroundStyle(Z1.dim)
-                    .padding(.top, 12)
+                    .padding(.top, 10)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .frame(height: 62)
