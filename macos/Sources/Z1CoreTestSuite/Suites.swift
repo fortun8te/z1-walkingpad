@@ -539,6 +539,24 @@ func sessionStoreTests(_ t: TestRunner) {
     }
 }
 
+public func healthWeightTests(_ t: TestRunner) {
+    t.suite("health-weight") { t in
+        let json = """
+        {"kg":82.4,"measuredAt":"2026-08-31T07:00:00Z","source":"apple-health"}
+        """.data(using: .utf8)!
+        let sample = HealthWeight.parse(data: json)
+        t.expectEqual(sample?.kg ?? 0, 82.4, accuracy: 0.01, "kg from Health dump")
+        t.check(sample?.measuredAt != nil, "measuredAt parsed")
+
+        let lb = """
+        {"lb":180.8}
+        """.data(using: .utf8)!
+        t.expectEqual(HealthWeight.parse(data: lb)?.kg ?? 0, 82.0, accuracy: 0.2, "lb converts")
+
+        t.check(HealthWeight.parse(data: Data("{\"kg\":3}".utf8)) == nil, "reject nonsense kg")
+    }
+}
+
 public func stepSanityTests(_ t: TestRunner) {
     t.suite("step-sanity") { t in
         t.expectEqual(StepSanity.steps(2_294, distanceM: 1_180), 2_294, "plausible pad count is kept")
@@ -623,6 +641,7 @@ public func runAllZ1CoreTests() -> Int32 {
     automaticHealthExportTests(runner)
     historyAndCompatibilityTests(runner)
     sessionStoreTests(runner)
+    healthWeightTests(runner)
     stepSanityTests(runner)
     updateFeedTests(runner)
     openMeteoTests(runner)

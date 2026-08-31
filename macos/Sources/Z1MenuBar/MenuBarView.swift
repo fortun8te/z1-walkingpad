@@ -871,6 +871,12 @@ struct MenuBarView: View {
                 .multilineTextAlignment(.trailing)
                 Text(viewModel.weightUnitLabel).foregroundStyle(Z1.faint)
             }
+            check("Use latest Apple Health weight", $viewModel.useHealthWeight)
+            if let stamp = viewModel.healthWeightStamp {
+                Text(stamp)
+                    .font(Z1Type.regular(10))
+                    .foregroundStyle(Z1.faint)
+            }
 
             settingRow("Speed per −/+") {
                 Picker("", selection: $viewModel.speedStep) {

@@ -144,6 +144,16 @@ final class TreadmillViewModel: ObservableObject {
         didSet { UserDefaults.standard.set(autoUpdate, forKey: Self.autoUpdateKey) }
     }
 
+    /// Pull the latest Health body-mass sample from the iCloud Shortcuts file.
+    @Published var useHealthWeight: Bool {
+        didSet {
+            UserDefaults.standard.set(useHealthWeight, forKey: Self.useHealthWeightKey)
+            if useHealthWeight { applyHealthWeightIfAvailable() }
+        }
+    }
+
+    @Published private(set) var healthWeightStamp: String?
+
     let treadmill = Z1Treadmill()
     private var pumpTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
@@ -184,6 +194,7 @@ final class TreadmillViewModel: ObservableObject {
     static let loginStatusKey = "loginItemStatus"
     static let connectionLogKey = "z1.connectionLog"
     static let healthTrackerKey = "z1.automaticHealthSession"
+    static let useHealthWeightKey = "z1.useHealthWeight"
 
     init() {
         let defaults = UserDefaults.standard
@@ -208,6 +219,7 @@ final class TreadmillViewModel: ObservableObject {
         launchAtLogin = LoginItem.isEnabled
         showInDock = defaults.object(forKey: Self.dockKey) as? Bool ?? true
         autoUpdate = defaults.object(forKey: Self.autoUpdateKey) as? Bool ?? true
+        useHealthWeight = defaults.object(forKey: Self.useHealthWeightKey) as? Bool ?? true
         healthTracker = Self.restoreHealthTracker(from: defaults)
         updater.objectWillChange
             .sink { [weak self] _ in self?.objectWillChange.send() }
@@ -249,6 +261,26 @@ final class TreadmillViewModel: ObservableObject {
         Task { await checkForUpdateAndMaybeInstall() }
         Timer.scheduledTimer(withTimeInterval: 30 * 60, repeats: true) { [weak self] _ in
             Task { @MainActor in await self?.checkForUpdateAndMaybeInstall() }
+        }
+        applyHealthWeightIfAvailable()
+        Timer.scheduledTimer(withTimeInterval: 15 * 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.applyHealthWeightIfAvailable() }
+        }
+    }
+
+    func applyHealthWeightIfAvailable() {
+        guard useHealthWeight, let sample = HealthWeight.load() else { return }
+        let rounded = (sample.kg * 10).rounded() / 10
+        if abs(weightKg - rounded) >= 0.05 {
+            weightKg = rounded
+        }
+        if let when = sample.measuredAt {
+            let fmt = DateFormatter()
+            fmt.dateStyle = .medium
+            fmt.timeStyle = .none
+            healthWeightStamp = "Health · \(fmt.string(from: when))"
+        } else {
+            healthWeightStamp = "Health"
         }
     }
 

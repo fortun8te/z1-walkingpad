@@ -1,3 +1,38 @@
+# Apple Health
+
+HealthKit itself does not run on macOS. Apple's own DTS said so in 2025:
+`HKHealthStore.isHealthDataAvailable()` is false, and Mac apps cannot read
+the Health database. iOS apps (Strava, WHOOP, Metric, scale apps) talk to
+HealthKit on the phone. Mac apps that show Health data import an
+`export.xml`, or they get a file from an iPhone Shortcut.
+
+This project uses the Shortcut route, same folder as the workout queue.
+
+## Latest weight → calories
+
+1. On the iPhone, make a Shortcut:
+
+   - Find Health Samples → Type is Weight → Sort by Start Date, latest first, Limit 1
+   - Get Details of Health Sample → Value (kg)
+   - Get Details of Health Sample → Start Date
+   - Text:
+
+     ```json
+     {"kg": VALUE, "measuredAt": DATE, "source": "apple-health"}
+     ```
+
+     (Shortcuts can substitute the value and an ISO date.)
+   - Save File → `Shortcuts/z1-walkingpad/weight.json`, overwrite.
+
+2. Automation: Time of Day each morning, or App → Health / your scale app → Is Opened.
+
+3. In the Mac app: Settings → **Use latest Apple Health weight**. The menu bar
+   app reads that file on launch and every 15 minutes and uses it for ACSM kcal.
+
+The file on the Mac is:
+
+`~/Library/Mobile Documents/iCloud~is~workflow~my~workflows/Documents/z1-walkingpad/weight.json`
+
 # Apple Health → WHOOP
 
 The Mac now places finished WalkingPad workouts in iCloud Drive automatically.
