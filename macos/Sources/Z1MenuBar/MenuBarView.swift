@@ -493,47 +493,52 @@ struct MenuBarView: View {
             ?? viewModel.periodTotals(lens: almanacLens, anchor: almanacAnchor)
         let sparkDay = focus ?? calendar.startOfDay(for: almanacAnchor)
         return VStack(alignment: .leading, spacing: 9) {
-            HStack(spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(periodTitle)
+                    .font(Z1Type.medium(16))
+                    .foregroundStyle(Z1.ink)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                Spacer(minLength: 4)
+                Text(viewModel.goalText(for: totals))
+                    .font(Z1Type.regular(12))
+                    .foregroundStyle(Z1.ink.opacity(0.55))
+            }
+
+            HStack(spacing: 2) {
                 Button { stepAlmanac(-1) } label: {
                     Image(systemName: "chevron.left")
-                        .font(.system(size: 10, weight: .semibold))
-                        .frame(width: 22, height: 22)
+                        .font(.system(size: 9, weight: .semibold))
+                        .frame(width: 18, height: 18)
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(Z1.ink)
-                .background(Circle().strokeBorder(Z1.hairline, lineWidth: 0.7))
+                .foregroundStyle(Z1.dim)
 
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(periodTitle)
-                        .font(Z1Type.medium(16))
-                        .foregroundStyle(Z1.ink)
-                        .lineLimit(1)
-                    Text(viewModel.goalText(for: totals))
-                        .font(Z1Type.regular(11))
-                        .foregroundStyle(Z1.ink.opacity(0.55))
+                ForEach(TreadmillViewModel.AlmanacLens.allCases) { lens in
+                    Button {
+                        almanacLens = lens
+                        selectedDay = nil
+                    } label: {
+                        Text(lens.label.lowercased())
+                            .font(Z1Type.regular(11))
+                            .foregroundStyle(almanacLens == lens ? Z1.ink : Z1.faint)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2)
+                    }
+                    .buttonStyle(.plain)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
 
                 Button { stepAlmanac(1) } label: {
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
-                        .frame(width: 22, height: 22)
+                        .font(.system(size: 9, weight: .semibold))
+                        .frame(width: 18, height: 18)
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(viewModel.canGoForward(lens: almanacLens, anchor: almanacAnchor) ? Z1.ink : Z1.faint)
-                .background(Circle().strokeBorder(Z1.hairline, lineWidth: 0.7))
+                .foregroundStyle(viewModel.canGoForward(lens: almanacLens, anchor: almanacAnchor) ? Z1.dim : Z1.unlit)
                 .disabled(!viewModel.canGoForward(lens: almanacLens, anchor: almanacAnchor))
-            }
 
-            Picker("", selection: $almanacLens) {
-                ForEach(TreadmillViewModel.AlmanacLens.allCases) { lens in
-                    Text(lens.label).tag(lens)
-                }
+                Spacer(minLength: 0)
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .controlSize(.mini)
-            .onChange(of: almanacLens) { _, _ in selectedDay = nil }
 
             dayGoalLine(totals)
             if almanacLens == .day || selectedDay != nil {
@@ -590,7 +595,10 @@ struct MenuBarView: View {
         case .week:
             let start = viewModel.periodStart(lens: .week, anchor: almanacAnchor)
             let end = viewModel.periodEnd(lens: .week, anchor: almanacAnchor)
-            if calendar.isDate(end, inSameDayAs: Date()) { return "This week" }
+            let today = calendar.startOfDay(for: Date())
+            if today >= calendar.startOfDay(for: start), today <= calendar.startOfDay(for: end) {
+                return "This week"
+            }
             return "\(start.formatted(.dateTime.day().month(.abbreviated)))–\(end.formatted(.dateTime.day().month(.abbreviated)))"
         case .month:
             if calendar.isDate(almanacAnchor, equalTo: Date(), toGranularity: .month) {
