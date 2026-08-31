@@ -105,7 +105,7 @@ public final class SessionStore {
     @discardableResult
     public func append(_ session: WalkSession) -> Bool {
         var session = session
-        let repaired = StepSanity.fromDistance(session.distanceM)
+        let repaired = StepSanity.steps(session.steps, distanceM: session.distanceM)
         if repaired != session.steps {
             session = WalkSession(
                 id: session.id,
@@ -257,7 +257,7 @@ public final class SessionStore {
         var dirty = false
         sessions = sessions.map { session in
             guard session.steps > 0, session.distanceM >= 50 else { return session }
-            let repaired = StepSanity.fromDistance(session.distanceM)
+            let repaired = StepSanity.steps(session.steps, distanceM: session.distanceM)
             guard repaired != session.steps else { return session }
             dirty = true
             return WalkSession(

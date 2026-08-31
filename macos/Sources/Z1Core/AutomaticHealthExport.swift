@@ -177,7 +177,6 @@ public struct RemoteSessionTracker: Codable, Sendable {
             {
                 current.steps = counters.steps
             }
-            current.steps = StepSanity.fromDistance(current.distanceM)
             current.lastCounters = counters
             if running {
                 current.wasRunning = true
@@ -194,7 +193,7 @@ public struct RemoteSessionTracker: Codable, Sendable {
                 startedAt: now.addingTimeInterval(-Double(seed.elapsedS)),
                 activeDurationS: seed.elapsedS,
                 distanceM: seed.distanceM,
-                steps: StepSanity.fromDistance(seed.distanceM),
+                steps: seed.steps,
                 lastCounters: counters,
                 wasRunning: true,
                 stoppedAt: nil

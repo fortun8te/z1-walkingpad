@@ -965,7 +965,7 @@ struct MenuBarView: View {
         VStack(alignment: .leading, spacing: 10) {
             settingRow("Stride") {
                 TextField(
-                    "53",
+                    "0",
                     value: strideCm,
                     format: .number.precision(.fractionLength(0))
                 )
@@ -975,7 +975,7 @@ struct MenuBarView: View {
                 .multilineTextAlignment(.trailing)
                 Text("cm").foregroundStyle(Z1.faint)
             }
-            Text("Steps = belt metres ÷ this. 53 cm is the KS Fit count at 3.5 km/h.")
+            Text("0 = pad steps. Only set this if you counted a walk by hand.")
                 .font(Z1Type.regular(10))
                 .foregroundStyle(Z1.faint)
                 .fixedSize(horizontal: false, vertical: true)
@@ -992,8 +992,8 @@ struct MenuBarView: View {
 
     private var strideCm: Binding<Double> {
         Binding(
-            get: { (viewModel.strideOverrideM > 0 ? viewModel.strideOverrideM : 0.53) * 100 },
-            set: { viewModel.strideOverrideM = max(30, min(150, $0)) / 100 }
+            get: { viewModel.strideOverrideM > 0 ? viewModel.strideOverrideM * 100 : 0 },
+            set: { viewModel.strideOverrideM = $0 <= 0 ? 0 : max(30, min(150, $0)) / 100 }
         )
     }
 

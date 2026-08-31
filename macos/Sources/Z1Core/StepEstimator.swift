@@ -14,8 +14,14 @@ public enum StepSanity {
         return max(1, Int((Double(distanceM) / strideM).rounded()))
     }
 
+    /// Only for stored junk: if the saved count implies a <25 cm stride, it
+    /// is leftover register, not a walk. Live display does not use this.
     public static func steps(_ steps: Int, distanceM: Int) -> Int {
-        fromDistance(distanceM)
+        guard steps > 0 else { return 0 }
+        if distanceM <= 0 { return 0 }
+        let stride = Double(distanceM) / Double(steps)
+        guard stride < minStrideM else { return steps }
+        return fromDistance(distanceM)
     }
 }
 
@@ -46,15 +52,7 @@ public struct StepSession: Equatable, Sendable {
         } else if let previousPad, pad - previousPad > 100 {
             origin += pad - previousPad
         }
-        var shown = display(pad: pad)
-        if distanceM >= 10 {
-            let expected = Int((Double(distanceM) / StepSanity.typicalStrideM).rounded())
-            if shown > expected * 2 + 30 {
-                origin = pad - expected
-                shown = display(pad: pad)
-            }
-        }
-        return shown
+        return display(pad: pad)
     }
 }
 

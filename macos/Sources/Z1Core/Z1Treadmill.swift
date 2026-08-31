@@ -128,26 +128,33 @@ public actor Z1Treadmill {
     public private(set) var lastStepsDelta = 0.0
     public private(set) var lastStepSource = StepSource.unknown
 
-    /// Metres per step used to turn belt distance into steps. Defaults to
-    /// 0.53 m (53 cm) from the KS Fit / hand count at 3.5 km/h.
-    public private(set) var strideOverrideM: Double? = StepSanity.typicalStrideM
+    /// Optional hand stride. Nil = use the pad's session step count.
+    public private(set) var strideOverrideM: Double?
 
-    /// Steps from belt distance / stride. The pad step register is ignored.
+    /// Pad session steps, or distance / hand stride if one is set.
     public var stepsDisplay: Int {
-        let metres = displayStat(telemetry.distanceM, statOffsets.distance)
-        let stride = strideOverrideM ?? StepSanity.typicalStrideM
-        return StepSanity.fromDistance(metres, strideM: stride)
+        if let stride = strideOverrideM, stride > 0 {
+            let metres = displayStat(telemetry.distanceM, statOffsets.distance)
+            return StepSanity.fromDistance(metres, strideM: stride)
+        }
+        return displayStat(stepSession.display(pad: telemetry.steps ?? 0), statOffsets.steps)
     }
 
+    /// Measured this walk: belt metres / steps. Nil until there is enough
+    /// distance for that to mean anything.
     public var impliedStrideM: Double? {
-        strideOverrideM ?? StepSanity.typicalStrideM
+        if let stride = strideOverrideM, stride > 0 { return stride }
+        let metres = displayStat(telemetry.distanceM, statOffsets.distance)
+        let steps = stepsDisplay
+        guard metres >= 80, steps > 0 else { return nil }
+        return Double(metres) / Double(steps)
     }
 
     public func setStrideOverride(_ metres: Double?) {
         if let metres, metres > 0.3, metres < 1.5 {
             strideOverrideM = metres
         } else {
-            strideOverrideM = StepSanity.typicalStrideM
+            strideOverrideM = nil
         }
         emitStatus()
     }
@@ -595,6 +602,7 @@ public actor Z1Treadmill {
             // is what zeros this.
             statOffsets.elapsed += prev.elapsedS ?? 0
             statOffsets.distance += prev.distanceM ?? 0
+            statOffsets.steps += stepSession.display(pad: prev.steps ?? 0)
             lastStepsDelta = 0
             lastStepSource = .unknown
         } else {
