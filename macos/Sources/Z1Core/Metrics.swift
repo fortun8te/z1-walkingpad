@@ -10,7 +10,7 @@ import Foundation
 /// Best validated for ~3-6 km/h; expect ~±13% error in field conditions.
 /// Mirrors `metrics.py`.
 public enum Z1Metrics {
-    public static let defaultWeightKg = 75.0
+    public static let defaultWeightKg = 74.3
 
     /// Resting component (3.5 ml/kg/min = 1 MET).
     static let restingVO2 = 3.5

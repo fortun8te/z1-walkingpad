@@ -128,26 +128,35 @@ public actor Z1Treadmill {
     public private(set) var lastStepsDelta = 0.0
     public private(set) var lastStepSource = StepSource.unknown
 
-    /// Optional hand stride. Nil = use the pad's session step count.
+    /// Optional 200-step calibration. Nil = speed-dependent gait model.
     public private(set) var strideOverrideM: Double?
 
-    /// Pad session steps, or distance / hand stride if one is set.
+    /// Belt metres ÷ modelled step length at this walk's average speed.
+    /// Pad step register is never used.
     public var stepsDisplay: Int {
-        if let stride = strideOverrideM, stride > 0 {
-            let metres = displayStat(telemetry.distanceM, statOffsets.distance)
-            return StepSanity.fromDistance(metres, strideM: stride)
-        }
-        return displayStat(stepSession.display(pad: telemetry.steps ?? 0), statOffsets.steps)
+        let metres = displayStat(telemetry.distanceM, statOffsets.distance)
+        let seconds = displayStat(telemetry.elapsedS, statOffsets.elapsed)
+        let live = telemetry.speedKmh ?? 0
+        let speed = live > 0.4
+            ? live
+            : (seconds > 0 ? Double(metres) / Double(seconds) * 3.6 : 3.0)
+        return GaitModel.steps(
+            distanceM: metres,
+            speedKmh: speed,
+            calibratedM: strideOverrideM
+        )
     }
 
-    /// Measured this walk: belt metres / steps. Nil until there is enough
-    /// distance for that to mean anything.
+    /// Modelled (or calibrated) step length in metres.
     public var impliedStrideM: Double? {
-        if let stride = strideOverrideM, stride > 0 { return stride }
         let metres = displayStat(telemetry.distanceM, statOffsets.distance)
-        let steps = stepsDisplay
-        guard metres >= 80, steps > 0 else { return nil }
-        return Double(metres) / Double(steps)
+        guard metres >= 10 else { return nil }
+        let seconds = displayStat(telemetry.elapsedS, statOffsets.elapsed)
+        let live = telemetry.speedKmh ?? 0
+        let speed = live > 0.4
+            ? live
+            : (seconds > 0 ? Double(metres) / Double(seconds) * 3.6 : 3.0)
+        return GaitModel.stepLengthM(speedKmh: speed, calibratedM: strideOverrideM)
     }
 
     public func setStrideOverride(_ metres: Double?) {

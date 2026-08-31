@@ -105,7 +105,10 @@ public final class SessionStore {
     @discardableResult
     public func append(_ session: WalkSession) -> Bool {
         var session = session
-        let repaired = StepSanity.steps(session.steps, distanceM: session.distanceM)
+        let repaired = GaitModel.steps(
+            distanceM: session.distanceM,
+            durationS: session.activeDurationS
+        )
         if repaired != session.steps {
             session = WalkSession(
                 id: session.id,
@@ -271,14 +274,16 @@ public final class SessionStore {
         return (try? Self.makeDecoder().decode(Envelope.self, from: data))?.sessions ?? []
     }
 
-    /// The interpolator used to store 10× step totals. Anything that implies
-    /// a stride shorter than 25 cm is not a walk — rewrite from distance.
+    /// Rewrite stored steps from belt distance and average speed.
     @discardableResult
     private func sanitizeImpossibleSteps() -> Bool {
         var dirty = false
         sessions = sessions.map { session in
-            guard session.steps > 0, session.distanceM >= 50 else { return session }
-            let repaired = StepSanity.steps(session.steps, distanceM: session.distanceM)
+            guard session.distanceM >= 20 else { return session }
+            let repaired = GaitModel.steps(
+                distanceM: session.distanceM,
+                durationS: session.activeDurationS
+            )
             guard repaired != session.steps else { return session }
             dirty = true
             return WalkSession(

@@ -892,7 +892,7 @@ struct MenuBarView: View {
                     .font(Z1Type.regular(10))
                     .foregroundStyle(Z1.faint)
             } else if viewModel.useHealthWeight {
-                Text("Mac cannot read HealthKit. On iPhone: Shortcuts → Find Health Samples → Weight, latest, save as Shortcuts/z1-walkingpad/weight.json")
+                Text("Mac apps cannot open HealthKit. On iPhone: Health → your photo → Export All Health Data. Put export.xml in iCloud Drive, Downloads, Desktop, or Application Support/Z1 WalkingPad.")
                     .font(Z1Type.regular(10))
                     .foregroundStyle(Z1.faint)
                     .fixedSize(horizontal: false, vertical: true)
@@ -989,19 +989,7 @@ struct MenuBarView: View {
 
     private var strideSettings: some View {
         VStack(alignment: .leading, spacing: 10) {
-            settingRow("Stride") {
-                TextField(
-                    "0",
-                    value: strideCm,
-                    format: .number.precision(.fractionLength(0))
-                )
-                .textFieldStyle(.roundedBorder)
-                .controlSize(.mini)
-                .frame(width: 44)
-                .multilineTextAlignment(.trailing)
-                Text("cm").foregroundStyle(Z1.faint)
-            }
-            Text("0 = pad steps. Only set this if you counted a walk by hand.")
+            Text("Steps from belt distance and speed. Pad step count and a fixed stride are ignored.")
                 .font(Z1Type.regular(10))
                 .foregroundStyle(Z1.faint)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1014,13 +1002,6 @@ struct MenuBarView: View {
                     .disabled(!viewModel.persistStats)
             }
         }
-    }
-
-    private var strideCm: Binding<Double> {
-        Binding(
-            get: { viewModel.strideOverrideM > 0 ? viewModel.strideOverrideM * 100 : 0 },
-            set: { viewModel.strideOverrideM = $0 <= 0 ? 0 : max(30, min(150, $0)) / 100 }
-        )
     }
 
     private var leavingSettings: some View {

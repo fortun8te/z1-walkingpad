@@ -63,7 +63,7 @@ final class TreadmillViewModel: ObservableObject {
         }
     }
 
-    /// Hand stride in metres. 0 = pad session count. Not used unless set.
+    /// Optional 200-step calibration in metres. 0 = gait model from speed.
     @Published var strideOverrideM: Double {
         didSet {
             UserDefaults.standard.set(strideOverrideM, forKey: Self.strideKey)
@@ -188,7 +188,7 @@ final class TreadmillViewModel: ObservableObject {
     static let reminderLogKey = "z1.reminderLog"
     static let goalStepsKey = "dailyGoalSteps"
     static let notificationsKey = "notificationsEnabled"
-    static let strideKey = "strideOverrideM"
+    static let strideKey = "z1.calibratedStrideM"
     static let dockKey = "showInDock"
     static let autoUpdateKey = "z1.autoUpdate"
     static let loginStatusKey = "loginItemStatus"
@@ -774,7 +774,6 @@ final class TreadmillViewModel: ObservableObject {
         (todayTotals.activeDurationS + (openWalk?.activeDurationS ?? 0)) / 60
     }
 
-    /// What the live numbers imply per step, for comparison with a hand count.
     var strideLabel: String {
         guard let stride = status.impliedStrideM else { return "—" }
         let cm = Int((stride * 100).rounded())

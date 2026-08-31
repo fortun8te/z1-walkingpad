@@ -509,7 +509,10 @@ func sessionStoreTests(_ t: TestRunner) {
         t.expectEqual(today.walks, 2, "today counts both of today's walks")
         t.expectEqual(today.activeDurationS, 45 * 60, "today sums active time")
         t.expectEqual(today.distanceM, 3_000, "today sums distance")
-        t.expectEqual(today.steps, 4_500, "today sums steps")
+        let expectedTodaySteps =
+            GaitModel.steps(distanceM: 2_000, durationS: 30 * 60)
+            + GaitModel.steps(distanceM: 1_000, durationS: 15 * 60)
+        t.expectEqual(today.steps, expectedTodaySteps, "today steps from gait model")
 
         let week = store.recentDays(7, endingOn: noon, calendar: calendar)
         t.expectEqual(week.count, 7, "the week chart always has seven days")
@@ -533,8 +536,8 @@ func sessionStoreTests(_ t: TestRunner) {
         )
         t.expectEqual(
             store.sessions.first { $0.id == "hot" }?.steps,
-            2_226,
-            "impossible stride is rewritten from distance at 0.53 m"
+            GaitModel.steps(distanceM: 1_180, durationS: 27 * 60),
+            "leftover pad steps rewritten from distance and speed"
         )
     }
 }
@@ -554,16 +557,40 @@ public func healthWeightTests(_ t: TestRunner) {
         t.expectEqual(HealthWeight.parse(data: lb)?.kg ?? 0, 82.0, accuracy: 0.2, "lb converts")
 
         t.check(HealthWeight.parse(data: Data("{\"kg\":3}".utf8)) == nil, "reject nonsense kg")
+
+        let xml = """
+        <?xml version="1.0"?>
+        <HealthData>
+        <Record type="HKQuantityTypeIdentifierBodyMass" sourceName="Health" startDate="2026-08-01 07:00:00 +0000" endDate="2026-08-01 07:00:00 +0000" value="80.0" unit="kg"/>
+        <Record type="HKQuantityTypeIdentifierBodyMass" sourceName="Health" startDate="2026-08-31 07:00:00 +0000" endDate="2026-08-31 07:00:00 +0000" value="74.3" unit="kg"/>
+        </HealthData>
+        """.data(using: .utf8)!
+        let fromXML = HealthWeight.parseExportXML(data: xml)
+        t.expectEqual(fromXML?.kg ?? 0, 74.3, accuracy: 0.01, "latest BodyMass from export.xml")
+    }
+}
+
+public func gaitModelTests(_ t: TestRunner) {
+    t.suite("gait-model") { t in
+        let length = GaitModel.stepLengthM(speedKmh: 3.24)
+        t.expectEqual(length, 0.64037, accuracy: 0.0001, "3.24 km/h step length")
+        let modelled = GaitModel.steps(distanceKm: 8.31, speedKmh: 3.24)
+        t.check((12_970...12_990).contains(modelled), "8.31 km at 3.24 km/h ≈ 12,980")
+        let fromTime = GaitModel.steps(distanceM: 8_310, durationS: Int((2.5667 * 3600).rounded()))
+        t.check((12_970...12_990).contains(fromTime), "same walk from duration")
+        let calibrated = GaitModel.steps(distanceM: 115, durationS: 120, calibratedM: 115.0 / 200.0)
+        t.expectEqual(calibrated, 200, "200-step calibration wins")
     }
 }
 
 public func stepSanityTests(_ t: TestRunner) {
     t.suite("step-sanity") { t in
-        t.expectEqual(StepSanity.steps(2_294, distanceM: 1_180), 2_294, "plausible pad count is kept")
-        t.expectEqual(StepSanity.steps(30_118, distanceM: 1_180), 2_226, "impossible leftover is rewritten")
-        t.expectEqual(StepSanity.steps(4_747, distanceM: 50), 94, "open-walk leftover total is rewritten")
-        t.expectEqual(StepSanity.steps(4_679, distanceM: 10), 19, "10 m leftover pad total is rewritten")
-        t.expectEqual(StepSanity.steps(4_679, distanceM: 0), 0, "no distance, drop leftover steps")
+        t.expectEqual(
+            GaitModel.steps(distanceM: 1_180, durationS: 0),
+            GaitModel.steps(distanceM: 1_180, speedKmh: 3.0),
+            "no duration uses 3 km/h"
+        )
+        t.expectEqual(GaitModel.steps(distanceM: 0, speedKmh: 3.2), 0, "no distance, no steps")
 
         var session = StepSession()
         t.expectEqual(
@@ -654,6 +681,7 @@ public func runAllZ1CoreTests() -> Int32 {
     historyAndCompatibilityTests(runner)
     sessionStoreTests(runner)
     healthWeightTests(runner)
+    gaitModelTests(runner)
     stepSanityTests(runner)
     updateFeedTests(runner)
     openMeteoTests(runner)
