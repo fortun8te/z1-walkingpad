@@ -1,7 +1,60 @@
 import Foundation
 
+/// Hard floor: if steps imply a stride under 25 cm, they are not a walk.
+/// Rewrite from belt distance at this person's measured stride (KS Fit:
+/// 53 cm at 3.5 km/h).
+public enum StepSanity {
+    public static let minStrideM = 0.25
+    public static let typicalStrideM = 0.53
+
+    public static func steps(_ steps: Int, distanceM: Int) -> Int {
+        guard steps > 0 else { return 0 }
+        // 0 m with thousands of leftover pad steps is how a new walk opens
+        // at 4,679. No distance → no steps. Short distance → rewrite.
+        if distanceM <= 0 { return 0 }
+        let stride = Double(distanceM) / Double(steps)
+        guard stride < minStrideM else { return steps }
+        return max(1, Int((Double(distanceM) / typicalStrideM).rounded()))
+    }
+}
+
 public enum StepSource: String, Sendable {
     case raw, estimated, calibrated, unknown
+}
+
+/// Pad step register often does not reset when elapsed/distance do.
+/// Subtract the reading at session start so the live count ticks 0, 1, 2…
+public struct StepSession: Equatable, Sendable {
+    public var origin = 0
+
+    public init(origin: Int = 0) { self.origin = origin }
+
+    public func display(pad: Int) -> Int { max(0, pad - origin) }
+
+    public mutating func ingest(
+        pad: Int,
+        previousPad: Int?,
+        elapsedReset: Bool,
+        distanceReset: Bool,
+        distanceM: Int = 0
+    ) -> Int {
+        if elapsedReset || distanceReset {
+            origin = pad
+        } else if let previousPad, pad < previousPad {
+            origin = 0
+        } else if let previousPad, pad - previousPad > 100 {
+            origin += pad - previousPad
+        }
+        var shown = display(pad: pad)
+        if distanceM >= 10 {
+            let expected = Int((Double(distanceM) / StepSanity.typicalStrideM).rounded())
+            if shown > expected * 2 + 30 {
+                origin = pad - expected
+                shown = display(pad: pad)
+            }
+        }
+        return shown
+    }
 }
 
 /// Converts sparse, integer-metre FTMS counters into a stable step total and
@@ -91,5 +144,44 @@ public struct StepEstimator: Sendable {
             return (dDistance > 0 ? dDistance / stride : 0, .calibrated)
         }
         return (dSteps, .estimated)
+    }
+}
+
+/// Smooths the 1 Hz step counter for the popover without changing the total.
+///
+/// Telemetry is the authority. Between packets the display is walked forward
+/// from that packet's total at the current speed/stride so the number ticks
+/// instead of jumping. The next packet **snaps back** to the summed deltas —
+/// leftover interpolation must not be folded in, or steps accumulate ~2×.
+public struct StepSmoother: Sendable, Equatable {
+    public var packetSteps: Double = 0
+    public var displaySteps: Double = 0
+    public var speedKmh: Double = 0
+    public var strideM: Double = 0.72
+
+    public init() {}
+
+    public mutating func set(_ steps: Double) {
+        packetSteps = max(0, steps)
+        displaySteps = packetSteps
+    }
+
+    public mutating func addDelta(_ delta: Double) {
+        packetSteps += max(0, delta)
+        displaySteps = packetSteps
+    }
+
+    public mutating func reset() {
+        packetSteps = 0
+        displaySteps = 0
+    }
+
+    /// Advance the display toward `packetSteps + expected`, never the packet total.
+    public mutating func interpolate(secondsSincePacket: Double) {
+        guard speedKmh > 0, strideM > 0.3 else { return }
+        guard secondsSincePacket > 0.08, secondsSincePacket < 1.2 else { return }
+        let expected = speedKmh / 3.6 * secondsSincePacket / strideM
+        let target = packetSteps + expected
+        displaySteps = min(packetSteps + 3, max(packetSteps, target))
     }
 }

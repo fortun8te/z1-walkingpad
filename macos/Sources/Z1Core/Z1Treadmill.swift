@@ -124,32 +124,25 @@ public actor Z1Treadmill {
     private var statOffsets = (elapsed: 0, distance: 0, steps: 0)
     public private(set) var persistStats = false
     private var stepEstimator = StepEstimator()
-    private var correctedSteps = 0.0
-    private var stepBaselined = false
+    private var stepSession = StepSession()
     public private(set) var lastStepsDelta = 0.0
     public private(set) var lastStepSource = StepSource.unknown
 
     /// A hand-measured stride in metres, or nil to trust the pad's counter.
     ///
-    /// The pad's step sensor cannot be validated over BLE — the learned stride
-    /// curve is derived *from* that counter, so if the pad over-counts, the
-    /// learner simply converges on a correspondingly short stride and every
-    /// number stays self-consistent and wrong. Belt distance, by contrast, is
-    /// exact. So the honest correction is to let the walker count their own
-    /// steps once and derive the rest from distance.
+    /// KS Fit shows the pad's own step register. We do the same. The learner
+    /// and the interpolator both invented extra steps; they are not used for
+    /// the number on screen. Belt distance is exact. If you want steps from
+    /// that instead, enter a hand-counted stride.
     public private(set) var strideOverrideM: Double?
 
-    /// Step count to display: a hand-measured stride wins, then the
-    /// distance-derived estimate once the stride curve is calibrated, then the
-    /// pad's raw count (with persistStats offsets).
+    /// Pad steps (plus persistStats offsets), unless a hand stride is set.
     public var stepsDisplay: Int {
         if let strideOverrideM, strideOverrideM > 0 {
             let metres = displayStat(telemetry.distanceM, statOffsets.distance)
             return Int((Double(metres) / strideOverrideM).rounded())
         }
-        return stepBaselined
-            ? Int(correctedSteps.rounded())
-            : displayStat(telemetry.steps, statOffsets.steps)
+        return displayStat(stepSession.display(pad: telemetry.steps ?? 0), statOffsets.steps)
     }
 
     /// Metres per step the current numbers imply — what to compare against a
@@ -180,10 +173,6 @@ public actor Z1Treadmill {
     private var lastVendorWrite: ContinuousClock.Instant?
     private var lastControlWrite: ContinuousClock.Instant?
     private var lastTelemetryInstant: ContinuousClock.Instant?
-    private var stepInterpolationTask: Task<Void, Never>?
-    private var lastStepsInterpolationBase: Double = 0
-    private var lastStepsInterpolationSpeed: Double = 0
-    private var lastStepsStrideM: Double = 0.72
 
     struct Frame: Sendable {
         var cmd0: UInt8
@@ -359,8 +348,8 @@ public actor Z1Treadmill {
         startHoldUntil = nil
         telemetry = Z1Protocol.TreadmillData()
         calorieStateRestored = false
-        stepBaselined = false
         lastTelemetryInstant = nil
+        stepSession = StepSession()
         mutate { $0.beltRunning = false }
     }
 
@@ -505,8 +494,6 @@ public actor Z1Treadmill {
         if !on {
             // back to pad-as-master: drop the accumulated offsets
             statOffsets = (elapsed: 0, distance: 0, steps: 0)
-            correctedSteps = Double(telemetry.steps ?? 0)
-            stepBaselined = telemetry.steps != nil
         }
         emitStatus()
     }
@@ -516,7 +503,6 @@ public actor Z1Treadmill {
     public func clearStats() {
         statOffsets = (elapsed: 0, distance: 0, steps: 0)
         calorieTracker.reset()
-        correctedSteps = 0
         UserDefaults.standard.removeObject(forKey: Self.calorieStateKey)
         persistCalorieState(force: true)
         emitStatus()
@@ -562,7 +548,6 @@ public actor Z1Treadmill {
                 startHoldUntil = nil
                 telemetry.speedKmh = 0
                 mutate { $0.beltRunning = false } // safety-key / user stop or pause
-                self.stopStepInterpolation()
             default: break
             }
         default:
@@ -579,19 +564,29 @@ public actor Z1Treadmill {
         if parsed.speedKmh == nil { parsed.speedKmh = prev.speedKmh }
         if parsed.distanceM == nil { parsed.distanceM = prev.distanceM }
         if parsed.elapsedS == nil { parsed.elapsedS = prev.elapsedS }
-        if parsed.steps == nil { parsed.steps = prev.steps }
+        let elapsedReset = (prev.elapsedS != nil && (parsed.elapsedS ?? prev.elapsedS!) < prev.elapsedS!)
+        let distanceReset = (prev.distanceM != nil && (parsed.distanceM ?? prev.distanceM!) < prev.distanceM!)
+        if parsed.steps == nil {
+            // A new pad session often omits steps for a packet. Copying the
+            // previous walk's total onto 50 m of a new session is how Today
+            // jumps to 30,118.
+            parsed.steps = (elapsedReset || distanceReset) ? 0 : prev.steps
+        }
         if parsed.calories == nil { parsed.calories = prev.calories }
         telemetry = parsed
+        _ = stepSession.ingest(
+            pad: telemetry.steps ?? 0,
+            previousPad: prev.steps,
+            elapsedReset: elapsedReset,
+            distanceReset: distanceReset,
+            distanceM: telemetry.distanceM ?? 0
+        )
 
         if !calorieStateRestored {
             calorieStateRestored = true
             restoreCalorieState()
         }
         let firstCounters = prev.distanceM == nil || prev.steps == nil
-        if firstCounters && !stepBaselined {
-            correctedSteps = Double(telemetry.steps ?? 0)
-            stepBaselined = true
-        }
         // pad counter reset (Stop finalizes the pad session, or the pad's
         // own timer). Default: the pad is the master — stats follow it down.
         // With persistStats on: fold the final values into the offsets and
@@ -603,22 +598,18 @@ public actor Z1Treadmill {
             if persistStats {
                 statOffsets.elapsed += prev.elapsedS ?? 0
                 statOffsets.distance += prev.distanceM ?? 0
-                statOffsets.steps += prev.steps ?? 0
+                statOffsets.steps += max(0, (prev.steps ?? 0) - stepSession.origin)
             } else {
                 calorieTracker.reset()
-                correctedSteps = 0
-                stepBaselined = true
             }
             lastStepsDelta = 0
             lastStepSource = .unknown
-            stopStepInterpolation()
         } else {
             let result = stepEstimator.feed(
                 previous: prev,
                 current: telemetry,
                 intervalSpeedKmh: prev.speedKmh
             )
-            if !firstCounters { correctedSteps += result.delta }
             lastStepsDelta = firstCounters ? 0 : result.delta
             lastStepSource = result.source
         }
@@ -636,19 +627,8 @@ public actor Z1Treadmill {
             }
         }
         lastTelemetryInstant = telemetryNow
-        // Snapshot for high-freq step interpolation: estimate until next 1Hz packet.
-        lastStepsInterpolationBase = correctedSteps
-        lastStepsInterpolationSpeed = telemetry.speedKmh ?? status.speedKmh
-        if let so = strideOverrideM, so > 0 {
-            lastStepsStrideM = so
-        } else if let s = stepEstimator.stride(for: lastStepsInterpolationSpeed) {
-            lastStepsStrideM = s
-        } else if let imp = impliedStrideM, imp > 0.3, imp < 1.5 {
-            lastStepsStrideM = imp
-        }
         persistCalorieState()
         emitStatus()
-        startStepInterpolationIfNeeded()
     }
 
     // MARK: - calorie state persistence
@@ -707,7 +687,7 @@ public actor Z1Treadmill {
         UserDefaults.standard.set(
             [
                 "totalKcal": calorieTracker.totalKcal,
-                "correctedSteps": correctedSteps,
+                "correctedSteps": Double(telemetry.steps ?? 0),
                 "rawSteps": telemetry.steps ?? 0,
                 "elapsedS": telemetry.elapsedS ?? 0,
                 "distanceM": telemetry.distanceM ?? 0,
@@ -723,21 +703,12 @@ public actor Z1Treadmill {
         let savedElapsed = state["elapsedS"] as? Int ?? 0
         guard curElapsed >= savedElapsed else { return } // pad counters reset (power cycle) — fresh
         calorieTracker.totalKcal = state["totalKcal"] as? Double ?? 0
-        correctedSteps = state["correctedSteps"] as? Double ?? 0
-        stepBaselined = true
-        // credit the gap while we were disconnected, if the belt kept moving
+        // Steps come from the pad, not this file. Only kcal is client-side.
         let gapS = curElapsed - savedElapsed
         let gapD = (telemetry.distanceM ?? 0) - (state["distanceM"] as? Int ?? 0)
         if gapS > 0, gapD > 0 {
             let avgKmh = Double(gapD) / Double(gapS) * 3.6
             calorieTracker.addSample(speedKmh: avgKmh, elapsedS: Double(gapS))
-            if let stride = stepEstimator.stride(for: avgKmh) {
-                correctedSteps += Double(gapD) / stride
-            } else if let savedRaw = state["rawSteps"] as? Int {
-                correctedSteps += Double(max(0, (telemetry.steps ?? 0) - savedRaw))
-            } else {
-                correctedSteps = Double(telemetry.steps ?? 0)
-            }
         }
     }
 
@@ -761,50 +732,6 @@ public actor Z1Treadmill {
         lastEmittedStatus = s
         status = s
         statusYield.yield(s)
-    }
-
-    private func startStepInterpolationIfNeeded() {
-        guard status.beltRunning, (telemetry.speedKmh ?? 0) > 0 else {
-            stepInterpolationTask?.cancel()
-            stepInterpolationTask = nil
-            return
-        }
-        guard stepInterpolationTask == nil else { return }
-        stepInterpolationTask = Task { [weak self] in
-            guard let self else { return }
-            await self.stepInterpolationLoop()
-        }
-    }
-
-    private func stepInterpolationLoop() async {
-        while !Task.isCancelled {
-            let running = status.beltRunning
-            guard running else { break }
-            try? await Task.sleep(for: .milliseconds(180))
-            guard !Task.isCancelled else { break }
-            interpolateStepsTick()
-        }
-    }
-
-    private func interpolateStepsTick() {
-        guard status.beltRunning, lastStepsInterpolationSpeed > 0, lastStepsStrideM > 0.3 else { return }
-        guard let lastInstant = lastTelemetryInstant else { return }
-        let elapsed = ContinuousClock.now - lastInstant
-        let secs = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
-        // Only interpolate within the 1Hz window; beyond 1.2s the pad is late and we hold.
-        guard secs > 0.08, secs < 1.2 else { return }
-        let expectedSteps = lastStepsInterpolationSpeed / 3.6 * secs / lastStepsStrideM
-        let target = lastStepsInterpolationBase + expectedSteps
-        // Only ever go forward, never backward; and never jump more than 3 steps per tick.
-        let delta = min(3.0, max(0, target - correctedSteps))
-        guard delta >= 0.08 else { return }
-        correctedSteps += delta
-        emitStatus()
-    }
-
-    private func stopStepInterpolation() {
-        stepInterpolationTask?.cancel()
-        stepInterpolationTask = nil
     }
 
     private func mutate(_ body: (inout Status) -> Void) {

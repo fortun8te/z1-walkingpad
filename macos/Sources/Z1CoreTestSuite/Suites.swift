@@ -218,6 +218,29 @@ public func strideTests(_ t: TestRunner) {
     }
 }
 
+/// Interpolation must tick the display without inflating the session total.
+public func stepSmootherTests(_ t: TestRunner) {
+    t.suite("step-smoother") { t in
+        var clock = StepSmoother()
+        clock.speedKmh = 3.0
+        clock.strideM = 0.75
+        // 3 km/h / 0.75 m = 1.11 steps/s. Ten 1 Hz packets of 1 step each.
+        for _ in 0 ..< 10 {
+            clock.addDelta(1)
+            clock.interpolate(secondsSincePacket: 0.9)
+            t.check(clock.displaySteps >= clock.packetSteps, "display never behind packet")
+            t.check(clock.displaySteps <= clock.packetSteps + 3, "display cap")
+        }
+        t.expectEqual(clock.packetSteps, 10, accuracy: 1e-9, "packets are the total")
+        clock.addDelta(0)
+        t.expectEqual(clock.displaySteps, 10, accuracy: 1e-9, "next packet snaps leftover ticks away")
+
+        // The old interpolator added expected steps on top of the packet
+        // delta every second, so 10s of walking stored ~20 steps.
+        t.check(clock.packetSteps < 15, "must not double-count interpolated ticks")
+    }
+}
+
 /// Physical-remote session merging tests.
 public func automaticHealthExportTests(_ t: TestRunner) {
     t.suite("automatic-health-export") { t in
@@ -308,6 +331,45 @@ public func automaticHealthExportTests(_ t: TestRunner) {
         t.check(
             tracker.finalizeIfDue(at: finalStop.addingTimeInterval(600)).completed.isEmpty,
             "an acknowledged history entry is not offered twice"
+        )
+
+        // Display interpolation ticks up, then the next packet snaps back a
+        // couple of steps. That is not a pad reset — Today must not gain
+        // the whole counter.
+        var snap = RemoteSessionTracker()
+        _ = snap.observe(status(running: false, elapsed: 0, distance: 0, steps: 0), at: base)
+        _ = snap.observe(
+            status(running: true, elapsed: 60, distance: 50, steps: 80),
+            at: base.addingTimeInterval(60),
+            newSessionID: { "snap-walk" }
+        )
+        _ = snap.observe(
+            status(running: true, elapsed: 61, distance: 51, steps: 83),
+            at: base.addingTimeInterval(61)
+        )
+        _ = snap.observe(
+            status(running: true, elapsed: 62, distance: 52, steps: 81),
+            at: base.addingTimeInterval(62)
+        )
+        t.expectEqual(snap.openWalkTotals?.steps, 81, "interpolation snap drops the extra ticks, does not add the counter")
+        t.check((snap.openWalkTotals?.steps ?? 0) < 150, "must not add the live counter on a 2-step dip")
+
+        // Already-inflated tracker (from the old interpolator) heals on the
+        // next live frame of the same walk.
+        var inflated = RemoteSessionTracker()
+        _ = inflated.observe(status(running: false, elapsed: 0, distance: 0, steps: 0), at: base)
+        _ = inflated.observe(
+            status(running: true, elapsed: 100, distance: 80, steps: 20_000),
+            at: base.addingTimeInterval(100),
+            newSessionID: { "inflated-walk" }
+        )
+        _ = inflated.observe(
+            status(running: true, elapsed: 101, distance: 81, steps: 2_278),
+            at: base.addingTimeInterval(101)
+        )
+        t.check(
+            (inflated.openWalkTotals?.steps ?? 0) < 400,
+            "runaway Today is rewritten from distance, not kept at 2278-on-81m"
         )
 
         // A pending stopped session survives relaunch and keeps the original
@@ -463,6 +525,88 @@ func sessionStoreTests(_ t: TestRunner) {
             3_000,
             "totals survive a reload"
         )
+
+        t.check(
+            store.append(walk("hot", at: noon.addingTimeInterval(7_200), minutes: 27, meters: 1_180, steps: 30_118)),
+            "inflated walk is stored"
+        )
+        t.expectEqual(
+            store.sessions.first { $0.id == "hot" }?.steps,
+            2_226,
+            "impossible stride is rewritten from distance at 0.53 m"
+        )
+    }
+}
+
+public func stepSanityTests(_ t: TestRunner) {
+    t.suite("step-sanity") { t in
+        t.expectEqual(StepSanity.steps(2_294, distanceM: 1_180), 2_294, "normal pad stride passes")
+        t.expectEqual(StepSanity.steps(30_118, distanceM: 1_180), 2_226, "30k steps on 1.18 km is rewritten")
+        t.expectEqual(StepSanity.steps(4_747, distanceM: 50), 94, "open-walk leftover total is rewritten")
+        t.expectEqual(StepSanity.steps(4_679, distanceM: 10), 19, "10 m leftover pad total is rewritten")
+        t.expectEqual(StepSanity.steps(4_679, distanceM: 0), 0, "no distance, drop leftover steps")
+
+        var session = StepSession()
+        t.expectEqual(
+            session.ingest(pad: 4_679, previousPad: 4_678, elapsedReset: true, distanceReset: true),
+            0,
+            "new pad session with leftover register starts at 0"
+        )
+        t.expectEqual(
+            session.ingest(pad: 4_680, previousPad: 4_679, elapsedReset: false, distanceReset: false),
+            1,
+            "next packet ticks one"
+        )
+        t.expectEqual(
+            session.ingest(pad: 4_681, previousPad: 4_680, elapsedReset: false, distanceReset: false),
+            2,
+            "ticks stay monotonic"
+        )
+        var dumped = StepSession()
+        t.expectEqual(
+            dumped.ingest(pad: 0, previousPad: 2_000, elapsedReset: true, distanceReset: true),
+            0,
+            "omitted-then-zero after reset"
+        )
+        t.expectEqual(
+            dumped.ingest(pad: 4_679, previousPad: 0, elapsedReset: false, distanceReset: false),
+            0,
+            "dumped leftover total is not a 4,679-step jump"
+        )
+        t.expectEqual(
+            dumped.ingest(pad: 4_680, previousPad: 4_679, elapsedReset: false, distanceReset: false),
+            1,
+            "after the dump, ticks are 1, 2, 3"
+        )
+        var leftover = StepSession()
+        t.expectEqual(
+            leftover.ingest(
+                pad: 6_043,
+                previousPad: 6_042,
+                elapsedReset: false,
+                distanceReset: false,
+                distanceM: 760
+            ),
+            1_434,
+            "6,043 steps on 760 m is leftover register, rewritten at 53 cm"
+        )
+    }
+}
+
+public func updateFeedTests(_ t: TestRunner) {
+    t.suite("update-feed") { t in
+        let json = """
+        {"version":"202609011200","shortVersion":"1.0","url":"http://127.0.0.1:8741/Z1WalkingPad-202609011200.zip","sha256":"abc","notes":"steps"}
+        """.data(using: .utf8)!
+        do {
+            let feed = try JSONDecoder().decode(UpdateFeed.self, from: json)
+            t.check(feed.isNewer(than: "202608311500"), "later timestamp is an update")
+            t.check(!feed.isNewer(than: "202609011200"), "same build is not an update")
+            t.check(!feed.isNewer(than: "202609011201"), "older feed is not an update")
+            t.expectEqual(feed.packageURL?.host, "127.0.0.1", "package host")
+        } catch {
+            t.check(false, "feed JSON decodes: \(error)")
+        }
     }
 }
 
@@ -474,9 +618,12 @@ public func runAllZ1CoreTests() -> Int32 {
     metricsTests(runner)
     unitsTests(runner)
     strideTests(runner)
+    stepSmootherTests(runner)
     automaticHealthExportTests(runner)
     historyAndCompatibilityTests(runner)
     sessionStoreTests(runner)
+    stepSanityTests(runner)
+    updateFeedTests(runner)
     openMeteoTests(runner)
     if runner.failures == 0 {
         print("PASS: \(runner.checks) checks, 0 failures")

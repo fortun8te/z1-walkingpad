@@ -6,3 +6,8 @@ dist/
 .DS_Store
 .pytest_cache/
 webapp/backend/__pycache__/
+macos/release/dist/*.zip
+macos/Z1WalkingPad.app
+macos/Resources/AppIcon.iconset/
+macos/Resources/AppIcon-1024.png
+macos/.build/

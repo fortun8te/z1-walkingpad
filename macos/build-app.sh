@@ -30,15 +30,20 @@ fi
 rm -f "$LOG"
 BIN_DIR="$(swift build -c release --arch arm64 --show-bin-path --disable-sandbox 2>/dev/null)"
 
-qecho "==> bundling $APP"
+VERSION="${Z1_BUNDLE_VERSION:-$(date +%Y%m%d%H%M)}"
+SHORT="${Z1_SHORT_VERSION:-1.0}"
+
+qecho "==> bundling $APP ($SHORT $VERSION)"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_DIR/Z1MenuBar" "$APP/Contents/MacOS/Z1WalkingPad"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/"
+cp Resources/apply-update.sh "$APP/Contents/Resources/"
+chmod 755 "$APP/Contents/Resources/apply-update.sh"
 # Remove quarantine so Gatekeeper doesn't nag after ad-hoc resign
 xattr -cr "$APP" 2>/dev/null || true
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -58,17 +63,22 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>${SHORT}</string>
     <key>CFBundleVersion</key>
-    <string>20260828</string>
+    <string>${VERSION}</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>LSUIElement</key>
-    <true/>
+    <false/>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
     <key>NSBluetoothAlwaysUsageDescription</key>
     <string>Z1 WalkingPad uses Bluetooth to connect to and control your KingSmith WalkingPad Z1 treadmill.</string>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
 </dict>
 </plist>
 PLIST

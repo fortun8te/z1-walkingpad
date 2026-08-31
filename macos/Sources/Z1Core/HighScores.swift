@@ -82,27 +82,23 @@ public enum AchievementKind: String, Codable, Sendable, CaseIterable {
         case .nightOwl: return "Night Owl"
         }
     }
-    public var emoji: String {
+    public var systemName: String {
         switch self {
-        case .firstWalk: return "👟"
-        case .walk10: return "🔟"
-        case .walk50: return "⭐️"
-        case .walk100: return "💯"
-        case .distance100km: return "🗺️"
-        case .distance500km: return "🌍"
-        case .steps5kDay: return "👣"
-        case .steps8kDay: return "🔥"
-        case .steps10kDay: return "⚡️"
-        case .steps15kDay: return "🚀"
-        case .kcal200Day: return "🍎"
-        case .kcal500Day: return "🔥"
-        case .hourWalk: return "⏱️"
-        case .twoHourWalk: return "🏔️"
-        case .streak3: return "📅"
-        case .streak7: return "📆"
-        case .streak30: return "🏆"
-        case .earlyBird: return "🌅"
-        case .nightOwl: return "🌙"
+        case .firstWalk: return "flag"
+        case .walk10: return "square.stack"
+        case .walk50: return "square.stack.3d.up"
+        case .walk100: return "square.stack.fill"
+        case .distance100km: return "ruler"
+        case .distance500km: return "map"
+        case .steps5kDay, .steps8kDay, .steps10kDay, .steps15kDay: return "shoeprints.fill"
+        case .kcal200Day, .kcal500Day: return "flame"
+        case .hourWalk: return "timer"
+        case .twoHourWalk: return "timer.circle"
+        case .streak3: return "repeat"
+        case .streak7: return "repeat.circle"
+        case .streak30: return "calendar"
+        case .earlyBird: return "sunrise"
+        case .nightOwl: return "moon"
         }
     }
     public var description: String {

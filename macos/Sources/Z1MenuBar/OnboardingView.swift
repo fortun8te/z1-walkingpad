@@ -10,8 +10,8 @@ struct OnboardingView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 10) {
-                Image(systemName: "figure.walk.motion")
-                    .font(.system(size: 28, weight: .light))
+                Text("Z1")
+                    .font(Z1Type.medium(22))
                     .foregroundStyle(Z1.ink)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Z1 WalkingPad")
@@ -31,7 +31,7 @@ struct OnboardingView: View {
             VStack(alignment: .leading, spacing: 9) {
                 bullet("Controls", "Start / Stop, drag the dial or type 3.1, tap −/+ to nudge (0.1·0.2·0.5). The pad only takes speed changes while the belt moves.")
                 bullet("Master", "The pad is the master. Remote, app, or pad timer — the numbers always show what the pad reports. Calories & steps survive reconnects (gap-credited).")
-                bullet("Steps", "Auto-learns your stride at ≥3 km/h from stable 12-sec windows (needs 3 windows + 100 m). Or set your own stride in Settings for exact distance→steps.")
+                bullet("Steps", "Same counter as KS Fit — the pad's own step register. Set a hand-counted stride in Settings only if you want steps derived from belt distance instead.")
                 bullet("Daily", "120 min or 8K steps goal, 1.6–6.4 km/h, imperial/metric synced to pad LEDs. Today's strip toggles Week/30 days; Records shows highscores & badges.")
                 bullet("Staying connected", "One BLE connection only — quit phone app before Connect. Auto-reconnects on wake, holds idle sleep while belt moves, Exit sleeps pad.")
             }
@@ -66,7 +66,10 @@ struct OnboardingView: View {
 
     private func bullet(_ title: String, _ body: String) -> some View {
         HStack(alignment: .top, spacing: 8) {
-            Text("·").font(Z1Type.medium(13)).foregroundStyle(Z1.faint)
+            Image(systemName: "minus")
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(Z1.faint)
+                .frame(width: 10, height: 14)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(Z1Type.medium(11)).foregroundStyle(Z1.ink)
                 Text(body).font(Z1Type.regular(10)).foregroundStyle(Z1.dim).fixedSize(horizontal: false, vertical: true)

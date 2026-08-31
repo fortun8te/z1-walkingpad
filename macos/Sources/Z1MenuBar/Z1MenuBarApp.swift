@@ -3,8 +3,10 @@ import SwiftUI
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Menu-bar-first: no Dock icon unless asked.
-        let wantsDock = UserDefaults.standard.bool(forKey: TreadmillViewModel.dockKey)
+        // Dock tile is on unless the user turned it off. LSUIElement stays
+        // false so Finder/Dock keep the icns; this policy only hides it at
+        // runtime if they uncheck Show in Dock.
+        let wantsDock = UserDefaults.standard.object(forKey: TreadmillViewModel.dockKey) as? Bool ?? true
         NSApp.setActivationPolicy(wantsDock ? .regular : .accessory)
         // Hide resign / signing noise: suppress repeated Gatekeeper/quarantine prompts
         // by clearing quarantine on our own bundle at launch (harmless if already clean).
@@ -34,16 +36,10 @@ struct Z1MenuBarApp: App {
             // this label. SwiftUI rasterizes it into NSStatusItem.setImage
             // on every frame and the process climbs to multiple GB of RAM
             // while the extra never paints.
-            Label {
-                if let readout = viewModel.menuBarText {
-                    Text(readout).monospacedDigit()
-                } else {
-                    Text("Z1")
-                }
-            } icon: {
-                Image(systemName: viewModel.status.beltRunning
-                      ? "figure.walk.motion"
-                      : "figure.walk")
+            if let readout = viewModel.menuBarText {
+                Text(readout).monospacedDigit()
+            } else {
+                Text("Z1")
             }
         }
         .menuBarExtraStyle(.window)

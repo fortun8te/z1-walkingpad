@@ -138,23 +138,46 @@ public struct RemoteSessionTracker: Codable, Sendable {
         let running = status.beltRunning && status.speedKmh > 0
         if var current = session {
             let includeDeltas = current.wasRunning || running
+            // A pad session reset drops elapsed (Stop + Start). A 1–3 step
+            // dip is the UI interpolator snapping back to the packet total —
+            // treating that as a reset added the whole counter onto Today.
+            let padReset = running && counters.elapsedS < current.lastCounters.elapsedS
             if includeDeltas {
                 current.activeDurationS += Self.counterDelta(
                     previous: current.lastCounters.elapsedS,
                     current: counters.elapsedS,
-                    allowReset: running
+                    allowReset: padReset
                 )
                 current.distanceM += Self.counterDelta(
                     previous: current.lastCounters.distanceM,
                     current: counters.distanceM,
-                    allowReset: running
+                    allowReset: padReset
                 )
                 current.steps += Self.counterDelta(
                     previous: current.lastCounters.steps,
                     current: counters.steps,
-                    allowReset: running
+                    allowReset: padReset
                 )
+                // Interpolator can sit 1–3 steps ahead of the packet. When
+                // the display snaps back, drop those ticks instead of
+                // treating the dip as a new pad session.
+                if !padReset,
+                   counters.steps < current.lastCounters.steps,
+                   current.lastCounters.steps - counters.steps <= 5
+                {
+                    current.steps = max(0, current.steps - (current.lastCounters.steps - counters.steps))
+                }
             }
+            // Heal a tracker that already swallowed interpolation snaps:
+            // live pad steps cannot be a fraction of the accumulated total
+            // while distance is still this same walk.
+            if counters.steps > 0,
+               current.steps > counters.steps * 2 + 20,
+               current.distanceM <= counters.distanceM + 20
+            {
+                current.steps = counters.steps
+            }
+            current.steps = StepSanity.steps(current.steps, distanceM: current.distanceM)
             current.lastCounters = counters
             if running {
                 current.wasRunning = true
@@ -171,7 +194,7 @@ public struct RemoteSessionTracker: Codable, Sendable {
                 startedAt: now.addingTimeInterval(-Double(seed.elapsedS)),
                 activeDurationS: seed.elapsedS,
                 distanceM: seed.distanceM,
-                steps: seed.steps,
+                steps: StepSanity.steps(seed.steps, distanceM: seed.distanceM),
                 lastCounters: counters,
                 wasRunning: true,
                 stoppedAt: nil

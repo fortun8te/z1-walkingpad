@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import SwiftUI
 import Z1Core
@@ -30,6 +31,10 @@ final class TreadmillViewModel: ObservableObject {
     @Published private(set) var achievements: [Achievement] = []
     /// Why start-at-login did not take, if it did not.
     @Published private(set) var loginItemMessage: String?
+
+    let updater = AppUpdater()
+    var updatePhase: UpdatePhase { updater.phase }
+    private var updaterBag = Set<AnyCancellable>()
 
     // MARK: - persisted settings (UserDefaults — the same store @AppStorage uses)
 
@@ -134,6 +139,11 @@ final class TreadmillViewModel: ObservableObject {
         }
     }
 
+    /// When on, a newer feed build downloads and relaunches without a click.
+    @Published var autoUpdate: Bool {
+        didSet { UserDefaults.standard.set(autoUpdate, forKey: Self.autoUpdateKey) }
+    }
+
     let treadmill = Z1Treadmill()
     private var pumpTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
@@ -170,6 +180,7 @@ final class TreadmillViewModel: ObservableObject {
     static let notificationsKey = "notificationsEnabled"
     static let strideKey = "strideOverrideM"
     static let dockKey = "showInDock"
+    static let autoUpdateKey = "z1.autoUpdate"
     static let loginStatusKey = "loginItemStatus"
     static let connectionLogKey = "z1.connectionLog"
     static let healthTrackerKey = "z1.automaticHealthSession"
@@ -195,8 +206,12 @@ final class TreadmillViewModel: ObservableObject {
         dailyGoalSteps = defaults.object(forKey: Self.goalStepsKey) as? Int ?? 8_000
         notificationsEnabled = defaults.object(forKey: Self.notificationsKey) as? Bool ?? true
         launchAtLogin = LoginItem.isEnabled
-        showInDock = defaults.bool(forKey: Self.dockKey)
+        showInDock = defaults.object(forKey: Self.dockKey) as? Bool ?? true
+        autoUpdate = defaults.object(forKey: Self.autoUpdateKey) as? Bool ?? true
         healthTracker = Self.restoreHealthTracker(from: defaults)
+        updater.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &updaterBag)
 
         Task { await treadmill.setWeight(weightKg) }
         Task { await treadmill.setPersistStats(persistStats) }
@@ -232,6 +247,10 @@ final class TreadmillViewModel: ObservableObject {
         installPowerObservers()
         startHousekeeping()
         if notificationsEnabled { notifier.requestAuthorizationIfNeeded() }
+        Task { await checkForUpdateAndMaybeInstall() }
+        Timer.scheduledTimer(withTimeInterval: 30 * 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in await self?.checkForUpdateAndMaybeInstall() }
+        }
     }
 
     // No deinit: this view model is the app's single long-lived @StateObject
@@ -427,6 +446,35 @@ final class TreadmillViewModel: ObservableObject {
             }
             NSApp.terminate(nil)
         }
+    }
+
+    /// Quit without waiting on BLE so the helper can swap the bundle and
+    /// reopen. The belt is left running, same as Quit.
+    func quitForUpdate() {
+        automaticConnectionEnabled = false
+        reconnectTask?.cancel()
+        sleepBlocker.setActive(false)
+        treadmill.cancelConnectionNow()
+        NSApp.terminate(nil)
+    }
+
+    func checkForUpdate() {
+        Task { await checkForUpdateAndMaybeInstall(force: true) }
+    }
+
+    func installUpdate() {
+        Task { await applyAvailableUpdate() }
+    }
+
+    func checkForUpdateAndMaybeInstall(force: Bool = false) async {
+        await updater.check(force: force)
+        if autoUpdate { await applyAvailableUpdate() }
+    }
+
+    private func applyAvailableUpdate() async {
+        guard case .available = updater.phase else { return }
+        let ready = await updater.installAndPrepareRelaunch()
+        if ready { quitForUpdate() }
     }
 
     /// Stop the belt, put the pad in standby, then quit — never hanging more
@@ -636,9 +684,14 @@ final class TreadmillViewModel: ObservableObject {
         refreshHistory()
     }
 
+    func refreshHistoryFromDisk() {
+        sessionStore.reload()
+        refreshHistory()
+    }
+
     private func refreshHistory() {
         todayTotals = sessionStore.totals()
-        recentWalks = sessionStore.mostRecent(5)
+        recentWalks = sessionStore.mostRecent(12)
         weekDays = sessionStore.recentDays(7)
         monthDays = sessionStore.recentDays(30)
         highScores = sessionStore.highScores
@@ -656,13 +709,17 @@ final class TreadmillViewModel: ObservableObject {
     /// the almanac's "Today" agrees with reality mid-walk.
     func totals(for day: Date) -> DayTotals {
         var totals = sessionStore.totals(on: day)
-        if Calendar.current.isDateInToday(day), let open = openWalk {
+        if Calendar.current.isDateInToday(day), let open = openWalk,
+           !sessionStore.contains(id: open.id)
+        {
+            let openSteps = StepSanity.steps(open.steps, distanceM: open.distanceM)
             totals.activeDurationS += open.activeDurationS
             totals.distanceM += open.distanceM
-            totals.steps += open.steps
+            totals.steps += openSteps
             totals.caloriesKcal += Z1Metrics.kcalPerMinute(open.avgSpeedKmh, weightKg: weightKg)
                 * Double(open.activeDurationS) / 60
         }
+        totals.steps = StepSanity.steps(totals.steps, distanceM: totals.distanceM)
         return totals
     }
 
@@ -672,12 +729,9 @@ final class TreadmillViewModel: ObservableObject {
 
     /// What the live numbers imply per step, for comparison with a hand count.
     var strideLabel: String {
-        guard let stride = status.impliedStrideM else { return "not enough distance yet" }
-        // Kept short on purpose: this sits on one line in a 282pt popover, and
-        // the long form truncated to "(from the…", which reads as a bug.
-        let perStep = String(format: "%.2f m", stride)
-        let perKm = Int((1_000 / stride).rounded())
-        return "\(perStep) · \(perKm)/km\(strideOverrideM > 0 ? " · yours" : "")"
+        guard let stride = status.impliedStrideM else { return "—" }
+        let cm = Int((stride * 100).rounded())
+        return "\(cm) cm\(strideOverrideM > 0 ? " · set" : "")"
     }
 
     /// Today's steps, including the walk still in progress.
@@ -687,7 +741,7 @@ final class TreadmillViewModel: ObservableObject {
     /// must agree with each other, or the row reads "54 min · 0 m · 0 steps"
     /// while you are visibly walking.
     var todaySteps: Int {
-        todayTotals.steps + (openWalk?.steps ?? 0)
+        totals(for: Date()).steps
     }
 
     var todayDistanceM: Int {
@@ -761,10 +815,6 @@ final class TreadmillViewModel: ObservableObject {
         case .todaySteps:
             return todaySteps.formatted(.number)
         }
-    }
-
-    var menuBarSymbol: String {
-        status.beltRunning ? "figure.walk.motion" : "figure.walk"
     }
 
     // MARK: - power management

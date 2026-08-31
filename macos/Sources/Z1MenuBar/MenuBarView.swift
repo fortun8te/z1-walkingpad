@@ -24,7 +24,6 @@ struct MenuBarView: View {
     @State private var weather: WeatherSnapshot? = nil
     @State private var kp: Double = 0
     @State private var showHighScores = false
-    @State private var recordsExpanded = false
     @AppStorage("z1.hasSeenIntro") private var hasSeenIntro = false
 
     var body: some View {
@@ -47,15 +46,10 @@ struct MenuBarView: View {
                 hero
                 dialRow
                 actionButton
-                // Slot is always reserved so Start/Stop cannot shove the
-                // almanac. Opacity hides the live zeros while the belt is
-                // still; they are the pad's counters, not today's.
-                statsRow
-                    .opacity(viewModel.status.beltRunning ? 1 : 0)
-                    .accessibilityHidden(!viewModel.status.beltRunning)
-                    .animation(nil, value: viewModel.status.beltRunning)
+                if viewModel.status.beltRunning {
+                    statsRow
+                }
                 footer
-                highScoreCard
                 if let error = viewModel.commandError ?? viewModel.status.errorMessage {
                     Text(error)
                         .font(Z1Type.regular(11))
@@ -64,31 +58,33 @@ struct MenuBarView: View {
                 }
             }
             .layoutPriority(1)
+            updateRow
             rule
-            HStack(spacing: 16) {
+            HStack(spacing: 10) {
                 sectionToggle("History", $showHistory)
                 sectionToggle("Records", $showHighScores)
                 sectionToggle("Settings", $showSettings)
-                Spacer()
+                Spacer(minLength: 6)
                 Button("Quit") { viewModel.quit() }
                     .buttonStyle(HairlineButtonStyle())
+                    .font(Z1Type.regular(11))
+                    .fixedSize()
                     .keyboardShortcut("q")
                     .help("Quit and leave the belt exactly as it is")
             }
             if showHistory {
-                cappedPanel(ideal: 140, maxHeight: 160) { historyBody }
+                dropdownPanel { historyBody }
             }
             if showHighScores {
-                cappedPanel(ideal: 200, maxHeight: 240) { highScoreBody }
+                dropdownPanel { highScoreBody }
             }
             if showSettings {
-                cappedPanel(ideal: 220, maxHeight: 220) { settingsBody }
+                dropdownPanel { settingsBody }
             }
         }
         .padding(14)
-        .frame(width: 282)
+        .frame(width: 300)
         .frame(maxHeight: popoverMaxHeight, alignment: .top)
-        .clipped()
         .background {
             SkyField(intensity: viewModel.goalProgress ?? 0, weather: weather, kp: kp)
                 .ignoresSafeArea()
@@ -97,7 +93,10 @@ struct MenuBarView: View {
         // snap, the stats slot, and AuraCard's own animation would fight.
         .animation(nil, value: viewModel.status.beltRunning)
         .animation(.smooth(duration: 0.35), value: viewModel.isConnected)
-        .onAppear { syncSpeedDraft() }
+        .onAppear {
+            syncSpeedDraft()
+            viewModel.checkForUpdate()
+        }
         .onChange(of: viewModel.displaySpeed) { _, _ in syncSpeedDraft() }
         .onChange(of: viewModel.unitsImperial) { _, _ in syncSpeedDraft() }
     }
@@ -108,22 +107,23 @@ struct MenuBarView: View {
         (NSScreen.main?.visibleFrame.height ?? 800) - 48
     }
 
-    /// Expanding History/Settings grows by a defined slot and scrolls the
-    /// rest — the popover does not reflow around an unbounded panel.
-    private func cappedPanel<Content: View>(
-        ideal: CGFloat,
-        maxHeight: CGFloat,
+    /// Grow with the section until it would shove the popover off-screen,
+    /// then scroll. Never clip a control in the middle of a row.
+    private var dropdownMaxHeight: CGFloat {
+        max(280, popoverMaxHeight - 320)
+    }
+
+    private func dropdownPanel<Content: View>(
         @ViewBuilder content: () -> Content
     ) -> some View {
         ScrollView(.vertical) {
             content()
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.bottom, 6)
         }
         .scrollIndicators(.automatic)
         .scrollBounceBehavior(.basedOnSize)
-        .frame(minHeight: min(80, ideal), idealHeight: ideal, maxHeight: maxHeight)
-        .layoutPriority(-1)
-        .clipped()
+        .frame(minHeight: 120, maxHeight: dropdownMaxHeight, alignment: .top)
         .transition(.opacity)
     }
 
@@ -166,6 +166,49 @@ struct MenuBarView: View {
 
     private var rule: some View {
         Rectangle().fill(Z1.hairline).frame(height: 0.7)
+    }
+
+    @ViewBuilder
+    private var updateRow: some View {
+        switch viewModel.updater.phase {
+        case .available(let feed):
+            Button(action: viewModel.installUpdate) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Update available")
+                            .font(Z1Type.medium(11))
+                            .foregroundStyle(Z1.ink)
+                        Text(feed.notes?.isEmpty == false ? feed.notes! : "Build \(feed.version)")
+                            .font(Z1Type.regular(10))
+                            .foregroundStyle(Z1.faint)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Text("Install")
+                        .font(Z1Type.medium(11))
+                }
+            }
+            .buttonStyle(HairlineButtonStyle())
+            .disabled(viewModel.updater.isBusy)
+        case .downloading:
+            Text("Downloading update…")
+                .font(Z1Type.regular(11))
+                .foregroundStyle(Z1.dim)
+        case .installing:
+            Text("Restarting…")
+                .font(Z1Type.regular(11))
+                .foregroundStyle(Z1.dim)
+        case .failed(let message):
+            Button(action: viewModel.checkForUpdate) {
+                Text(message)
+                    .font(Z1Type.regular(10))
+                    .foregroundStyle(Z1.dim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .buttonStyle(.plain)
+        case .idle, .checking:
+            EmptyView()
+        }
     }
 
     // MARK: - speed plumbing
@@ -235,18 +278,20 @@ struct MenuBarView: View {
             .layoutPriority(1)
             Spacer(minLength: 4)
             Button(action: { viewModel.connectTapped() }) {
-                HStack(spacing: 5) {
+                Group {
                     if viewModel.isConnecting {
-                        ProgressView().scaleEffect(0.55).tint(Z1.ink)
+                        ProgressView()
+                            .controlSize(.mini)
+                            .tint(Z1.ink)
+                            .frame(width: 28, height: 22)
                     } else {
-                        Image(systemName: viewModel.isConnected ? "xmark" : "bolt.fill")
-                            .font(.system(size: 8, weight: .bold))
+                        Text(viewModel.isConnected ? "Disconnect" : "Connect")
+                            .font(Z1Type.medium(11))
                     }
-                    Text(viewModel.isConnected ? "Disconnect" : (viewModel.isConnecting ? "Linking…" : "Connect"))
-                        .font(Z1Type.medium(11))
                 }
             }
             .buttonStyle(HairlineButtonStyle())
+            .fixedSize()
             .disabled(viewModel.busy && !viewModel.isConnecting)
             .animation(.smooth(duration: 0.2), value: viewModel.isConnecting)
             .animation(.smooth(duration: 0.2), value: viewModel.isConnected)
@@ -275,7 +320,7 @@ struct MenuBarView: View {
     /// Blue while the belt moves, dark when not.
     private var hero: some View {
         AuraCard(colour: skyAccent, active: viewModel.status.beltRunning, radius: 16) {
-            HStack(alignment: .center, spacing: 10) {
+            HStack(alignment: .center, spacing: 8) {
                 if isTypingSpeed {
                     TextField("", value: $speedDraft, format: .number.precision(.fractionLength(0...1)))
                         .textFieldStyle(.plain)
@@ -292,8 +337,8 @@ struct MenuBarView: View {
                 } else {
                     DotMatrixText(
                         text: speedText,
-                        dot: 4,
-                        gap: 2,
+                        dot: 3.5,
+                        gap: 1.7,
                         color: Z1.ink,
                         lit: viewModel.isConnected
                     )
@@ -305,8 +350,9 @@ struct MenuBarView: View {
                     .help("Click to type an exact speed")
                 }
                 Text(viewModel.speedUnitLabel)
-                    .font(Z1Type.exposure(14, solarElevation: SolarClock().position().elevation))
-                    .foregroundStyle(Z1.faint)
+                    .font(Z1Type.regular(11))
+                    .foregroundStyle(Z1.dim)
+                    .padding(.top, 10)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .frame(height: 62)
@@ -372,6 +418,8 @@ struct MenuBarView: View {
         }
         .buttonStyle(.plain)
         .foregroundStyle(Z1.ink)
+        .keyboardShortcut(.space, modifiers: [])
+        .help("Start or stop the belt. Space does the same while this window is open.")
         .z1LiquidGlass(radius: Z1.radius)
         .z1Card(radius: Z1.radius, lit: true)
         .opacity(viewModel.isConnected ? 1 : 0.3)
@@ -395,7 +443,7 @@ struct MenuBarView: View {
             divider
             walkStat(viewModel.formatDistance(st.distanceM), "Distance")
             divider
-            walkStat(st.steps.formatted(.number), "Steps", measured: false)
+            walkStat(st.steps.formatted(.number), "Steps", measured: viewModel.strideOverrideM == 0)
             divider
             walkStat("\(Int(st.caloriesKcal.rounded()))", "kcal", measured: false)
         }
@@ -464,7 +512,7 @@ struct MenuBarView: View {
                 divider
                 walkStat(viewModel.formatDuration(totals.activeDurationS), "Time")
                 divider
-                walkStat("\(totals.steps)", "Steps", measured: false)
+                walkStat(totals.steps.formatted(.number), "Steps", measured: viewModel.strideOverrideM == 0)
                 divider
                 walkStat("\(Int(totals.caloriesKcal.rounded()))", "kcal", measured: false)
             }
@@ -561,16 +609,14 @@ struct MenuBarView: View {
     }
 
     private func almanacFooter(_ totals: DayTotals) -> String {
-        if let place = Equivalence.daily(forMeters: totals.distanceM) { return place }
-        // Month overview keeps its journey line even on an unwalked morning —
-        // the lifetime odometer is that view's identity.
-        if almanacLens == .month, selectedDay == nil {
+        if almanacLens == .month, selectedDay == nil, totals.distanceM == 0 {
             return Equivalence.journeyLine(totalMeters: viewModel.lifetimeDistanceM)
         }
-        if Calendar.current.isDateInToday(totals.day) {
-            return Equivalence.flavor(distanceM: totals.distanceM)
-        }
-        return Equivalence.narrative(for: almanacLens == .week ? viewModel.weekDays : viewModel.monthDays)
+        return Equivalence.caption(
+            distanceM: totals.distanceM,
+            kcal: totals.caloriesKcal,
+            minutes: totals.activeDurationS / 60
+        )
     }
 
     /// What the numbers imply per step. Shown because it is the one figure you
@@ -590,148 +636,128 @@ struct MenuBarView: View {
         }
     }
 
-    // MARK: - highscores
-    private var highScoreCard: some View {
-        let hs = viewModel.highScores
-        guard hs.totalWalks > 0 else { return AnyView(EmptyView()) }
-        return AnyView(
-            VStack(alignment: .leading, spacing: 8) {
-                Button {
-                    withAnimation(.smooth(duration: 0.24)) { recordsExpanded.toggle() }
-                } label: {
-                    HStack(spacing: 8) {
-                        Text("Records").font(Z1Type.medium(13)).foregroundStyle(Z1.ink)
-                        Image(systemName: recordsExpanded ? "chevron.up" : "chevron.down")
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(Z1.faint)
-                        Spacer()
-                        Text(achievementsSummary).font(Z1Type.regular(11)).foregroundStyle(Z1.faint)
-                    }
-                    .contentShape(.rect)
-                }
-                .buttonStyle(.plain)
-                HStack(spacing: 0) {
-                    recordStat(systemName: "timer", value: formatLongest(hs.longestWalk), label: "Longest")
-                    divider
-                    recordStat(systemName: "shoeprints.fill", value: hs.mostStepsDay.map { "\($0.steps.formatted())" } ?? "—", label: "Best Day")
-                    divider
-                    recordStat(systemName: "flame.fill", value: hs.mostKcalDay.map { "\(Int($0.caloriesKcal.rounded()))" } ?? "—", label: "Best Kcal")
-                }
-                if recordsExpanded {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Rectangle().fill(Z1.hairline).frame(height: 0.7).padding(.top, 4)
-                        ForEach(highScoreRows, id: \.label) { row in
-                            HStack(spacing: 8) {
-                                Image(systemName: row.systemName)
-                                    .font(.system(size: 12, weight: .medium))
-                                    .foregroundStyle(Z1.dim)
-                                    .frame(width: 18)
-                                Text(row.label).font(Z1Type.regular(12)).foregroundStyle(Z1.dim)
-                                Spacer()
-                                Text(row.value).font(Z1Type.medium(12)).foregroundStyle(Z1.ink)
-                            }
-                        }
-                        if hs.bestStreakDays > 1 {
-                            HStack(spacing: 8) {
-                                Image(systemName: "flame.fill").font(.system(size: 12, weight: .medium)).foregroundStyle(Z1.live).frame(width: 18)
-                                Text("Best streak").font(Z1Type.regular(12)).foregroundStyle(Z1.dim)
-                                Spacer()
-                                Text("\(hs.bestStreakDays) days").font(Z1Type.medium(12)).foregroundStyle(Z1.ink)
-                            }
-                        }
-                    }
-                    .transition(.opacity.combined(with: .move(edge: .top)))
-                }
-            }
-            .padding(11)
-            .z1Card(radius: 10)
-            .opacity(0.96)
-        )
-    }
-
-    private var achievementsSummary: String {
-        let unlocked = viewModel.achievements.filter { $0.unlocked }.count
-        let total = viewModel.achievements.count
-        return "\(unlocked)/\(total) badges"
-    }
-
-    private func formatLongest(_ s: WalkSession?) -> String {
-        guard let s else { return "—" }
-        return viewModel.formatDuration(s.activeDurationS)
-    }
-
-    private func recordStat(systemName: String, value: String, label: String) -> some View {
-        VStack(spacing: 4) {
-            Image(systemName: systemName)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(Z1.ink)
-                .frame(height: 16)
-            Text(value).font(Z1Type.medium(12)).foregroundStyle(Z1.ink).lineLimit(1).minimumScaleFactor(0.7)
-            Text(label).font(Z1Type.regular(10)).foregroundStyle(Z1.faint).lineLimit(1)
-        }.frame(maxWidth: .infinity)
-    }
-    // Legacy emoji bridge (kept for Achievements grid)
-    private func recordStat(icon: String, value: String, label: String) -> some View {
-        VStack(spacing: 4) {
-            Text(icon).font(.system(size: 14))
-            Text(value).font(Z1Type.medium(12)).foregroundStyle(Z1.ink).lineLimit(1).minimumScaleFactor(0.7)
-            Text(label).font(Z1Type.regular(10)).foregroundStyle(Z1.faint).lineLimit(1)
-        }.frame(maxWidth: .infinity)
-    }
+    // MARK: - records
 
     private var highScoreBody: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             let hs = viewModel.highScores
             if hs.totalWalks == 0 {
-                Text("No records yet — finish a 2-min walk to start").font(Z1Type.regular(11)).foregroundStyle(Z1.faint)
+                Text("No records yet — a walk of two minutes or more lands here.")
+                    .font(Z1Type.regular(11))
+                    .foregroundStyle(Z1.faint)
+                    .fixedSize(horizontal: false, vertical: true)
             } else {
-                // Single-walk records
-                Text("Single Walk").font(Z1Type.medium(11)).foregroundStyle(Z1.ink)
-                ForEach(highScoreRows, id: \.label) { row in
-                    HStack {
-                        Image(systemName: row.systemName).font(.system(size: 12, weight: .medium)).foregroundStyle(Z1.dim)
-                        Text(row.label).font(Z1Type.regular(11)).foregroundStyle(Z1.dim)
-                        Spacer()
-                        Text(row.value).font(Z1Type.medium(11)).foregroundStyle(Z1.ink)
+                HStack {
+                    Text("\(hs.totalWalks) walks")
+                        .font(Z1Type.medium(11))
+                        .foregroundStyle(Z1.ink)
+                    Spacer()
+                    Text(viewModel.formatDistance(hs.totalDistanceM))
+                        .font(Z1Type.regular(11))
+                        .foregroundStyle(Z1.faint)
+                }
+                recordSection("Walk") {
+                    ForEach(highScoreRows, id: \.label) { row in
+                        recordLine(row.label, row.value, systemName: row.systemName)
                     }
                 }
-                Rectangle().fill(Z1.hairline).frame(height: 0.7).padding(.vertical, 4)
-                Text("Best Day").font(Z1Type.medium(11)).foregroundStyle(Z1.ink)
-                if let d = hs.mostStepsDay { dayRow("Most steps", "\(d.steps.formatted()) steps", d.day) }
-                if let d = hs.mostKcalDay { dayRow("Most kcal", "\(Int(d.caloriesKcal.rounded())) kcal", d.day) }
-                if let d = hs.mostDistanceDay { dayRow("Most distance", viewModel.formatDistance(d.distanceM), d.day) }
-                if let d = hs.longestDayTime { dayRow("Longest day", viewModel.formatDuration(d.activeDurationS), d.day) }
-                if hs.bestStreakDays > 1 {
-                    HStack {
-                        Text("🔥").font(.system(size: 11))
-                        Text("Best streak").font(Z1Type.regular(11)).foregroundStyle(Z1.dim)
-                        Spacer()
-                        Text("\(hs.bestStreakDays) days").font(Z1Type.medium(11)).foregroundStyle(Z1.ink)
+                recordSection("Day") {
+                    if let d = hs.mostStepsDay {
+                        recordLine("Steps", "\(d.steps.formatted())", date: d.day, systemName: "shoeprints.fill")
+                    }
+                    if let d = hs.mostDistanceDay {
+                        recordLine("Distance", viewModel.formatDistance(d.distanceM), date: d.day, systemName: "ruler")
+                    }
+                    if let d = hs.mostKcalDay {
+                        recordLine("kcal", "\(Int(d.caloriesKcal.rounded()))", date: d.day, systemName: "flame")
+                    }
+                    if let d = hs.longestDayTime {
+                        recordLine("Time", viewModel.formatDuration(d.activeDurationS), date: d.day, systemName: "timer")
+                    }
+                    if hs.bestStreakDays > 1 {
+                        recordLine("Streak", "\(hs.bestStreakDays) days", systemName: "repeat")
                     }
                 }
-                Rectangle().fill(Z1.hairline).frame(height: 0.7).padding(.vertical, 4)
-                Text("Achievements \(viewModel.achievements.filter{$0.unlocked}.count)/\(viewModel.achievements.count)").font(Z1Type.medium(11)).foregroundStyle(Z1.ink)
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 6)], spacing: 6) {
-                    ForEach(viewModel.achievements) { ach in
-                        VStack(spacing: 3) {
-                            Text(ach.kind.emoji).font(.system(size: 18)).opacity(ach.unlocked ? 1 : 0.25)
-                            Text(ach.kind.title).font(Z1Type.medium(9)).foregroundStyle(ach.unlocked ? Z1.ink : Z1.faint).lineLimit(1).minimumScaleFactor(0.7)
-                            GeometryReader { geo in
-                                ZStack(alignment: .leading) {
-                                    Capsule().fill(Z1.unlit)
-                                    Capsule().fill(ach.unlocked ? Z1.ink : Z1.faint.opacity(0.5)).frame(width: max(2, geo.size.width * CGFloat(ach.progress)))
+                recordSection(
+                    "Badges  \(viewModel.achievements.filter(\.unlocked).count)/\(viewModel.achievements.count)"
+                ) {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 88), spacing: 6)], spacing: 6) {
+                        ForEach(viewModel.achievements) { ach in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Image(systemName: ach.kind.systemName)
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(ach.unlocked ? Z1.ink : Z1.faint)
+                                    .frame(height: 14)
+                                Text(ach.kind.title)
+                                    .font(Z1Type.medium(10))
+                                    .foregroundStyle(ach.unlocked ? Z1.ink : Z1.faint)
+                                    .lineLimit(1)
+                                GeometryReader { geo in
+                                    ZStack(alignment: .leading) {
+                                        Capsule().fill(Z1.unlit)
+                                        Capsule()
+                                            .fill(ach.unlocked ? Z1.ink : Z1.faint.opacity(0.5))
+                                            .frame(width: max(2, geo.size.width * CGFloat(ach.progress)))
+                                    }
                                 }
-                            }.frame(height: 2)
+                                .frame(height: 2)
+                            }
+                            .padding(7)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .strokeBorder(ach.unlocked ? Z1.hairlineLit : Z1.hairline, lineWidth: 0.7)
+                            )
+                            .help(ach.kind.description)
                         }
-                        .padding(6)
-                        .background(RoundedRectangle(cornerRadius: 7).fill(ach.unlocked ? Color.white.opacity(0.06) : Color.clear))
-                        .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(ach.unlocked ? Z1.hairlineLit : Z1.hairline, lineWidth: 0.7))
-                        .help(ach.kind.description)
                     }
                 }
             }
         }
-        .padding(.top, 7)
+        .padding(.top, 8)
+    }
+
+    private func recordSection<Content: View>(
+        _ title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(Z1Type.medium(11))
+                .foregroundStyle(Z1.ink)
+            content()
+        }
+    }
+
+    private func recordLine(
+        _ label: String,
+        _ value: String,
+        date: Date? = nil,
+        systemName: String? = nil
+    ) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            if let systemName {
+                Image(systemName: systemName)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(Z1.faint)
+                    .frame(width: 14)
+            }
+            Text(label)
+                .font(Z1Type.regular(11))
+                .foregroundStyle(Z1.dim)
+            Spacer(minLength: 8)
+            VStack(alignment: .trailing, spacing: 1) {
+                Text(value)
+                    .font(Z1Type.medium(11))
+                    .foregroundStyle(Z1.ink)
+                    .multilineTextAlignment(.trailing)
+                if let date {
+                    Text(date, format: .dateTime.month(.abbreviated).day())
+                        .font(Z1Type.regular(9))
+                        .foregroundStyle(Z1.faint)
+                }
+            }
+        }
     }
 
     private var highScoreRows: [(systemName: String, label: String, value: String)] {
@@ -742,17 +768,6 @@ struct MenuBarView: View {
         if let w = hs.mostStepsWalk { rows.append(("shoeprints.fill","Most steps", "\(w.steps.formatted())")) }
         if let w = hs.mostKcalWalk { rows.append(("flame.fill","Most kcal", "\(Int(w.caloriesKcal.rounded())) kcal")) }
         return rows
-    }
-
-    private func dayRow(_ label: String, _ value: String, _ day: Date) -> some View {
-        HStack {
-            Text(label).font(Z1Type.regular(10)).foregroundStyle(Z1.dim)
-            Spacer()
-            VStack(alignment: .trailing, spacing: 1) {
-                Text(value).font(Z1Type.medium(10)).foregroundStyle(Z1.ink)
-                Text(day, format: .dateTime.month(.abbreviated).day()).font(Z1Type.regular(9)).foregroundStyle(Z1.faint)
-            }
-        }
     }
 
     // MARK: - history
@@ -767,6 +782,7 @@ struct MenuBarView: View {
                     showHighScores = false
                     showSettings = false
                     open.wrappedValue = true
+                    viewModel.refreshHistoryFromDisk()
                 }
             }
         } label: {
@@ -777,44 +793,40 @@ struct MenuBarView: View {
                 Text(title)
                     .font(Z1Type.regular(13))
             }
-            .foregroundStyle(Z1.dim)
+            .foregroundStyle(open.wrappedValue ? Z1.ink : Z1.dim)
+            .fixedSize()
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
+        .layoutPriority(1)
     }
 
     private var historyBody: some View {
-        Group {
-            VStack(alignment: .leading, spacing: 6) {
-                if viewModel.recentWalks.isEmpty {
-                    Text("Nothing recorded yet")
-                        .font(Z1Type.regular(11))
-                        .foregroundStyle(Z1.faint)
-                } else {
-                    ForEach(viewModel.recentWalks) { walk in
-                        HStack(spacing: 8) {
-                            Text(walk.startedAt, format: .dateTime.weekday(.abbreviated).hour().minute())
+        VStack(alignment: .leading, spacing: 8) {
+            if viewModel.recentWalks.isEmpty {
+                Text("Nothing recorded yet")
+                    .font(Z1Type.regular(11))
+                    .foregroundStyle(Z1.faint)
+            } else {
+                ForEach(viewModel.recentWalks) { walk in
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(walk.startedAt, format: .dateTime.weekday(.abbreviated).month(.abbreviated).day().hour().minute())
                                 .foregroundStyle(Z1.faint)
                             Spacer()
                             Text(viewModel.formatDuration(walk.activeDurationS))
-                                .foregroundStyle(Z1.dim)
-                                            Text(viewModel.formatDistance(walk.distanceM))
                                 .foregroundStyle(Z1.ink)
-                                            Circle()
-                                .fill(walk.exportedToHealth ? Z1.dim : Z1.unlit)
-                                .frame(width: 4, height: 4)
-                                .help(
-                                    walk.exportedToHealth
-                                        ? "Sent to Apple Health"
-                                        : "Too short for Apple Health"
-                                )
                         }
-                        .font(Z1Type.regular(11))
+                        Text(
+                            "\(viewModel.formatDistance(walk.distanceM))  ·  \(walk.steps.formatted()) steps  ·  \(Int(walk.caloriesKcal.rounded())) kcal"
+                        )
+                        .foregroundStyle(Z1.dim)
                     }
+                    .font(Z1Type.regular(11))
                 }
             }
-            .padding(.top, 7)
         }
+        .padding(.top, 8)
     }
 
     // MARK: - settings
@@ -918,6 +930,11 @@ struct MenuBarView: View {
 
     private var systemSettings: some View {
         VStack(alignment: .leading, spacing: 10) {
+            Text("Build \(viewModel.updater.currentShortVersion) (\(viewModel.updater.currentVersion))")
+                .font(Z1Type.regular(10))
+                .foregroundStyle(Z1.faint)
+                .fixedSize(horizontal: false, vertical: true)
+            check("Install updates automatically", $viewModel.autoUpdate)
             check("Show in Dock", $viewModel.showInDock)
             check("Start at login", $viewModel.launchAtLogin)
             if let message = viewModel.loginItemMessage {

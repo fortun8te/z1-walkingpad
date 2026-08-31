@@ -120,7 +120,6 @@ struct HairlineButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(Z1Type.regular(11))
             .foregroundStyle(Z1.ink)
             .padding(.horizontal, 10)
             .padding(.vertical, 4)

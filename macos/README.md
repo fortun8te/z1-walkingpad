@@ -11,7 +11,7 @@ never touch the `0xFFC0`/`0xFFF0`/`0xFF00` services.
 | Piece | What |
 |---|---|
 | `Sources/Z1Core` | Pure CoreBluetooth + Foundation library: vendor/FTMS frames, BLE transport, `Z1Treadmill` actor, calorie metrics. No AppKit/SwiftUI. |
-| `Sources/Z1MenuBar` | SwiftUI `MenuBarExtra` app (deployment target macOS 14, activation policy `.accessory` — no Dock icon). |
+| `Sources/Z1MenuBar` | SwiftUI `MenuBarExtra` app (deployment target macOS 14). Shows a Dock icon by default; Settings can hide it. |
 | `Sources/Z1Smoke` | `z1smoke` — hardware smoke test (connect, unlock, read telemetry; **never moves the belt**). |
 | `Sources/Z1CoreTestSuite` + `Sources/z1tests` | Framework-free unit tests + runner executable (see "Testing"). |
 | `Tests/Z1CoreTests` | `swift test` anchor (compiles/links the suite). |
@@ -33,14 +33,17 @@ bash build-app.sh               # release build, stable codesign, in-place insta
 bash build-app.sh --no-install  # leave the bundle in macos/ instead
 ```
 
+Updates: run `bash macos/release/serve.sh` and `bash macos/release/publish.sh`
+(see [`release/README.md`](release/README.md)). The popover shows **Update available**
+when the feed is newer; Install swaps the bundle and reopens.
+
 Then open the app:
 
 ```bash
 open -a Z1WalkingPad           # installed bundle; with --no-install: open macos/Z1WalkingPad.app
 ```
 
-A `figure.walk` icon appears in the menu bar, with a configurable readout
-beside it. Click it for the popover: connect/disconnect, big speed readout with
+A `Z1` (or a configurable readout) appears in the menu bar. Click it for the popover: connect/disconnect, big speed readout with
 − / + steppers, an exact-speed field and slider, Start/Stop, stats (elapsed,
 distance, steps, estimated kcal), an almanac card whose tile strip toggles
 between This week and 30 days on click, resetting the detail to Today each time

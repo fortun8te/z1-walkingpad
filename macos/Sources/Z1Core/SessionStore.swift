@@ -93,6 +93,10 @@ public final class SessionStore {
         load()
     }
 
+    public func reload() {
+        load()
+    }
+
     public func contains(id: String) -> Bool {
         sessions.contains { $0.id == id }
     }
@@ -100,6 +104,20 @@ public final class SessionStore {
     /// Append unless this walk is already recorded. Returns false on a duplicate.
     @discardableResult
     public func append(_ session: WalkSession) -> Bool {
+        var session = session
+        let repaired = StepSanity.steps(session.steps, distanceM: session.distanceM)
+        if repaired != session.steps {
+            session = WalkSession(
+                id: session.id,
+                startedAt: session.startedAt,
+                endedAt: session.endedAt,
+                activeDurationS: session.activeDurationS,
+                distanceM: session.distanceM,
+                steps: repaired,
+                caloriesKcal: session.caloriesKcal,
+                exportedToHealth: session.exportedToHealth
+            )
+        }
         guard !contains(id: session.id) else { return false }
         // insertion keep sorted — O(n) not O(n log n), faster for 2k
         if let idx = sessions.firstIndex(where: { $0.startedAt > session.startedAt }) {
@@ -204,28 +222,73 @@ public final class SessionStore {
     }
 
     private func load() {
-        guard let data = try? Data(contentsOf: url),
-              let decoded = try? Self.makeDecoder().decode([WalkSession].self, from: data)
-        else { return }
-        sessions = decoded.sorted { $0.startedAt < $1.startedAt }
+        var loaded = decodeWalks(from: url)
+        if loaded.isEmpty {
+            let bak = url.deletingLastPathComponent().appendingPathComponent("sessions.json.bak")
+            loaded = decodeWalks(from: bak)
+        }
+        if loaded.isEmpty {
+            loaded = decodeWalksFromAgentExport(
+                url.deletingLastPathComponent().appendingPathComponent("agent-data.json")
+            )
+        }
+        sessions = loaded.sorted { $0.startedAt < $1.startedAt }
+        if sanitizeImpossibleSteps() { save() }
+    }
+
+    private func decodeWalks(from file: URL) -> [WalkSession] {
+        guard let data = try? Data(contentsOf: file) else { return [] }
+        if let walks = try? Self.makeDecoder().decode([WalkSession].self, from: data) {
+            return walks
+        }
+        return decodeWalksFromAgentExport(file)
+    }
+
+    private func decodeWalksFromAgentExport(_ file: URL) -> [WalkSession] {
+        guard let data = try? Data(contentsOf: file) else { return [] }
+        struct Envelope: Codable { var sessions: [WalkSession] }
+        return (try? Self.makeDecoder().decode(Envelope.self, from: data))?.sessions ?? []
+    }
+
+    /// The interpolator used to store 10× step totals. Anything that implies
+    /// a stride shorter than 25 cm is not a walk — rewrite from distance.
+    @discardableResult
+    private func sanitizeImpossibleSteps() -> Bool {
+        var dirty = false
+        sessions = sessions.map { session in
+            guard session.steps > 0, session.distanceM >= 50 else { return session }
+            let repaired = StepSanity.steps(session.steps, distanceM: session.distanceM)
+            guard repaired != session.steps else { return session }
+            dirty = true
+            return WalkSession(
+                id: session.id,
+                startedAt: session.startedAt,
+                endedAt: session.endedAt,
+                activeDurationS: session.activeDurationS,
+                distanceM: session.distanceM,
+                steps: repaired,
+                caloriesKcal: session.caloriesKcal,
+                exportedToHealth: session.exportedToHealth
+            )
+        }
+        return dirty
     }
 
     /// Save atomically; called from background — safe to run while swift build holds lock.
     private func save() {
+        if sessions.isEmpty, FileManager.default.fileExists(atPath: url.path) {
+            NSLog("Z1: refused to overwrite walk history with an empty list")
+            return
+        }
         do {
             try FileManager.default.createDirectory(
                 at: url.deletingLastPathComponent(),
                 withIntermediateDirectories: true
             )
-            // retain data on update: keep .bak of previous file so a crash mid-write never loses history
+            let bak = url.deletingLastPathComponent().appendingPathComponent("sessions.json.bak")
             if FileManager.default.fileExists(atPath: url.path) {
-                let bak = url.deletingLastPathComponent().appendingPathComponent("sessions.json.bak")
+                try? FileManager.default.removeItem(at: bak)
                 try? FileManager.default.copyItem(at: url, to: bak)
-                // keep only one backup, remove stale if needed
-                if let attrs = try? FileManager.default.attributesOfItem(atPath: bak.path),
-                   let size = attrs[.size] as? Int, size == 0 {
-                    try? FileManager.default.removeItem(at: bak)
-                }
             }
             try Self.makeEncoder().encode(sessions).write(to: url, options: .atomic)
             writeAgentExportIfNeeded()
