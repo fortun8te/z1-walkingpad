@@ -1,7 +1,4 @@
-"""Read-only MCP. No BLE, no start/stop.
-
-    python -m z1_walkingpad_mcp.server
-"""
+"""Read-only. python -m z1_walkingpad_mcp.server"""
 
 from __future__ import annotations
 
@@ -13,61 +10,99 @@ from pathlib import Path
 
 from mcp.server.mcpserver import MCPServer
 
-from .highscores import export_agent_data
+mcp = MCPServer("z1")
 
-mcp = MCPServer("z1-walkingpad")
-
-if sys.platform == "darwin":
-    ROOT = Path(
-        os.environ.get(
-            "Z1_SESSIONS_DIR",
-            Path.home() / "Library/Application Support/Z1 WalkingPad",
-        )
+ROOT = Path(
+    os.environ.get(
+        "Z1_SESSIONS_DIR",
+        Path.home() / "Library/Application Support/Z1 WalkingPad"
+        if sys.platform == "darwin"
+        else Path.home() / ".z1-walkingpad",
     )
-else:
-    ROOT = Path(os.environ.get("Z1_SESSIONS_DIR", Path.home() / ".z1-walkingpad"))
+)
+
+
+def _j(name: str) -> dict | list | None:
+    try:
+        return json.loads((ROOT / name).read_text())
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+
+
+def _sessions() -> list[dict]:
+    raw = _j("sessions.json")
+    return raw if isinstance(raw, list) else []
+
+
+def _row(s: dict) -> dict:
+    return {
+        "d": str(s.get("startedAt") or "")[:10],
+        "m": int(s.get("distanceM") or 0),
+        "s": int(s.get("activeDurationS") or 0),
+        "steps": int(s.get("steps") or 0),
+        "kcal": round(float(s.get("caloriesKcal") or 0), 1),
+    }
 
 
 def _live() -> dict | None:
-    path = ROOT / "live.json"
-    try:
-        data = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
+    data = _j("live.json")
+    if not isinstance(data, dict):
         return None
     t = data.get("t")
-    if isinstance(t, (int, float)) and (datetime.now(timezone.utc).timestamp() - t) > 90:
-        data["stale"] = True
-    return data
+    if isinstance(t, (int, float)) and datetime.now(timezone.utc).timestamp() - t > 90:
+        return None
+    return {
+        "kmh": data.get("kmh"),
+        "on": bool(data.get("on")),
+        "m": int(data.get("m") or 0),
+        "s": int(data.get("s") or 0),
+        "steps": int(data.get("steps") or 0),
+        "kcal": round(float(data.get("kcal") or 0), 1),
+    }
+
+
+def _sum(rows: list[dict]) -> dict:
+    return {
+        "m": sum(r["m"] for r in rows),
+        "s": sum(r["s"] for r in rows),
+        "steps": sum(r["steps"] for r in rows),
+        "kcal": round(sum(r["kcal"] for r in rows), 1),
+    }
+
+
+def _today() -> dict:
+    day = date.today().isoformat()
+    rows = [_row(s) for s in _sessions() if str(s.get("startedAt") or "").startswith(day)]
+    tot = _sum(rows)
+    tot["d"] = day
+    live = _live()
+    if live:
+        if live["m"] >= tot["m"]:
+            tot.update({k: live[k] for k in ("m", "s", "steps", "kcal")})
+        else:
+            tot["m"] += live["m"]
+            tot["s"] += live["s"]
+            tot["steps"] += live["steps"]
+            tot["kcal"] = round(tot["kcal"] + live["kcal"], 1)
+        if live.get("on"):
+            tot["kmh"] = live["kmh"]
+    return tot
 
 
 @mcp.tool()
-async def walks(op: str = "summary") -> dict:
-    """Read walks. op=summary|today|live|recent. No belt control."""
-    op = (op or "summary").strip().lower()
-    live = _live()
-    if op == "live":
-        return {"ok": True, "live": live}
-    data = export_agent_data(ROOT)
-    if op == "recent":
-        return {"ok": True, "recent": data.get("recent", [])}
-    if op == "today":
-        today = date.today().isoformat()
-        rows = [r for r in data.get("recent", []) if str(r.get("start") or "").startswith(today)]
-        out = {
-            "ok": True,
-            "n": len(rows),
-            "m": sum(int(r.get("m") or 0) for r in rows),
-            "s": sum(int(r.get("s") or 0) for r in rows),
-            "steps": sum(int(r.get("steps") or 0) for r in rows),
-            "kcal": round(sum(float(r.get("kcal") or 0) for r in rows), 1),
-        }
-        if live and not live.get("stale") and live.get("on"):
-            out["live"] = live
-        return out
-    out = {"ok": True, "n": data.get("n"), "totals": data.get("totals")}
-    if live and not live.get("stale"):
-        out["live"] = live
-    return out
+async def z1(q: str = "today") -> dict:
+    """Walk stats. q=today (default)|live|all|list. Read-only."""
+    q = (q or "today").strip().lower()
+    if q in ("", "today", "t"):
+        return _today()
+    if q in ("live", "l"):
+        return _live() or {}
+    rows = [_row(s) for s in _sessions()]
+    if q in ("list", "recent", "r"):
+        return {"list": rows[-5:]}
+    tot = _sum(rows)
+    tot["n"] = len(rows)
+    return tot
 
 
 def run() -> None:
