@@ -46,7 +46,10 @@ struct MenuBarView: View {
                 hero
                 dialRow
                 actionButton
-                if viewModel.status.beltRunning {
+                if viewModel.status.beltRunning
+                    || viewModel.status.distanceM > 0
+                    || viewModel.status.elapsedS > 0
+                {
                     statsRow
                 }
                 footer
@@ -324,7 +327,8 @@ struct MenuBarView: View {
                 if isTypingSpeed {
                     TextField("", value: $speedDraft, format: .number.precision(.fractionLength(0...1)))
                         .textFieldStyle(.plain)
-                        .font(Z1Type.light(30))
+                        .font(.system(size: 34, weight: .semibold))
+                        .monospacedDigit()
                         .multilineTextAlignment(.center)
                         .foregroundStyle(Z1.ink)
                         .frame(width: 88)
@@ -335,24 +339,21 @@ struct MenuBarView: View {
                         }
                         .onExitCommand { isTypingSpeed = false }
                 } else {
-                    DotMatrixText(
-                        text: speedText,
-                        dot: 3.5,
-                        gap: 1.7,
-                        color: Z1.ink,
-                        lit: viewModel.isConnected
-                    )
-                    .onTapGesture {
-                        guard viewModel.isConnected else { return }
-                        isTypingSpeed = true
-                        speedFieldFocused = true
-                    }
-                    .help("Click to type an exact speed")
+                    Text(speedText)
+                        .font(.system(size: 34, weight: .semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(viewModel.isConnected ? Z1.ink : Z1.faint)
+                        .onTapGesture {
+                            guard viewModel.isConnected else { return }
+                            isTypingSpeed = true
+                            speedFieldFocused = true
+                        }
+                        .help("Click to type an exact speed")
                 }
                 Text(viewModel.speedUnitLabel)
-                    .font(Z1Type.regular(11))
+                    .font(.system(size: 13, weight: .regular))
                     .foregroundStyle(Z1.dim)
-                    .padding(.top, 10)
+                    .padding(.top, 12)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .frame(height: 62)
@@ -506,7 +507,9 @@ struct MenuBarView: View {
             .buttonStyle(.plain)
 
             dayGoalLine(totals)
-            kcalSparkline(for: day)
+            if almanacLens == .week {
+                kcalSparkline(for: day)
+            }
             tileStrip
             HStack(spacing: 0) {
                 walkStat(viewModel.formatDistance(totals.distanceM), "Distance")
@@ -564,48 +567,48 @@ struct MenuBarView: View {
         .frame(height: 2.5)
     }
 
-    /// The range, every day a little sky, every sky clickable. Selecting a
-    /// day swaps the stats and footer below it in place — the card never
-    /// changes size, the interface never moves.
-    ///
-    /// Fill height is the day's progress, not an opacity wash: today is ink,
-    /// the rest are quieter, empty days stay unlit.
     private var tileStrip: some View {
-        let days = almanacLens == .week ? viewModel.weekDays : viewModel.monthDays
-        let labelled = almanacLens == .week
+        Group {
+            if almanacLens == .week {
+                weekBars
+            } else {
+                monthGrid
+            }
+        }
+    }
+
+    /// Last week in grey, this week in front, today in live blue.
+    private var weekBars: some View {
+        let days = viewModel.weekDays.map { viewModel.totals(for: $0.day) }
         let selected = selectedDay ?? Calendar.current.startOfDay(for: Date())
-        let barHeight: CGFloat = labelled ? 32 : 44
-        let corner: CGFloat = labelled ? 4 : 2
-        return HStack(spacing: labelled ? 3 : 1.5) {
+        let barHeight: CGFloat = 56
+        return HStack(alignment: .bottom, spacing: 6) {
             ForEach(days) { day in
-                let progress = min(1, max(0, viewModel.goalProgress(for: day)))
-                let isSelected = Calendar.current.isDate(day.day, inSameDayAs: selected)
+                let live = viewModel.goalProgress(for: day)
+                let usual = viewModel.usualProgress(for: day.day)
                 let isToday = Calendar.current.isDateInToday(day.day)
-                VStack(spacing: 3) {
+                let isSelected = Calendar.current.isDate(day.day, inSameDayAs: selected)
+                VStack(spacing: 5) {
                     ZStack(alignment: .bottom) {
-                        RoundedRectangle(cornerRadius: corner, style: .continuous)
+                        Capsule()
                             .fill(Z1.unlit)
-                        if !day.isEmpty {
-                            RoundedRectangle(cornerRadius: corner, style: .continuous)
-                                .fill(isToday ? Z1.ink.opacity(0.88) : Z1.ink.opacity(0.28))
-                                .frame(height: max(3, barHeight * CGFloat(progress)))
+                        if usual > 0.02 {
+                            Capsule()
+                                .fill(Color.white.opacity(0.16))
+                                .frame(height: max(6, barHeight * CGFloat(usual)))
+                        }
+                        if live > 0.02 {
+                            Capsule()
+                                .fill(isToday ? Z1.live : Color.white.opacity(0.38))
+                                .frame(height: max(6, barHeight * CGFloat(live)))
+                                .shadow(color: isToday ? Z1.live.opacity(0.55) : .clear, radius: 6)
                         }
                     }
+                    .frame(maxWidth: .infinity)
                     .frame(height: barHeight)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: corner, style: .continuous)
-                            .strokeBorder(
-                                isSelected
-                                    ? Z1.ink.opacity(0.7)
-                                    : (isToday ? Z1.ink.opacity(0.35) : Z1.hairline),
-                                lineWidth: isSelected ? 1 : 0.7
-                            )
-                    )
-                    if labelled {
-                        Text(day.day, format: .dateTime.weekday(.narrow))
-                            .font(Z1Type.regular(9))
-                            .foregroundStyle(isToday ? Z1.ink : Z1.faint)
-                    }
+                    Text(day.day, format: .dateTime.weekday(.narrow))
+                        .font(.system(size: 10, weight: isToday ? .semibold : .regular))
+                        .foregroundStyle(isToday ? Z1.live : (isSelected ? Z1.ink : Z1.faint))
                 }
                 .contentShape(.rect)
                 .onTapGesture {
@@ -614,7 +617,62 @@ struct MenuBarView: View {
                 .help(dayHelp(day))
             }
         }
-        .frame(height: 44)
+        .frame(height: 74)
+    }
+
+    /// 30 days as a 7-column consistency grid.
+    private var monthGrid: some View {
+        let days = viewModel.monthDays.map { viewModel.totals(for: $0.day) }
+        let walked = days.filter { !$0.isEmpty }.count
+        let pct = days.isEmpty ? 0 : Int((Double(walked) / Double(days.count) * 100).rounded())
+        let selected = selectedDay ?? Calendar.current.startOfDay(for: Date())
+        let calendar = Calendar.current
+        let firstWeekday = days.first.map { calendar.component(.weekday, from: $0.day) } ?? calendar.firstWeekday
+        let pad = (firstWeekday - calendar.firstWeekday + 7) % 7
+        let cells: [DayTotals?] = Array(repeating: nil, count: pad) + days.map { Optional($0) }
+        let columns = Array(repeating: GridItem(.flexible(), spacing: 4), count: 7)
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Text("\(pct)%")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(Z1.ink)
+                    .monospacedDigit()
+                Text("of days walked")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Z1.faint)
+            }
+            LazyVGrid(columns: columns, spacing: 4) {
+                ForEach(Array(cells.enumerated()), id: \.offset) { _, cell in
+                    if let day = cell {
+                        let p = viewModel.goalProgress(for: day)
+                        let isToday = calendar.isDateInToday(day.day)
+                        let isSelected = calendar.isDate(day.day, inSameDayAs: selected)
+                        RoundedRectangle(cornerRadius: 3, style: .continuous)
+                            .fill(monthFill(progress: p, today: isToday))
+                            .frame(height: 12)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                    .strokeBorder(isSelected ? Z1.ink.opacity(0.7) : .clear, lineWidth: 1)
+                            )
+                            .contentShape(.rect)
+                            .onTapGesture {
+                                selectedDay = calendar.isDateInToday(day.day) ? nil : day.day
+                            }
+                            .help(dayHelp(day))
+                    } else {
+                        Color.clear.frame(height: 12)
+                    }
+                }
+            }
+        }
+    }
+
+    private func monthFill(progress: Double, today: Bool) -> Color {
+        if today { return Z1.live }
+        if progress >= 1 { return Z1.live.opacity(0.85) }
+        if progress > 0.15 { return Z1.live.opacity(0.45) }
+        if progress > 0 { return Z1.live.opacity(0.22) }
+        return Color.white.opacity(0.06)
     }
 
     private func dayHelp(_ day: DayTotals) -> String {

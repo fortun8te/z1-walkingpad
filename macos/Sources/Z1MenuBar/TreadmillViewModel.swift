@@ -831,6 +831,12 @@ final class TreadmillViewModel: ObservableObject {
         return Int((todayTotals.caloriesKcal + live).rounded())
     }
 
+    /// Last week's same weekday, as a 0…1 bar behind this week's.
+    func usualProgress(for day: Date) -> Double {
+        guard let prior = Calendar.current.date(byAdding: .day, value: -7, to: day) else { return 0 }
+        return goalProgress(for: totals(for: prior))
+    }
+
     /// Goal progress for an arbitrary day's totals, honouring the goal kind.
     func goalProgress(for totals: DayTotals) -> Double {
         if goalIsSteps {

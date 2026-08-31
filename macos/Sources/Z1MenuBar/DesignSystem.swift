@@ -241,26 +241,26 @@ struct SkyField: View {
                      mid: Color(red: 0.09, green: 0.04, blue: 0.20),
                      horizon: Color(red: 0.62, green: 0.16, blue: 0.28),
                      glow: Color(red: 0.96, green: 0.38, blue: 0.32), stars: 0.48)),
-            (-1, Sky(zenith: Color(red: 0.02, green: 0.02, blue: 0.10),
-                     mid: Color(red: 0.20, green: 0.07, blue: 0.22),
-                     horizon: Color(red: 0.98, green: 0.36, blue: 0.14),
-                     glow: Color(red: 1.00, green: 0.68, blue: 0.36), stars: 0.14)),
-            (5, Sky(zenith: Color(red: 0.02, green: 0.04, blue: 0.13),
-                    mid: Color(red: 0.18, green: 0.18, blue: 0.42),
-                    horizon: Color(red: 1.00, green: 0.58, blue: 0.26),
-                    glow: Color(red: 1.00, green: 0.82, blue: 0.52), stars: 0.0)),
-            (14, Sky(zenith: Color(red: 0.01, green: 0.05, blue: 0.16),
-                     mid: Color(red: 0.12, green: 0.32, blue: 0.64),
-                     horizon: Color(red: 0.58, green: 0.70, blue: 0.92),
-                     glow: Color(red: 0.90, green: 0.88, blue: 0.78), stars: 0.0)),
-            (28, Sky(zenith: Color(red: 0.02, green: 0.07, blue: 0.20),
-                     mid: Color(red: 0.14, green: 0.40, blue: 0.80),
-                     horizon: Color(red: 0.42, green: 0.72, blue: 1.00),
-                     glow: Color(red: 0.82, green: 0.93, blue: 1.00), stars: 0.0)),
-            (55, Sky(zenith: Color(red: 0.03, green: 0.10, blue: 0.26),
-                     mid: Color(red: 0.16, green: 0.48, blue: 0.90),
-                     horizon: Color(red: 0.52, green: 0.80, blue: 1.00),
-                     glow: Color(red: 0.88, green: 0.96, blue: 1.00), stars: 0.0)),
+            (-1, Sky(zenith: Color(red: 0.28, green: 0.06, blue: 0.10),
+                     mid: Color(red: 0.42, green: 0.10, blue: 0.12),
+                     horizon: Color(red: 1.00, green: 0.38, blue: 0.12),
+                     glow: Color(red: 1.00, green: 0.55, blue: 0.22), stars: 0.14)),
+            (5, Sky(zenith: Color(red: 0.18, green: 0.10, blue: 0.28),
+                    mid: Color(red: 0.32, green: 0.16, blue: 0.38),
+                    horizon: Color(red: 1.00, green: 0.52, blue: 0.22),
+                    glow: Color(red: 1.00, green: 0.72, blue: 0.38), stars: 0.0)),
+            (14, Sky(zenith: Color(red: 0.10, green: 0.28, blue: 0.72),
+                     mid: Color(red: 0.16, green: 0.42, blue: 0.88),
+                     horizon: Color(red: 0.62, green: 0.78, blue: 1.00),
+                     glow: Color(red: 0.78, green: 0.90, blue: 1.00), stars: 0.0)),
+            (28, Sky(zenith: Color(red: 0.18, green: 0.46, blue: 0.98),
+                     mid: Color(red: 0.12, green: 0.38, blue: 0.92),
+                     horizon: Color(red: 0.38, green: 0.68, blue: 1.00),
+                     glow: Color(red: 0.72, green: 0.88, blue: 1.00), stars: 0.0)),
+            (55, Sky(zenith: Color(red: 0.22, green: 0.52, blue: 1.00),
+                     mid: Color(red: 0.10, green: 0.36, blue: 0.90),
+                     horizon: Color(red: 0.32, green: 0.62, blue: 0.98),
+                     glow: Color(red: 0.70, green: 0.86, blue: 1.00), stars: 0.0)),
         ]
         var lower = bands[0]
         var upper = bands[bands.count - 1]
@@ -476,16 +476,28 @@ struct SkyField: View {
 
             LinearGradient(
                 stops: [
-                    .init(color: .black, location: 0.00),
-                    .init(color: palette.zenith.opacity(0.92 * mute), location: fromBottom(300)),
-                    .init(color: palette.mid.opacity(0.78 * mute), location: fromBottom(180)),
-                    .init(color: palette.mid.opacity(0.96 * mute), location: fromBottom(95)),
+                    .init(color: palette.zenith.opacity(0.95 * mute), location: 0.00),
+                    .init(color: palette.zenith.opacity(0.70 * mute), location: 0.22),
+                    .init(color: palette.mid.opacity(0.55 * mute), location: fromBottom(220)),
+                    .init(color: palette.mid.opacity(0.92 * mute), location: fromBottom(95)),
                     .init(color: palette.horizon.opacity(0.94 * mute), location: fromBottom(30)),
                     .init(color: palette.glow.opacity(0.62 * mute), location: 1.00),
                 ],
                 startPoint: .top,
                 endPoint: .bottom
             )
+
+            RadialGradient(
+                stops: [
+                    .init(color: palette.glow.opacity(0.55 * mute), location: 0),
+                    .init(color: palette.zenith.opacity(0.28 * mute), location: 0.42),
+                    .init(color: .clear, location: 1),
+                ],
+                center: UnitPoint(x: 0.5, y: -0.05),
+                startRadius: 8,
+                endRadius: 220
+            )
+            .blendMode(.screen)
 
             if sunInfluences {
                 sunLight(
