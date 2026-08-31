@@ -686,33 +686,63 @@ struct MenuBarView: View {
         let pad = (firstWeekday - calendar.firstWeekday + 7) % 7
         let cells: [DayTotals?] = Array(repeating: nil, count: pad) + days.map { Optional($0) }
         let columns = Array(repeating: GridItem(.flexible(), spacing: 3), count: 7)
-        let selected = selectedDay
-        return LazyVGrid(columns: columns, spacing: 3) {
-            ForEach(Array(cells.enumerated()), id: \.offset) { _, cell in
-                if let day = cell {
-                    let p = min(1, max(0, viewModel.goalProgress(for: day)))
-                    let isToday = calendar.isDateInToday(day.day)
-                    let isSelected = selected.map { calendar.isDate(day.day, inSameDayAs: $0) } ?? false
-                    RoundedRectangle(cornerRadius: 3, style: .continuous)
-                        .fill(
-                            day.isEmpty
-                                ? Z1.unlit
-                                : (isToday ? Z1.ink.opacity(0.88) : Z1.ink.opacity(0.22 + 0.5 * p))
-                        )
-                        .frame(height: 14)
+        let focused = selectedDay
+            ?? (calendar.isDate(almanacAnchor, equalTo: Date(), toGranularity: .month)
+                ? calendar.startOfDay(for: Date()) : nil)
+        let weekdaySymbols = calendar.veryShortWeekdaySymbols
+        let orderedWeekdays: [String] = {
+            let start = calendar.firstWeekday - 1
+            return Array(weekdaySymbols[start...] + weekdaySymbols[..<start])
+        }()
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 3) {
+                ForEach(Array(orderedWeekdays.enumerated()), id: \.offset) { _, symbol in
+                    Text(symbol)
+                        .font(Z1Type.regular(8))
+                        .foregroundStyle(Z1.faint)
+                        .frame(maxWidth: .infinity)
+                }
+            }
+            LazyVGrid(columns: columns, spacing: 3) {
+                ForEach(Array(cells.enumerated()), id: \.offset) { _, cell in
+                    if let day = cell {
+                        let p = min(1, max(0, viewModel.goalProgress(for: day)))
+                        let isToday = calendar.isDateInToday(day.day)
+                        let isFocused = focused.map { calendar.isDate(day.day, inSameDayAs: $0) } ?? false
+                        let showNum = isFocused || isToday
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                .fill(
+                                    day.isEmpty
+                                        ? Z1.unlit
+                                        : (isToday ? Z1.ink.opacity(0.88) : Z1.ink.opacity(0.22 + 0.5 * p))
+                                )
+                            if showNum {
+                                Text("\(calendar.component(.day, from: day.day))")
+                                    .font(Z1Type.regular(8))
+                                    .foregroundStyle(isToday && !day.isEmpty ? Z1.canvas : Z1.ink.opacity(0.9))
+                            }
+                        }
+                        .frame(height: 18)
                         .overlay(
                             RoundedRectangle(cornerRadius: 3, style: .continuous)
                                 .strokeBorder(
-                                    isSelected ? Z1.ink.opacity(0.75) : (isToday ? Z1.ink.opacity(0.35) : .clear),
+                                    isFocused ? Z1.ink.opacity(0.8) : .clear,
                                     lineWidth: 0.8
                                 )
                         )
                         .contentShape(.rect)
                         .onTapGesture { pickDay(day.day) }
                         .help(dayHelp(day))
-                } else {
-                    Color.clear.frame(height: 14)
+                    } else {
+                        Color.clear.frame(height: 18)
+                    }
                 }
+            }
+            if let focused {
+                Text(focused.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated)))
+                    .font(Z1Type.regular(10))
+                    .foregroundStyle(Z1.faint)
             }
         }
     }

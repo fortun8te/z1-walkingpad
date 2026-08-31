@@ -246,14 +246,29 @@ def export_agent_data(sessions_dir: Path | None = None) -> dict[str, Any]:
     hs = compute_highscores(sessions_dir)
     ach = compute_achievements(sessions_dir, hs)
     sessions = _load_sessions(sessions_dir)
+    compact_hs = {k: v for k, v in hs.items() if k != "daily_aggregates"}
+    recent = []
+    for s in sessions[-8:]:
+        recent.append({
+            "id": s.get("session_id") or s.get("id"),
+            "start": str(s.get("started_at") or "")[:19],
+            "m": int(s.get("distance_m") or s.get("distanceM") or 0),
+            "s": int(s.get("active_duration_s") or s.get("duration_s") or 0),
+            "steps": int(s.get("steps") or 0),
+            "kcal": round(float(s.get("calories_kcal") or s.get("caloriesKcal") or 0), 1),
+        })
     return {
-        "schema_version": SCHEMA_VERSION,
-        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "sessions_count": len(sessions),
-        "sessions": sessions[-50:],
-        "highscores": hs,
-        "achievements": ach,
-        "daily_aggregates": hs.get("daily_aggregates", []),
+        "n": len(sessions),
+        "recent": recent,
+        "totals": {
+            "walks": compact_hs.get("total_walks"),
+            "m": compact_hs.get("total_distance_m"),
+            "steps": compact_hs.get("total_steps"),
+            "kcal": compact_hs.get("total_kcal"),
+            "s": compact_hs.get("total_duration_s"),
+            "streak": compact_hs.get("streak_days"),
+        },
+        "unlocked": [a["id"] for a in ach if a.get("unlocked")],
     }
 
 

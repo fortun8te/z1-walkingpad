@@ -135,14 +135,22 @@ async def sessions_list() -> list[dict]:
     """List recorded session summaries (newest first)."""
     files = sorted(GOVERNOR_SESSIONS_DIR.glob("session-*.json"), reverse=True)
     out = []
-    for f in files[:50]:
+    for f in files[:10]:
         try:
             data = json.loads(f.read_text())
-            data["file"] = f.name
-            out.append(data)
+            out.append({
+                "id": data.get("session_id") or f.stem,
+                "m": data.get("distance_m"),
+                "s": data.get("active_duration_s") or data.get("duration_s"),
+                "steps": data.get("steps"),
+                "kcal": data.get("calories_kcal"),
+            })
         except (OSError, json.JSONDecodeError):
             continue
-    return out
+    if out:
+        return out
+    from .highscores import export_agent_data
+    return export_agent_data(GOVERNOR_SESSIONS_DIR).get("recent", [])
 
 
 @mcp.tool()
@@ -173,7 +181,7 @@ async def daily_totals(days: int = 7) -> list[dict]:
 
 @mcp.tool()
 async def agent_data() -> dict:
-    """Full agent-readable export: sessions + highscores + achievements + daily_aggregates. Writes agent-data.json too."""
+    """Compact totals + last 8 walks. Use this instead of dumping history."""
     data = export_agent_data(GOVERNOR_SESSIONS_DIR)
     try:
         write_agent_export(GOVERNOR_SESSIONS_DIR)
