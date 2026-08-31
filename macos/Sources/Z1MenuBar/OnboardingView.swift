@@ -31,7 +31,7 @@ struct OnboardingView: View {
             VStack(alignment: .leading, spacing: 9) {
                 bullet("Controls", "Start / Stop, drag the dial or type 3.1, tap −/+ to nudge (0.1·0.2·0.5). The pad only takes speed changes while the belt moves.")
                 bullet("Master", "The pad is the master. Remote, app, or pad timer — the numbers always show what the pad reports. Calories & steps survive reconnects (gap-credited).")
-                bullet("Steps", "Same counter as KS Fit — the pad's own step register. Set a hand-counted stride in Settings only if you want steps derived from belt distance instead.")
+                bullet("Steps", "Belt distance is exact. Steps are distance ÷ 53 cm (your KS Fit count at 3.5 km/h). Change stride in Settings if you measure a different length.")
                 bullet("Daily", "120 min or 8K steps goal, 1.6–6.4 km/h, imperial/metric synced to pad LEDs. Today's strip toggles Week/30 days; Records shows highscores & badges.")
                 bullet("Staying connected", "One BLE connection only — quit phone app before Connect. Auto-reconnects on wake, holds idle sleep while belt moves, Exit sleeps pad.")
             }

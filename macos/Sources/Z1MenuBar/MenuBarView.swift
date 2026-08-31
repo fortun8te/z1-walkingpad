@@ -443,7 +443,7 @@ struct MenuBarView: View {
             divider
             walkStat(viewModel.formatDistance(st.distanceM), "Distance")
             divider
-            walkStat(st.steps.formatted(.number), "Steps", measured: viewModel.strideOverrideM == 0)
+            walkStat(st.steps.formatted(.number), "Steps", measured: false)
             divider
             walkStat("\(Int(st.caloriesKcal.rounded()))", "kcal", measured: false)
         }
@@ -512,7 +512,7 @@ struct MenuBarView: View {
                 divider
                 walkStat(viewModel.formatDuration(totals.activeDurationS), "Time")
                 divider
-                walkStat(totals.steps.formatted(.number), "Steps", measured: viewModel.strideOverrideM == 0)
+                walkStat(totals.steps.formatted(.number), "Steps", measured: false)
                 divider
                 walkStat("\(Int(totals.caloriesKcal.rounded()))", "kcal", measured: false)
             }
@@ -963,19 +963,19 @@ struct MenuBarView: View {
 
     private var strideSettings: some View {
         VStack(alignment: .leading, spacing: 10) {
-            settingRow("Your stride") {
+            settingRow("Stride") {
                 TextField(
-                    "auto",
-                    value: $viewModel.strideOverrideM,
-                    format: .number.precision(.fractionLength(0...2))
+                    "53",
+                    value: strideCm,
+                    format: .number.precision(.fractionLength(0))
                 )
                 .textFieldStyle(.roundedBorder)
                 .controlSize(.mini)
                 .frame(width: 44)
                 .multilineTextAlignment(.trailing)
-                Text("m").foregroundStyle(Z1.faint)
+                Text("cm").foregroundStyle(Z1.faint)
             }
-            Text(strideHelp)
+            Text("Steps = belt metres ÷ this. 53 cm is the KS Fit count at 3.5 km/h.")
                 .font(Z1Type.regular(10))
                 .foregroundStyle(Z1.faint)
                 .fixedSize(horizontal: false, vertical: true)
@@ -990,10 +990,11 @@ struct MenuBarView: View {
         }
     }
 
-    private var strideHelp: String {
-        viewModel.strideLabel
-            + ". 0 = trust the pad. Count your steps for a minute, divide the "
-            + "distance you covered by that count, and enter it."
+    private var strideCm: Binding<Double> {
+        Binding(
+            get: { (viewModel.strideOverrideM > 0 ? viewModel.strideOverrideM : 0.53) * 100 },
+            set: { viewModel.strideOverrideM = max(30, min(150, $0)) / 100 }
+        )
     }
 
     private var leavingSettings: some View {

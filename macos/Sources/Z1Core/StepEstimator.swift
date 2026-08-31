@@ -5,16 +5,17 @@ import Foundation
 /// 53 cm at 3.5 km/h).
 public enum StepSanity {
     public static let minStrideM = 0.25
+    /// KS Fit / hand count at 3.5 km/h: 53 cm. Belt distance is exact; steps
+    /// are distance / this stride. The pad's step register is not used.
     public static let typicalStrideM = 0.53
 
+    public static func fromDistance(_ distanceM: Int, strideM: Double = typicalStrideM) -> Int {
+        guard distanceM > 0, strideM > 0 else { return 0 }
+        return max(1, Int((Double(distanceM) / strideM).rounded()))
+    }
+
     public static func steps(_ steps: Int, distanceM: Int) -> Int {
-        guard steps > 0 else { return 0 }
-        // 0 m with thousands of leftover pad steps is how a new walk opens
-        // at 4,679. No distance → no steps. Short distance → rewrite.
-        if distanceM <= 0 { return 0 }
-        let stride = Double(distanceM) / Double(steps)
-        guard stride < minStrideM else { return steps }
-        return max(1, Int((Double(distanceM) / typicalStrideM).rounded()))
+        fromDistance(distanceM)
     }
 }
 

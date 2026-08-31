@@ -63,11 +63,12 @@ final class TreadmillViewModel: ObservableObject {
         }
     }
 
-    /// Hand-measured stride in metres; 0 means "trust the pad's counter".
+    /// Metres per step. 0.53 is the KS Fit / 3.5 km/h count. Steps = distance / this.
     @Published var strideOverrideM: Double {
         didSet {
             UserDefaults.standard.set(strideOverrideM, forKey: Self.strideKey)
-            Task { await treadmill.setStrideOverride(strideOverrideM > 0 ? strideOverrideM : nil) }
+            let stride = strideOverrideM > 0 ? strideOverrideM : StepSanity.typicalStrideM
+            Task { await treadmill.setStrideOverride(stride) }
         }
     }
 
@@ -195,7 +196,8 @@ final class TreadmillViewModel: ObservableObject {
         let storedStep = defaults.double(forKey: Self.stepKey)
         speedStep = storedStep > 0 ? storedStep : 0.1
         persistStats = defaults.bool(forKey: Self.persistKey)
-        strideOverrideM = defaults.double(forKey: Self.strideKey)
+        let storedStride = defaults.double(forKey: Self.strideKey)
+        strideOverrideM = storedStride > 0 ? storedStride : StepSanity.typicalStrideM
         menuBarReadout = MenuBarReadout(rawValue: defaults.string(forKey: Self.readoutKey) ?? "")
             ?? .speed
         menuBarAlwaysVisible = defaults.bool(forKey: Self.alwaysVisibleKey)
@@ -215,10 +217,7 @@ final class TreadmillViewModel: ObservableObject {
 
         Task { await treadmill.setWeight(weightKg) }
         Task { await treadmill.setPersistStats(persistStats) }
-        if strideOverrideM > 0 {
-            let stride = strideOverrideM
-            Task { await treadmill.setStrideOverride(stride) }
-        }
+        Task { await treadmill.setStrideOverride(strideOverrideM > 0 ? strideOverrideM : StepSanity.typicalStrideM) }
         pumpTask = Task { [weak self] in
             guard let self else { return }
             for await s in self.treadmill.statusUpdates {
@@ -719,7 +718,7 @@ final class TreadmillViewModel: ObservableObject {
             totals.caloriesKcal += Z1Metrics.kcalPerMinute(open.avgSpeedKmh, weightKg: weightKg)
                 * Double(open.activeDurationS) / 60
         }
-        totals.steps = StepSanity.steps(totals.steps, distanceM: totals.distanceM)
+        totals.steps = StepSanity.fromDistance(totals.distanceM, strideM: strideOverrideM > 0 ? strideOverrideM : StepSanity.typicalStrideM)
         return totals
     }
 
@@ -729,9 +728,9 @@ final class TreadmillViewModel: ObservableObject {
 
     /// What the live numbers imply per step, for comparison with a hand count.
     var strideLabel: String {
-        guard let stride = status.impliedStrideM else { return "—" }
+        let stride = strideOverrideM > 0 ? strideOverrideM : StepSanity.typicalStrideM
         let cm = Int((stride * 100).rounded())
-        return "\(cm) cm\(strideOverrideM > 0 ? " · set" : "")"
+        return "\(cm) cm"
     }
 
     /// Today's steps, including the walk still in progress.

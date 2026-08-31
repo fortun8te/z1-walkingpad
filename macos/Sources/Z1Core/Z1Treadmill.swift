@@ -128,37 +128,26 @@ public actor Z1Treadmill {
     public private(set) var lastStepsDelta = 0.0
     public private(set) var lastStepSource = StepSource.unknown
 
-    /// A hand-measured stride in metres, or nil to trust the pad's counter.
-    ///
-    /// KS Fit shows the pad's own step register. We do the same. The learner
-    /// and the interpolator both invented extra steps; they are not used for
-    /// the number on screen. Belt distance is exact. If you want steps from
-    /// that instead, enter a hand-counted stride.
-    public private(set) var strideOverrideM: Double?
+    /// Metres per step used to turn belt distance into steps. Defaults to
+    /// 0.53 m (53 cm) from the KS Fit / hand count at 3.5 km/h.
+    public private(set) var strideOverrideM: Double? = StepSanity.typicalStrideM
 
-    /// Pad steps (plus persistStats offsets), unless a hand stride is set.
+    /// Steps from belt distance / stride. The pad step register is ignored.
     public var stepsDisplay: Int {
-        if let strideOverrideM, strideOverrideM > 0 {
-            let metres = displayStat(telemetry.distanceM, statOffsets.distance)
-            return Int((Double(metres) / strideOverrideM).rounded())
-        }
-        return displayStat(stepSession.display(pad: telemetry.steps ?? 0), statOffsets.steps)
+        let metres = displayStat(telemetry.distanceM, statOffsets.distance)
+        let stride = strideOverrideM ?? StepSanity.typicalStrideM
+        return StepSanity.fromDistance(metres, strideM: stride)
     }
 
-    /// Metres per step the current numbers imply — what to compare against a
-    /// hand count. Nil until there is enough distance to be meaningful.
     public var impliedStrideM: Double? {
-        let metres = displayStat(telemetry.distanceM, statOffsets.distance)
-        let steps = stepsDisplay
-        guard metres >= 100, steps > 0 else { return nil }
-        return Double(metres) / Double(steps)
+        strideOverrideM ?? StepSanity.typicalStrideM
     }
 
     public func setStrideOverride(_ metres: Double?) {
         if let metres, metres > 0.3, metres < 1.5 {
             strideOverrideM = metres
         } else {
-            strideOverrideM = nil
+            strideOverrideM = StepSanity.typicalStrideM
         }
         emitStatus()
     }

@@ -351,7 +351,11 @@ public func automaticHealthExportTests(_ t: TestRunner) {
             status(running: true, elapsed: 62, distance: 52, steps: 81),
             at: base.addingTimeInterval(62)
         )
-        t.expectEqual(snap.openWalkTotals?.steps, 81, "interpolation snap drops the extra ticks, does not add the counter")
+        t.expectEqual(
+            snap.openWalkTotals?.steps,
+            StepSanity.fromDistance(52),
+            "open-walk steps follow belt distance at 53 cm"
+        )
         t.check((snap.openWalkTotals?.steps ?? 0) < 150, "must not add the live counter on a 2-step dip")
 
         // Already-inflated tracker (from the old interpolator) heals on the
@@ -508,7 +512,7 @@ func sessionStoreTests(_ t: TestRunner) {
         t.expectEqual(today.walks, 2, "today counts both of today's walks")
         t.expectEqual(today.activeDurationS, 45 * 60, "today sums active time")
         t.expectEqual(today.distanceM, 3_000, "today sums distance")
-        t.expectEqual(today.steps, 4_500, "today sums steps")
+        t.expectEqual(today.steps, 3_774 + 1_887, "today steps from distance at 53 cm")
 
         let week = store.recentDays(7, endingOn: noon, calendar: calendar)
         t.expectEqual(week.count, 7, "the week chart always has seven days")
@@ -540,8 +544,8 @@ func sessionStoreTests(_ t: TestRunner) {
 
 public func stepSanityTests(_ t: TestRunner) {
     t.suite("step-sanity") { t in
-        t.expectEqual(StepSanity.steps(2_294, distanceM: 1_180), 2_294, "normal pad stride passes")
-        t.expectEqual(StepSanity.steps(30_118, distanceM: 1_180), 2_226, "30k steps on 1.18 km is rewritten")
+        t.expectEqual(StepSanity.fromDistance(1_180), 2_226, "1.18 km at 53 cm")
+        t.expectEqual(StepSanity.steps(30_118, distanceM: 1_180), 2_226, "pad count is ignored; distance wins")
         t.expectEqual(StepSanity.steps(4_747, distanceM: 50), 94, "open-walk leftover total is rewritten")
         t.expectEqual(StepSanity.steps(4_679, distanceM: 10), 19, "10 m leftover pad total is rewritten")
         t.expectEqual(StepSanity.steps(4_679, distanceM: 0), 0, "no distance, drop leftover steps")
