@@ -25,7 +25,7 @@ See [macos/README.md](macos/README.md).
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -e ".[dev,mcp]"
 .venv/bin/python -m z1_walkingpad_mcp start --speed 2.5
-.venv/bin/python -m z1_walkingpad_mcp.server
+.venv/bin/python -m z1_walkingpad_mcp.server   # tools: pad, walks
 ```
 
 Protocol notes live in [docs/protocol.md](docs/protocol.md). Do not send `0xE8` frames (OTA).
