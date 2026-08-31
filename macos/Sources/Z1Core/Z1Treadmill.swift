@@ -581,8 +581,12 @@ public actor Z1Treadmill {
             previousPad: prev.steps,
             elapsedReset: elapsedReset,
             distanceReset: distanceReset,
-            distanceM: telemetry.distanceM ?? 0
+            distanceM: telemetry.distanceM ?? 0,
+            lastGoodStrideM: UserDefaults.standard.object(forKey: "z1.lastGoodStrideM") as? Double
         )
+        if let implied = impliedStrideM, (0.35...0.85).contains(implied) {
+            UserDefaults.standard.set(implied, forKey: "z1.lastGoodStrideM")
+        }
 
         if !calorieStateRestored {
             calorieStateRestored = true

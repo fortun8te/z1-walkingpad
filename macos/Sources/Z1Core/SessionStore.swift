@@ -166,6 +166,27 @@ public final class SessionStore {
         Array(sessions.suffix(count).reversed())
     }
 
+    /// 24 hourly kcal buckets for a calendar day, from stored walks.
+    public func hourlyKcal(on day: Date, extra: WalkSession? = nil, calendar: Calendar = .current) -> [Double] {
+        var bins = Array(repeating: 0.0, count: 24)
+        let start = calendar.startOfDay(for: day)
+        guard let end = calendar.date(byAdding: .day, value: 1, to: start) else { return bins }
+        var walks = sessions.filter { $0.startedAt >= start && $0.startedAt < end }
+        if let extra, extra.startedAt >= start, extra.startedAt < end {
+            walks.append(extra)
+        }
+        for walk in walks {
+            let minutes = max(1, walk.activeDurationS / 60)
+            let perMin = walk.caloriesKcal / Double(minutes)
+            for m in 0..<minutes {
+                let t = walk.startedAt.addingTimeInterval(Double(m) * 60)
+                let hour = calendar.component(.hour, from: t)
+                if (0..<24).contains(hour) { bins[hour] += perMin }
+            }
+        }
+        return bins
+    }
+
     // MARK: - highscores (derived, not stored — retains data on update)
     public var highScores: HighScores { HighScoreComputer.compute(from: sessions) }
     public var achievements: [Achievement] {

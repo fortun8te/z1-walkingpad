@@ -43,14 +43,29 @@ public struct StepSession: Equatable, Sendable {
         previousPad: Int?,
         elapsedReset: Bool,
         distanceReset: Bool,
-        distanceM: Int = 0
+        distanceM: Int = 0,
+        lastGoodStrideM: Double? = nil
     ) -> Int {
         if elapsedReset || distanceReset {
             origin = pad
+        } else if previousPad == nil {
+            origin = 0
         } else if let previousPad, pad < previousPad {
             origin = 0
         } else if let previousPad, pad - previousPad > 100 {
             origin += pad - previousPad
+        }
+        // First packet after connect: time/distance already reset, step
+        // register often did not. Zero the leftover. Do not invent steps
+        // from a fixed stride.
+        if previousPad == nil, distanceM >= 10, pad > 0,
+           Double(distanceM) / Double(pad) < StepSanity.minStrideM
+        {
+            if let good = lastGoodStrideM, (0.35...0.85).contains(good) {
+                origin = max(0, pad - Int((Double(distanceM) / good).rounded()))
+            } else {
+                origin = pad
+            }
         }
         return display(pad: pad)
     }

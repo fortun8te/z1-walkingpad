@@ -720,6 +720,24 @@ final class TreadmillViewModel: ObservableObject {
         refreshHistory()
     }
 
+    func hourlyKcal(for day: Date) -> [Double] {
+        var extra: WalkSession?
+        if Calendar.current.isDateInToday(day), let open = openWalk, !sessionStore.contains(id: open.id) {
+            extra = WalkSession(
+                id: open.id,
+                startedAt: open.startedAt,
+                endedAt: open.endedAt,
+                activeDurationS: open.activeDurationS,
+                distanceM: open.distanceM,
+                steps: open.steps,
+                caloriesKcal: Z1Metrics.kcalPerMinute(open.avgSpeedKmh, weightKg: weightKg)
+                    * Double(open.activeDurationS) / 60,
+                exportedToHealth: false
+            )
+        }
+        return sessionStore.hourlyKcal(on: day, extra: extra)
+    }
+
     private func refreshHistory() {
         todayTotals = sessionStore.totals()
         recentWalks = sessionStore.mostRecent(12)

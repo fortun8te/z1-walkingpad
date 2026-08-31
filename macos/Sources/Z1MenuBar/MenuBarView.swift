@@ -506,6 +506,7 @@ struct MenuBarView: View {
             .buttonStyle(.plain)
 
             dayGoalLine(totals)
+            kcalSparkline(for: day)
             tileStrip
             HStack(spacing: 0) {
                 walkStat(viewModel.formatDistance(totals.distanceM), "Distance")
@@ -527,6 +528,20 @@ struct MenuBarView: View {
         .overlay(alignment: .top) { splashStrip.offset(y: -3) }
         .z1InnerGlow(Z1.live, radius: 12, strength: 0.34, width: 10)
         .z1Card(radius: 12)
+    }
+
+    private func kcalSparkline(for day: Date) -> some View {
+        let bins = viewModel.hourlyKcal(for: day)
+        let peak = max(bins.max() ?? 0, 1)
+        return HStack(alignment: .bottom, spacing: 2) {
+            ForEach(0..<24, id: \.self) { hour in
+                Capsule()
+                    .fill(bins[hour] > 0 ? Z1.ink.opacity(0.85) : Z1.unlit)
+                    .frame(height: max(2, 28 * bins[hour] / peak))
+            }
+        }
+        .frame(height: 28)
+        .help("kcal by hour")
     }
 
     private func dayTitle(_ day: Date) -> String {
@@ -876,6 +891,11 @@ struct MenuBarView: View {
                 Text(stamp)
                     .font(Z1Type.regular(10))
                     .foregroundStyle(Z1.faint)
+            } else if viewModel.useHealthWeight {
+                Text("Mac cannot read HealthKit. On iPhone: Shortcuts → Find Health Samples → Weight, latest, save as Shortcuts/z1-walkingpad/weight.json")
+                    .font(Z1Type.regular(10))
+                    .foregroundStyle(Z1.faint)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             settingRow("Speed per −/+") {

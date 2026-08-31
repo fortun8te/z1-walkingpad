@@ -609,6 +609,18 @@ public func stepSanityTests(_ t: TestRunner) {
             6_043,
             "without a counter reset, pad steps are the live count"
         )
+        var reconnect = StepSession()
+        t.expectEqual(
+            reconnect.ingest(
+                pad: 7_528,
+                previousPad: nil,
+                elapsedReset: false,
+                distanceReset: false,
+                distanceM: 630
+            ),
+            0,
+            "first packet after connect with leftover register starts at 0"
+        )
     }
 }
 
