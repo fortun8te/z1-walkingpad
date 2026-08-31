@@ -24,6 +24,8 @@ struct MenuBarView: View {
     @State private var weather: WeatherSnapshot? = nil
     @State private var kp: Double = 0
     @State private var showHighScores = false
+    @State private var weightDraft = ""
+    @FocusState private var weightFieldFocused: Bool
     @AppStorage("z1.hasSeenIntro") private var hasSeenIntro = false
 
     var body: some View {
@@ -873,15 +875,21 @@ struct MenuBarView: View {
             .controlSize(.mini)
 
             settingRow("Body weight") {
-                TextField(
-                    "weight",
-                    value: viewModel.weightBinding,
-                    format: .number.precision(.fractionLength(0...1))
-                )
-                .textFieldStyle(.roundedBorder)
-                .controlSize(.mini)
-                .frame(width: 48)
-                .multilineTextAlignment(.trailing)
+                TextField("weight", text: $weightDraft)
+                    .textFieldStyle(.roundedBorder)
+                    .controlSize(.mini)
+                    .frame(width: 56)
+                    .multilineTextAlignment(.trailing)
+                    .focused($weightFieldFocused)
+                    .onAppear { syncWeightDraft() }
+                    .onChange(of: viewModel.weightKg) { _, _ in
+                        if !weightFieldFocused { syncWeightDraft() }
+                    }
+                    .onChange(of: viewModel.unitsImperial) { _, _ in syncWeightDraft() }
+                    .onChange(of: weightFieldFocused) { _, focused in
+                        if !focused { commitWeightDraft() }
+                    }
+                    .onSubmit { commitWeightDraft() }
                 Text(viewModel.weightUnitLabel).foregroundStyle(Z1.faint)
             }
             check("Use latest Apple Health weight", $viewModel.useHealthWeight)
@@ -1010,6 +1018,25 @@ struct MenuBarView: View {
                 .buttonStyle(HairlineButtonStyle())
                 .help("Stop the belt, put the pad in standby, then quit")
         }
+    }
+
+    private func displayedWeight() -> Double {
+        viewModel.unitsImperial ? Z1Units.kgToLb(viewModel.weightKg) : viewModel.weightKg
+    }
+
+    private func syncWeightDraft() {
+        weightDraft = String(format: "%.1f", displayedWeight())
+    }
+
+    private func commitWeightDraft() {
+        let raw = weightDraft.replacingOccurrences(of: ",", with: ".")
+            .trimmingCharacters(in: .whitespaces)
+        guard let value = Double(raw), value > 20, value < 400 else {
+            syncWeightDraft()
+            return
+        }
+        viewModel.weightKg = viewModel.unitsImperial ? Z1Units.lbToKg(value) : value
+        syncWeightDraft()
     }
 
     private func settingRow<Content: View>(
