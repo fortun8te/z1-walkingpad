@@ -533,24 +533,14 @@ struct MenuBarView: View {
     private func kcalSparkline(for day: Date) -> some View {
         let bins = viewModel.hourlyKcal(for: day)
         let peak = max(bins.max() ?? 0, 1)
-        return Canvas { context, size in
-            let n = 24
-            let gap: CGFloat = 1
-            let barW = max(1, (size.width - gap * CGFloat(n - 1)) / CGFloat(n))
-            let floor: CGFloat = 1
-            for hour in 0..<n {
-                let x = CGFloat(hour) * (barW + gap)
-                let h = bins[hour] > 0
-                    ? max(floor, size.height * CGFloat(bins[hour] / peak))
-                    : floor
-                let rect = CGRect(x: x, y: size.height - h, width: barW, height: h)
-                context.fill(
-                    Path(rect),
-                    with: .color(bins[hour] > 0 ? Z1.ink.opacity(0.88) : Z1.unlit)
-                )
+        return HStack(alignment: .bottom, spacing: 2) {
+            ForEach(0..<24, id: \.self) { hour in
+                Capsule()
+                    .fill(bins[hour] > 0 ? Z1.ink.opacity(0.85) : Z1.unlit)
+                    .frame(height: max(2, 28 * bins[hour] / peak))
             }
         }
-        .frame(height: 32)
+        .frame(height: 28)
         .help("kcal by hour")
     }
 
@@ -902,7 +892,7 @@ struct MenuBarView: View {
                     .font(Z1Type.regular(10))
                     .foregroundStyle(Z1.faint)
             } else if viewModel.useHealthWeight {
-                Text("Mac apps cannot open HealthKit. On iPhone: Health → your photo → Export All Health Data. Put export.xml in iCloud Drive, Downloads, Desktop, or Application Support/Z1 WalkingPad.")
+                Text("This Mac app cannot open HealthKit. Health → profile photo → Export All Health Data. Drop export.xml in iCloud Drive, Downloads, Desktop, or Application Support/Z1 WalkingPad. Weight is the latest BodyMass sample. Walks stay on this Mac.")
                     .font(Z1Type.regular(10))
                     .foregroundStyle(Z1.faint)
                     .fixedSize(horizontal: false, vertical: true)

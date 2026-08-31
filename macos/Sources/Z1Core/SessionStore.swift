@@ -74,6 +74,8 @@ public struct DayTotals: Equatable, Sendable, Identifiable {
 public final class SessionStore {
     /// Keep the file bounded; ~5 years of daily walks.
     public static let maxSessions = 2_000
+    /// BLE drop / rebuild gap. Two records closer than this are one walk.
+    public static let mergeGap: TimeInterval = 3 * 60 * 60
 
     public static func defaultURL() -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
@@ -122,6 +124,11 @@ public final class SessionStore {
             )
         }
         guard !contains(id: session.id) else { return false }
+        if let last = sessions.last, Self.shouldMerge(last, session) {
+            sessions[sessions.count - 1] = Self.merged(last, session)
+            save()
+            return true
+        }
         // insertion keep sorted — O(n) not O(n log n), faster for 2k
         if let idx = sessions.firstIndex(where: { $0.startedAt > session.startedAt }) {
             sessions.insert(session, at: idx)
@@ -257,7 +264,9 @@ public final class SessionStore {
             )
         }
         sessions = loaded.sorted { $0.startedAt < $1.startedAt }
-        if sanitizeImpossibleSteps() { save() }
+        let coalesced = coalesceAdjacent()
+        let sanitized = sanitizeImpossibleSteps()
+        if coalesced || sanitized { save() }
     }
 
     private func decodeWalks(from file: URL) -> [WalkSession] {
@@ -272,6 +281,44 @@ public final class SessionStore {
         guard let data = try? Data(contentsOf: file) else { return [] }
         struct Envelope: Codable { var sessions: [WalkSession] }
         return (try? Self.makeDecoder().decode(Envelope.self, from: data))?.sessions ?? []
+    }
+
+    public static func shouldMerge(_ a: WalkSession, _ b: WalkSession) -> Bool {
+        let gap = b.startedAt.timeIntervalSince(a.endedAt)
+        return gap >= 0 && gap < mergeGap
+    }
+
+    public static func merged(_ a: WalkSession, _ b: WalkSession) -> WalkSession {
+        WalkSession(
+            id: a.id,
+            startedAt: a.startedAt,
+            endedAt: max(a.endedAt, b.endedAt),
+            activeDurationS: a.activeDurationS + b.activeDurationS,
+            distanceM: a.distanceM + b.distanceM,
+            steps: GaitModel.steps(
+                distanceM: a.distanceM + b.distanceM,
+                durationS: a.activeDurationS + b.activeDurationS
+            ),
+            caloriesKcal: a.caloriesKcal + b.caloriesKcal,
+            exportedToHealth: a.exportedToHealth && b.exportedToHealth
+        )
+    }
+
+    @discardableResult
+    private func coalesceAdjacent() -> Bool {
+        guard sessions.count >= 2 else { return false }
+        var out: [WalkSession] = []
+        var dirty = false
+        for session in sessions {
+            if let last = out.last, Self.shouldMerge(last, session) {
+                out[out.count - 1] = Self.merged(last, session)
+                dirty = true
+            } else {
+                out.append(session)
+            }
+        }
+        if dirty { sessions = out }
+        return dirty
     }
 
     /// Rewrite stored steps from belt distance and average speed.

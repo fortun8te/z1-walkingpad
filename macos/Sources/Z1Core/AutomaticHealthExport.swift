@@ -35,11 +35,10 @@ public struct CompletedWalk: Equatable, Sendable {
     }
 }
 
-/// Turns belt telemetry into one pause-aware workout. A physical-remote Stop
-/// starts a ten-minute grace period; movement within that grace resumes the
-/// same workout instead of creating another one.
+/// Turns belt telemetry into one pause-aware workout. A real Stop starts a
+/// long grace period so BLE drops and app rebuilds do not split one walk.
 public struct RemoteSessionTracker: Codable, Sendable {
-    public static let stopGraceSeconds: TimeInterval = 10 * 60
+    public static let stopGraceSeconds: TimeInterval = 3 * 60 * 60
 
     public struct Observation: Sendable {
         /// Finished walks awaiting a history entry (all of them, short ones
@@ -135,7 +134,9 @@ public struct RemoteSessionTracker: Codable, Sendable {
         }
 
         let counters = Counters(status)
-        let running = status.beltRunning && status.speedKmh > 0
+        // Speed still on the belt means the walk is not over, even if FTMS
+        // dropped `beltRunning` for a packet. Disconnect is handled separately.
+        let running = status.speedKmh > 0.3 || status.beltRunning
         if var current = session {
             let includeDeltas = current.wasRunning || running
             // A pad session reset drops elapsed (Stop + Start). A 1–3 step
@@ -207,6 +208,13 @@ public struct RemoteSessionTracker: Codable, Sendable {
             completed: pendingCompleted,
             finalizationDeadline: finalizationDeadline
         )
+    }
+
+    /// BLE drop is not Stop. Keep the open walk; do not start the grace clock.
+    public mutating func markConnectionDrop() {
+        guard session != nil else { return }
+        session?.stoppedAt = nil
+        session?.wasRunning = true
     }
 
     /// Called by the menu app's deadline task and again on launch. Repeated

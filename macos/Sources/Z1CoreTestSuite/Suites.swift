@@ -262,6 +262,7 @@ public func automaticHealthExportTests(_ t: TestRunner) {
             return value
         }
 
+        let grace = RemoteSessionTracker.stopGraceSeconds
         let base = Date(timeIntervalSince1970: 2_000_000_000)
         var tracker = RemoteSessionTracker()
 
@@ -283,8 +284,8 @@ public func automaticHealthExportTests(_ t: TestRunner) {
         )
         t.expectEqual(
             stopped.finalizationDeadline,
-            stoppedAt.addingTimeInterval(600),
-            "remote Stop sets one ten-minute deadline"
+            stoppedAt.addingTimeInterval(grace),
+            "remote Stop sets the grace deadline"
         )
 
         // More zero-speed frames do not move the deadline.
@@ -294,7 +295,7 @@ public func automaticHealthExportTests(_ t: TestRunner) {
         )
         t.expectEqual(
             repeatedZero.finalizationDeadline,
-            stoppedAt.addingTimeInterval(600),
+            stoppedAt.addingTimeInterval(grace),
             "repeated zero telemetry does not extend grace"
         )
 
@@ -302,7 +303,7 @@ public func automaticHealthExportTests(_ t: TestRunner) {
         // same session instead of finalizing a second workout.
         let resumed = tracker.observe(
             status(running: true, elapsed: 1, distance: 1, steps: 2),
-            at: stoppedAt.addingTimeInterval(599)
+            at: stoppedAt.addingTimeInterval(grace - 1)
         )
         t.expectNil(resumed.finalizationDeadline, "restart within grace cancels finalization")
         t.check(resumed.completed.isEmpty, "restart within grace does not log a walk")
@@ -316,10 +317,10 @@ public func automaticHealthExportTests(_ t: TestRunner) {
             at: finalStop
         )
         t.check(
-            tracker.finalizeIfDue(at: finalStop.addingTimeInterval(599)).completed.isEmpty,
+            tracker.finalizeIfDue(at: finalStop.addingTimeInterval(grace - 1)).completed.isEmpty,
             "session is not logged early"
         )
-        let due = tracker.finalizeIfDue(at: finalStop.addingTimeInterval(600))
+        let due = tracker.finalizeIfDue(at: finalStop.addingTimeInterval(grace))
         t.expectEqual(due.completed.count, 1, "one merged workout is offered to the history")
         if let walk = due.completed.first {
             t.expectEqual(walk.id, "remote-session-1", "history entry shares the session ID")
@@ -329,7 +330,7 @@ public func automaticHealthExportTests(_ t: TestRunner) {
             tracker.acknowledgeLog(sessionID: walk.id)
         }
         t.check(
-            tracker.finalizeIfDue(at: finalStop.addingTimeInterval(600)).completed.isEmpty,
+            tracker.finalizeIfDue(at: finalStop.addingTimeInterval(grace)).completed.isEmpty,
             "an acknowledged history entry is not offered twice"
         )
 
@@ -373,6 +374,21 @@ public func automaticHealthExportTests(_ t: TestRunner) {
             "runaway session snaps to the live pad count"
         )
 
+        var drop = RemoteSessionTracker()
+        _ = drop.observe(
+            status(running: true, elapsed: 100, distance: 80, steps: 120),
+            at: base,
+            newSessionID: { "drop-walk" }
+        )
+        _ = drop.observe(
+            status(running: false, elapsed: 100, distance: 80, steps: 120),
+            at: base.addingTimeInterval(100)
+        )
+        t.check(drop.finalizationDeadline != nil, "stop starts grace")
+        drop.markConnectionDrop()
+        t.expectNil(drop.finalizationDeadline, "BLE drop is not a stop")
+        t.check(drop.openWalkTotals != nil, "walk stays open across a drop")
+
         // A pending stopped session survives relaunch and keeps the original
         // deadline and ID.
         var persisted = RemoteSessionTracker()
@@ -388,7 +404,7 @@ public func automaticHealthExportTests(_ t: TestRunner) {
         do {
             let data = try JSONEncoder().encode(persisted)
             var restored = try JSONDecoder().decode(RemoteSessionTracker.self, from: data)
-            let restoredDue = restored.finalizeIfDue(at: base.addingTimeInterval(1_200))
+            let restoredDue = restored.finalizeIfDue(at: base.addingTimeInterval(600) + grace)
             t.expectEqual(restoredDue.completed.first?.id, "persisted-session", "relaunch restores pending session")
         } catch {
             t.check(false, "tracker persistence roundtrip: \(error)")
@@ -428,7 +444,7 @@ func historyAndCompatibilityTests(_ t: TestRunner) {
         )
         let stopped = base.addingTimeInterval(301)
         _ = tracker.observe(status(running: false, elapsed: 300, distance: 260, steps: 400), at: stopped)
-        let due = tracker.finalizeIfDue(at: stopped.addingTimeInterval(600))
+        let due = tracker.finalizeIfDue(at: stopped.addingTimeInterval(RemoteSessionTracker.stopGraceSeconds))
         t.expectEqual(due.completed.count, 1, "a five-minute walk still reaches the history")
         t.check(
             due.completed.first?.offeredToHealth == false,
@@ -448,7 +464,7 @@ func historyAndCompatibilityTests(_ t: TestRunner) {
             at: base.addingTimeInterval(10)
         )
         t.check(
-            noise.finalizeIfDue(at: base.addingTimeInterval(700)).completed.isEmpty,
+            noise.finalizeIfDue(at: base.addingTimeInterval(RemoteSessionTracker.stopGraceSeconds + 60)).completed.isEmpty,
             "a ten-second belt nudge is not recorded as a walk"
         )
 
@@ -500,7 +516,7 @@ func sessionStoreTests(_ t: TestRunner) {
             "the same walk is never stored twice"
         )
         t.check(
-            store.append(walk("b", at: noon.addingTimeInterval(3_600), minutes: 15, meters: 1_000, steps: 1_500)),
+            store.append(walk("b", at: noon.addingTimeInterval(4 * 3_600), minutes: 15, meters: 1_000, steps: 1_500)),
             "a second walk on the same day is stored"
         )
         _ = store.append(walk("c", at: noon.addingTimeInterval(-86_400), minutes: 20, meters: 1_400, steps: 2_000))

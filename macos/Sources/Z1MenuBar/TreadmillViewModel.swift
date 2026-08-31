@@ -264,7 +264,7 @@ final class TreadmillViewModel: ObservableObject {
             Task { @MainActor in await self?.checkForUpdateAndMaybeInstall() }
         }
         applyHealthWeightIfAvailable()
-        Timer.scheduledTimer(withTimeInterval: 15 * 60, repeats: true) { [weak self] _ in
+        Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.applyHealthWeightIfAvailable() }
         }
     }
@@ -564,6 +564,8 @@ final class TreadmillViewModel: ObservableObject {
         // walk cannot be truncated by the Mac dozing off mid-session.
         sleepBlocker.setActive(newStatus.beltRunning)
         if newStatus.phase == .disconnected || newStatus.phase == .error {
+            healthTracker.markConnectionDrop()
+            persistHealthTracker()
             scheduleReconnect(after: newStatus.phase == .error ? 10 : 1)
         }
         guard newStatus.phase == .ready, newStatus.hasTelemetry else { return }
@@ -763,11 +765,31 @@ final class TreadmillViewModel: ObservableObject {
         if Calendar.current.isDateInToday(day), let open = openWalk,
            !sessionStore.contains(id: open.id)
         {
+            let last = sessionStore.sessions.last { Calendar.current.isDate($0.startedAt, inSameDayAs: day) }
+            let sameWalk = last.map {
+                SessionStore.shouldMerge(
+                    $0,
+                    WalkSession(
+                        id: open.id,
+                        startedAt: open.startedAt,
+                        endedAt: open.endedAt.timeIntervalSince1970 > 0 ? open.endedAt : Date(),
+                        activeDurationS: open.activeDurationS,
+                        distanceM: open.distanceM,
+                        steps: open.steps,
+                        caloriesKcal: 0,
+                        exportedToHealth: false
+                    )
+                )
+            } ?? false
             totals.activeDurationS += open.activeDurationS
             totals.distanceM += open.distanceM
-            totals.steps += StepSanity.steps(open.steps, distanceM: open.distanceM)
+            totals.steps += GaitModel.steps(
+                distanceM: open.distanceM,
+                durationS: open.activeDurationS
+            )
             totals.caloriesKcal += Z1Metrics.kcalPerMinute(open.avgSpeedKmh, weightKg: weightKg)
                 * Double(open.activeDurationS) / 60
+            if !sameWalk { totals.walks += 1 }
         }
         return totals
     }
@@ -779,7 +801,7 @@ final class TreadmillViewModel: ObservableObject {
     var strideLabel: String {
         guard let stride = status.impliedStrideM else { return "—" }
         let cm = Int((stride * 100).rounded())
-        return "\(cm) cm"
+        return "\(cm) cm modelled"
     }
 
     /// Today's steps, including the walk still in progress.

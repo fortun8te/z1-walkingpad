@@ -31,7 +31,7 @@ struct OnboardingView: View {
             VStack(alignment: .leading, spacing: 9) {
                 bullet("Controls", "Start / Stop, drag the dial or type 3.1, tap −/+ to nudge (0.1·0.2·0.5). The pad only takes speed changes while the belt moves.")
                 bullet("Master", "The pad is the master. Remote, app, or pad timer — the numbers always show what the pad reports. Calories & steps survive reconnects (gap-credited).")
-                bullet("Steps", "This walk's pad count. Distance is exact. Stride in cm is just metres ÷ steps, once there is enough distance.")
+                bullet("Steps", "Belt metres ÷ a speed-dependent step length. Not the pad's leftover register, not outdoor GPS.")
                 bullet("Daily", "120 min or 8K steps goal, 1.6–6.4 km/h, imperial/metric synced to pad LEDs. Today's strip toggles Week/30 days; Records shows highscores & badges.")
                 bullet("Staying connected", "One BLE connection only — quit phone app before Connect. Auto-reconnects on wake, holds idle sleep while belt moves, Exit sleeps pad.")
             }

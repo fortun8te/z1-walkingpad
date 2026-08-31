@@ -45,22 +45,32 @@ enum Equivalence {
     }
 
     static func caption(distanceM: Int, kcal: Double, minutes: Int) -> String {
-        if minutes >= 20, let energy = energy(kcal: kcal) {
-            return energy
-        }
-        if let place = daily(forMeters: distanceM) {
-            return place
-        }
-        if let energy = energy(kcal: kcal) {
-            return energy
-        }
-        if minutes >= 8 {
-            return "\(minutes) min off the chair"
-        }
         if distanceM <= 0 {
             return "Nothing on the belt yet"
         }
-        return String(format: "%.0f m so far", Double(distanceM))
+        let km = Double(distanceM) / 1_000
+        var lines: [String] = []
+        lines.append(String(format: "%.2f km on the belt", km))
+        if minutes >= 8 {
+            lines.append("\(minutes) min off the chair")
+        }
+        if let place = daily(forMeters: distanceM) {
+            lines.append(place)
+        }
+        if let energy = energy(kcal: kcal) {
+            lines.append(energy)
+        }
+        if kcal >= 80 {
+            lines.append("\(Int(kcal.rounded())) kcal so far")
+        }
+        if minutes >= 45 {
+            lines.append("almost an hour already")
+        }
+        if km >= 3 {
+            lines.append(String(format: "%.1f km in, still one walk", km))
+        }
+        let tick = max(0, distanceM / 200)
+        return lines[tick % lines.count]
     }
 
     static func flavor(distanceM: Int) -> String {
