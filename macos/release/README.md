@@ -5,12 +5,11 @@ Local update feed for Z1 WalkingPad. The app checks
 feed build is newer. Install quits (belt keeps moving), swaps
 `/Applications/Z1WalkingPad.app` in place, and reopens.
 
-```bash
-# terminal 1 — leave running
-bash macos/release/serve.sh
+The menu-bar app starts `http://127.0.0.1:8741` itself while it is running.
+You only need to publish:
 
-# terminal 2 — each time you want to ship
+```bash
 Z1_RELEASE_NOTES="steps match the pad" bash macos/release/publish.sh
 ```
 
-Then open the popover and click **Install**.
+`serve.sh` is optional (for when the app is quit). Auto-update installs when the feed build is newer.

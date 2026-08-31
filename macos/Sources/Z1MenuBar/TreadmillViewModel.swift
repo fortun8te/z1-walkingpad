@@ -258,6 +258,7 @@ final class TreadmillViewModel: ObservableObject {
         installPowerObservers()
         startHousekeeping()
         if notificationsEnabled { notifier.requestAuthorizationIfNeeded() }
+        LocalReleaseServer.shared.ensureRunning()
         Task { await checkForUpdateAndMaybeInstall() }
         Timer.scheduledTimer(withTimeInterval: 30 * 60, repeats: true) { [weak self] _ in
             Task { @MainActor in await self?.checkForUpdateAndMaybeInstall() }
@@ -498,6 +499,7 @@ final class TreadmillViewModel: ObservableObject {
     }
 
     func checkForUpdateAndMaybeInstall(force: Bool = false) async {
+        LocalReleaseServer.shared.ensureRunning()
         await updater.check(force: force)
         if autoUpdate { await applyAvailableUpdate() }
     }

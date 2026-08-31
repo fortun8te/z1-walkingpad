@@ -3,6 +3,7 @@ import SwiftUI
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        LocalReleaseServer.shared.ensureRunning()
         // Dock tile is on unless the user turned it off. LSUIElement stays
         // false so Finder/Dock keep the icns; this policy only hides it at
         // runtime if they uncheck Show in Dock.
@@ -20,6 +21,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         // Rebuild while walking: if user clicks Dock icon while belt moves, just show popover, don't restart session
         return true
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        LocalReleaseServer.shared.stopIfOwned()
     }
 }
 

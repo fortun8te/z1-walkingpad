@@ -33,9 +33,8 @@ bash build-app.sh               # release build, stable codesign, in-place insta
 bash build-app.sh --no-install  # leave the bundle in macos/ instead
 ```
 
-Updates: run `bash macos/release/serve.sh` and `bash macos/release/publish.sh`
-(see [`release/README.md`](release/README.md)). The popover shows **Update available**
-when the feed is newer; Install swaps the bundle and reopens.
+Updates: the running app serves `http://127.0.0.1:8741`. Publish with
+`bash macos/release/publish.sh` (see [`release/README.md`](release/README.md)).
 
 Then open the app:
 

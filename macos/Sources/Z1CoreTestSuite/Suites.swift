@@ -651,6 +651,39 @@ public func stepSanityTests(_ t: TestRunner) {
     }
 }
 
+public func releaseDistTests(_ t: TestRunner) {
+    t.suite("release-dist") { t in
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("z1-release-\(UUID().uuidString)", isDirectory: true)
+        let oldDir = tmp.appendingPathComponent("old", isDirectory: true)
+        let newDir = tmp.appendingPathComponent("new", isDirectory: true)
+        let emptyDir = tmp.appendingPathComponent("empty", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        try? FileManager.default.createDirectory(at: oldDir, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: newDir, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: emptyDir, withIntermediateDirectories: true)
+        let oldFeed = """
+        {"version":"202608310100","shortVersion":"1.0","url":"http://127.0.0.1:8741/a.zip","sha256":"aa"}
+        """
+        let newFeed = """
+        {"version":"202608312900","shortVersion":"1.0","url":"http://127.0.0.1:8741/b.zip","sha256":"bb"}
+        """
+        try? oldFeed.write(to: oldDir.appendingPathComponent("latest.json"), atomically: true, encoding: .utf8)
+        try? newFeed.write(to: newDir.appendingPathComponent("latest.json"), atomically: true, encoding: .utf8)
+        t.expectEqual(
+            ReleaseDist.bestRoot(among: [oldDir, newDir, emptyDir])?.lastPathComponent,
+            "new",
+            "serves the folder with the newest feed"
+        )
+        t.expectEqual(
+            ReleaseDist.feed(in: newDir)?.version,
+            "202608312900",
+            "feed decode"
+        )
+        t.check(ReleaseDist.bestRoot(among: []) == nil, "no candidates")
+    }
+}
+
 public func updateFeedTests(_ t: TestRunner) {
     t.suite("update-feed") { t in
         let json = """
@@ -683,6 +716,7 @@ public func runAllZ1CoreTests() -> Int32 {
     healthWeightTests(runner)
     gaitModelTests(runner)
     stepSanityTests(runner)
+    releaseDistTests(runner)
     updateFeedTests(runner)
     openMeteoTests(runner)
     if runner.failures == 0 {

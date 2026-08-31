@@ -40,8 +40,13 @@ PY
 # Keep the latest zip under a stable name so a pinned URL still works.
 cp "$DIST/$ZIP_NAME" "$DIST/Z1WalkingPad-latest.zip"
 
+# The running app serves this folder (and the repo dist) on :8741.
+SUPPORT="${HOME}/Library/Application Support/Z1 WalkingPad/updates"
+mkdir -p "$SUPPORT"
+cp "$DIST/$ZIP_NAME" "$DIST/Z1WalkingPad-latest.zip" "$DIST/latest.json" "$SUPPORT/"
+
 echo "==> published $VERSION"
 echo "    $DIST/$ZIP_NAME"
 echo "    sha256 $SHA"
 echo "    feed   $BASE/latest.json"
-echo "    start the server with:  bash macos/release/serve.sh"
+echo "    the app starts the release server while it is running"
