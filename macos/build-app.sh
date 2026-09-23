@@ -20,6 +20,20 @@ for arg in "${@:-}"; do
   esac
 done
 qecho() { [[ $QUIET -eq 1 ]] || echo "$@"; }
+
+# No usable Xcode (not installed, or licence not accepted): build with the
+# Command Line Tools and the newest macOS 26 SDK they ship. `xcodebuild
+# -version` still succeeds with the licence unaccepted, so also probe the
+# toolchain itself.
+if ! xcodebuild -version >/dev/null 2>&1 || ! swift --version >/dev/null 2>&1; then
+  CLT=/Library/Developer/CommandLineTools
+  SDK="$(ls -d "$CLT"/SDKs/MacOSX26*.sdk 2>/dev/null | sort -V | tail -n 1 || true)"
+  if [[ -n "$SDK" ]]; then
+    export DEVELOPER_DIR="$CLT"
+    export SDKROOT="$SDK"
+    qecho "==> Xcode unavailable; using $CLT with $(basename "$SDK")"
+  fi
+fi
 qecho "==> swift build -c release --arch arm64 (Z1MenuBar)"
 # Build quietly unless --quiet not set; tee to log for errors
 LOG=$(mktemp -t z1build.XXXXXX)
@@ -69,7 +83,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>LSUIElement</key>
-    <false/>
+    <true/>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
     <key>NSBluetoothAlwaysUsageDescription</key>

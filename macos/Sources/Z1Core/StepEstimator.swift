@@ -209,6 +209,7 @@ public struct StepSmoother: Sendable, Equatable {
     public var displaySteps: Double = 0
     public var speedKmh: Double = 0
     public var strideM: Double = 0.72
+    private var lastDistanceM: Int?
 
     public init() {}
 
@@ -225,6 +226,26 @@ public struct StepSmoother: Sendable, Equatable {
     public mutating func reset() {
         packetSteps = 0
         displaySteps = 0
+        lastDistanceM = nil
+    }
+
+    /// Accept a treadmill update without allowing a changed speed/stride to
+    /// rewrite steps already completed. Only newly travelled metres add new
+    /// steps. A real distance-counter reset starts a fresh displayed run.
+    public mutating func ingest(reportedSteps: Int, distanceM: Int) {
+        guard let previousDistance = lastDistanceM else {
+            set(Double(reportedSteps))
+            lastDistanceM = distanceM
+            return
+        }
+        if distanceM < previousDistance {
+            set(Double(reportedSteps))
+        } else if distanceM > previousDistance {
+            let delta = Double(distanceM - previousDistance) / max(0.31, strideM)
+            packetSteps += delta
+            displaySteps = max(displaySteps, packetSteps)
+        }
+        lastDistanceM = distanceM
     }
 
     /// Advance the display toward `packetSteps + expected`, never the packet total.

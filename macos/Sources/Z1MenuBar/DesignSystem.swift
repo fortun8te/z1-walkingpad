@@ -116,23 +116,34 @@ extension View {
 /// Flat, edge-drawn, sentence case. No tracking, no rounded face, no caps —
 /// those three together are what makes an interface look generated.
 struct HairlineButtonStyle: ButtonStyle {
-    @State private var hovering = false
-
+    // @State directly on a ButtonStyle is not view storage; hover never
+    // stuck. It lives in a real View below.
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .foregroundStyle(Z1.ink)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
-            .background(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(Color.white.opacity(hovering ? 0.07 : 0))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .strokeBorder(Color.white.opacity(hovering ? 0.26 : 0.13), lineWidth: 0.7)
-            )
-            .opacity(configuration.isPressed ? 0.55 : 1)
-            .onHover { hovering = $0 }
+        HairlineBody(configuration: configuration)
+    }
+
+    private struct HairlineBody: View {
+        let configuration: ButtonStyleConfiguration
+        @Environment(\.isEnabled) private var enabled
+        @State private var hovering = false
+
+        var body: some View {
+            configuration.label
+                .foregroundStyle(Z1.ink)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(Color.white.opacity(hovering && enabled ? 0.07 : 0))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .strokeBorder(Color.white.opacity(hovering && enabled ? 0.26 : 0.13), lineWidth: 0.7)
+                )
+                .opacity(enabled ? (configuration.isPressed ? 0.55 : 1) : 0.4)
+                .contentShape(.rect)
+                .onHover { hovering = $0 }
+        }
     }
 }
 

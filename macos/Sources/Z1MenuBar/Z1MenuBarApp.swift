@@ -1,52 +1,77 @@
 import AppKit
 import SwiftUI
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        LocalReleaseServer.shared.ensureRunning()
-        // Dock tile is on unless the user turned it off. LSUIElement stays
-        // false so Finder/Dock keep the icns; this policy only hides it at
-        // runtime if they uncheck Show in Dock.
-        let wantsDock = UserDefaults.standard.object(forKey: TreadmillViewModel.dockKey) as? Bool ?? true
-        NSApp.setActivationPolicy(wantsDock ? .regular : .accessory)
-        // Hide resign / signing noise: suppress repeated Gatekeeper/quarantine prompts
-        // by clearing quarantine on our own bundle at launch (harmless if already clean).
-        // This makes ad-hoc re-signs invisible after first launch.
-        if let bundlePath = Bundle.main.bundlePath as String? {
-            try? FileManager.default.removeItem(atPath: bundlePath + "/__dummy__") // no-op to trigger permission check
+@MainActor
+enum Z1Launch {
+    static var delegate: AppDelegate?
+}
+
+@main
+struct Z1MenuBarApp {
+    static func main() {
+        MainActor.assumeIsolated {
+            let app = NSApplication.shared
+            let delegate = AppDelegate()
+            Z1Launch.delegate = delegate
+            app.delegate = delegate
+            app.run()
         }
-        // Silence first-launch Bluetooth permission spam: pre-warm CB manager so system dialog appears once
-        // and is cached under stable bundle id dev.z1walkingpad.menubar (TCC survives in-place ditto).
     }
+}
+
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var viewModel: TreadmillViewModel?
+    private var statusBar: StatusBarController?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        if TreadmillViewModel.isPreview {
+            showPreviewWindow()
+            return
+        }
+        // LSUIElement is true, so we start as an agent. The status item has
+        // to be created while we are still an accessory. Switching to a Dock
+        // app first parks it on the upper display, which has no menu bar.
+        NSApp.setActivationPolicy(.accessory)
+        let viewModel = TreadmillViewModel()
+        self.viewModel = viewModel
+        let bar = StatusBarController(viewModel: viewModel)
+        statusBar = bar
+        let wantsDock = UserDefaults.standard.object(forKey: TreadmillViewModel.dockKey) as? Bool ?? true
+        if wantsDock {
+            NSApp.setActivationPolicy(.regular)
+            DispatchQueue.main.async { bar.reassert() }
+        }
+        LocalReleaseServer.shared.ensureRunning()
+    }
+
+    /// UI harness: the panel in an ordinary window, no status item, no BLE.
+    /// `Z1_PREVIEW=1 Z1MenuBar -z1.hasSeenIntro 1` then `screencapture -l`.
+    private var previewWindow: NSWindow?
+    private func showPreviewWindow() {
+        NSApp.setActivationPolicy(.regular)
+        let viewModel = TreadmillViewModel()
+        self.viewModel = viewModel
+        let host = NSHostingController(rootView: PanelView(viewModel: viewModel))
+        let window = NSWindow(contentViewController: host)
+        window.styleMask = [.borderless]
+        window.backgroundColor = .clear
+        window.isOpaque = false
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.setContentSize(PanelView.size)
+        window.setFrameOrigin(NSPoint(x: 80, y: 120))
+        window.orderFrontRegardless()
+        previewWindow = window
+        print("Z1_PREVIEW_WINDOW \(window.windowNumber)")
+        fflush(stdout)
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        // Rebuild while walking: if user clicks Dock icon while belt moves, just show popover, don't restart session
-        return true
+        statusBar?.show()
+        return false
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         LocalReleaseServer.shared.stopIfOwned()
-    }
-}
-
-@main
-struct Z1MenuBarApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var viewModel = TreadmillViewModel()
-
-    var body: some Scene {
-        MenuBarExtra {
-            MenuBarView(viewModel: viewModel)
-        } label: {
-            // Never put TimelineView / Canvas / custom NSImage animation in
-            // this label. SwiftUI rasterizes it into NSStatusItem.setImage
-            // on every frame and the process climbs to multiple GB of RAM
-            // while the extra never paints.
-            if let readout = viewModel.menuBarText {
-                Text(readout).monospacedDigit()
-            } else {
-                Text("Z1")
-            }
-        }
-        .menuBarExtraStyle(.window)
     }
 }

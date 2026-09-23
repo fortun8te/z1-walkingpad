@@ -128,6 +128,7 @@ final class TreadmillViewModel: ObservableObject {
         didSet {
             UserDefaults.standard.set(showInDock, forKey: Self.dockKey)
             NSApp.setActivationPolicy(showInDock ? .regular : .accessory)
+            NotificationCenter.default.post(name: .z1ReassertStatusItem, object: nil)
         }
     }
 
@@ -154,12 +155,23 @@ final class TreadmillViewModel: ObservableObject {
 
     @Published private(set) var healthWeightStamp: String?
 
-    let treadmill = Z1Treadmill()
+    /// Lazy so a preview build (`Z1_PREVIEW=1`) never creates a
+    /// CBCentralManager: an unsigned harness binary is killed by TCC the
+    /// moment it touches Bluetooth, and a second central would fight the
+    /// real app for the single-connection pad.
+    private(set) lazy var treadmill = Z1Treadmill()
+
+    /// Set by the UI preview harness only. Skips BLE, timers, updates.
+    static var isPreview: Bool { ProcessInfo.processInfo.environment["Z1_PREVIEW"] == "1" }
     private var pumpTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
     private var automaticConnectionEnabled = true
     private var healthFinalizeTask: Task<Void, Never>?
     private var reminderTimer: Timer?
+    private var liveStepTimer: Timer?
+    private var stepSmoother = StepSmoother()
+    private var lastStepPacketAt = Date()
+    private var highestDisplayedSteps = 0
     private var healthTracker: RemoteSessionTracker
     private let sessionStore = SessionStore()
     private let sleepBlocker = SleepBlocker()
@@ -225,6 +237,12 @@ final class TreadmillViewModel: ObservableObject {
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &updaterBag)
 
+        if Self.isPreview {
+            refreshHistory()
+            applyPreviewStatus()
+            return
+        }
+
         Task { await treadmill.setWeight(weightKg) }
         Task { await treadmill.setPersistStats(persistStats) }
         if strideOverrideM > 0 {
@@ -243,6 +261,9 @@ final class TreadmillViewModel: ObservableObject {
         // thirty seconds after logging in is how reminders get turned off.
         reminderTimer = Timer.scheduledTimer(withTimeInterval: 15 * 60, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.checkWalkReminder() }
+        }
+        liveStepTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.tickLiveSteps() }
         }
         // The pad accepts one central at a time, so a link left up at exit is
         // what makes the *next* launch fail to connect. Drop it on the way out.
@@ -267,6 +288,33 @@ final class TreadmillViewModel: ObservableObject {
         Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.applyHealthWeightIfAvailable() }
         }
+    }
+
+    /// Fake telemetry for the preview harness, driven by env vars:
+    /// Z1_PREVIEW_PHASE=ready|scanning|disconnected, Z1_PREVIEW_SPEED=3.4
+    private func applyPreviewStatus() {
+        let env = ProcessInfo.processInfo.environment
+        var s = Z1Treadmill.Status()
+        s.deviceName = "KS-ST-Z1"
+        switch env["Z1_PREVIEW_PHASE"] ?? "ready" {
+        case "scanning": s.phase = .scanning
+        case "disconnected": s.phase = .disconnected
+        default: s.phase = .ready
+        }
+        let speed = Double(env["Z1_PREVIEW_SPEED"] ?? "") ?? 0
+        if s.phase == .ready {
+            s.hasTelemetry = true
+            s.speedKmh = speed
+            s.beltRunning = speed > 0
+            if speed > 0 {
+                s.elapsedS = 1_934
+                s.distanceM = 1_812
+                s.steps = 3_120
+                s.caloriesKcal = 96
+                s.impliedStrideM = 0.58
+            }
+        }
+        status = s
     }
 
     func applyHealthWeightIfAvailable() {
@@ -552,6 +600,14 @@ final class TreadmillViewModel: ObservableObject {
     private func receiveStatus(_ newStatus: Z1Treadmill.Status) {
         let previousPhase = status.phase
         status = newStatus
+        stepSmoother.speedKmh = newStatus.speedKmh
+        stepSmoother.strideM = newStatus.impliedStrideM
+            ?? GaitModel.stepLengthM(speedKmh: max(0.8, newStatus.speedKmh))
+        stepSmoother.ingest(reportedSteps: newStatus.steps, distanceM: newStatus.distanceM)
+        lastStepPacketAt = Date()
+        let packetDisplay = Int(stepSmoother.displaySteps.rounded(.down))
+        highestDisplayedSteps = max(highestDisplayedSteps, openWalk?.steps ?? 0, packetDisplay)
+        status.steps = highestDisplayedSteps
         if newStatus.phase != previousPhase {
             recordConnectionChange(newStatus)
             if newStatus.phase == .error {
@@ -570,7 +626,27 @@ final class TreadmillViewModel: ObservableObject {
         }
         guard newStatus.phase == .ready, newStatus.hasTelemetry else { return }
 
-        let observation = healthTracker.observe(newStatus)
+        let observation = healthTracker.observe(status)
+        persistHealthTracker()
+        logCompletedWalks(observation.completed)
+        scheduleHealthFinalization(deadline: observation.finalizationDeadline)
+    }
+
+    /// The pad's distance counter arrives in visible chunks. Fill the quiet
+    /// gaps with at most three modelled steps, then snap to the next real
+    /// packet. The same displayed value is sent to the open-walk tracker so
+    /// the top and Today cards tick together.
+    private func tickLiveSteps() {
+        guard status.phase == .ready, status.hasTelemetry,
+              status.speedKmh > 0.3 || status.beltRunning
+        else { return }
+        stepSmoother.interpolate(secondsSincePacket: Date().timeIntervalSince(lastStepPacketAt))
+        let candidate = Int(stepSmoother.displaySteps.rounded(.down))
+        highestDisplayedSteps = max(highestDisplayedSteps, candidate)
+        let displayed = highestDisplayedSteps
+        guard displayed != status.steps else { return }
+        status.steps = displayed
+        let observation = healthTracker.observe(status)
         persistHealthTracker()
         logCompletedWalks(observation.completed)
         scheduleHealthFinalization(deadline: observation.finalizationDeadline)
@@ -855,14 +931,7 @@ final class TreadmillViewModel: ObservableObject {
                     )
                 )
             } ?? false
-            totals.activeDurationS += open.activeDurationS
-            totals.distanceM += open.distanceM
-            totals.steps += GaitModel.steps(
-                distanceM: open.distanceM,
-                durationS: open.activeDurationS
-            )
-            totals.caloriesKcal += Z1Metrics.kcalPerMinute(open.avgSpeedKmh, weightKg: weightKg)
-                * Double(open.activeDurationS) / 60
+            totals.addOpenWalk(open, weightKg: weightKg)
             if !sameWalk { totals.walks += 1 }
         }
         return totals

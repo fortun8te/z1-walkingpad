@@ -742,17 +742,21 @@ public actor Z1Treadmill {
         let savedDistance = state["distanceM"] as? Int ?? 0
         let curElapsed = telemetry.elapsedS ?? 0
         let curDistance = telemetry.distanceM ?? 0
-        statOffsets.elapsed = state["offsetElapsed"] as? Int ?? statOffsets.elapsed
-        statOffsets.distance = state["offsetDistance"] as? Int ?? statOffsets.distance
-        calorieTracker.totalKcal = state["totalKcal"] as? Double ?? calorieTracker.totalKcal
-        if curElapsed < savedElapsed || curDistance < savedDistance {
-            // Pad reset while this walk is still the same walk.
-            statOffsets.elapsed += savedElapsed
-            statOffsets.distance += savedDistance
-            return
-        }
-        let gapS = curElapsed - savedElapsed
-        let gapD = curDistance - savedDistance
+        let plan = CounterRestorePlan.make(
+            persistStats: persistStats,
+            savedElapsed: savedElapsed,
+            savedDistance: savedDistance,
+            savedOffsetElapsed: state["offsetElapsed"] as? Int ?? 0,
+            savedOffsetDistance: state["offsetDistance"] as? Int ?? 0,
+            savedKcal: state["totalKcal"] as? Double ?? 0,
+            currentElapsed: curElapsed,
+            currentDistance: curDistance
+        )
+        statOffsets.elapsed = plan.offsetElapsed
+        statOffsets.distance = plan.offsetDistance
+        calorieTracker.totalKcal = plan.totalKcal
+        let gapS = plan.gapElapsed
+        let gapD = plan.gapDistance
         if gapS > 0, gapD > 0 {
             calorieTracker.addSample(speedKmh: Double(gapD) / Double(gapS) * 3.6, elapsedS: Double(gapS))
         }

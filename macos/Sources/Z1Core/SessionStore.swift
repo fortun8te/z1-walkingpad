@@ -64,6 +64,16 @@ public struct DayTotals: Equatable, Sendable, Identifiable {
         caloriesKcal += session.caloriesKcal
     }
 
+    /// Fold a still-open walk into today's history card without replacing
+    /// its live step estimate with a second calculation.
+    public mutating func addOpenWalk(_ walk: CompletedWalk, weightKg: Double) {
+        activeDurationS += walk.activeDurationS
+        distanceM += walk.distanceM
+        steps += walk.steps
+        caloriesKcal += Z1Metrics.kcalPerMinute(walk.avgSpeedKmh, weightKg: weightKg)
+            * Double(walk.activeDurationS) / 60
+    }
+
     public mutating func addDay(_ other: DayTotals) {
         walks += other.walks
         activeDurationS += other.activeDurationS

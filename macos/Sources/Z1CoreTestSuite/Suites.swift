@@ -238,6 +238,20 @@ public func stepSmootherTests(_ t: TestRunner) {
         // The old interpolator added expected steps on top of the packet
         // delta every second, so 10s of walking stored ~20 steps.
         t.check(clock.packetSteps < 15, "must not double-count interpolated ticks")
+
+        var monotonic = StepSmoother()
+        monotonic.speedKmh = 3.7
+        monotonic.strideM = 0.68
+        monotonic.ingest(reportedSteps: 4_489, distanceM: 2_900)
+        monotonic.interpolate(secondsSincePacket: 0.9)
+        let before = monotonic.displaySteps
+        // Recalculating the entire walk at a new speed used to report 4,317
+        // and visibly run the counter backwards.
+        monotonic.ingest(reportedSteps: 4_317, distanceM: 2_901)
+        t.check(monotonic.displaySteps >= before, "speed changes never make live steps go backwards")
+        let afterMetre = monotonic.displaySteps
+        monotonic.ingest(reportedSteps: 4_317, distanceM: 2_901)
+        t.check(monotonic.displaySteps >= afterMetre, "duplicate packets do not snap interpolated steps backwards")
     }
 }
 
@@ -354,6 +368,28 @@ public func automaticHealthExportTests(_ t: TestRunner) {
         )
         t.expectEqual(snap.openWalkTotals?.steps, 81, "open-walk steps follow the pad session count")
         t.check((snap.openWalkTotals?.steps ?? 0) < 150, "must not add the live counter on a 2-step dip")
+
+        // The estimated live count is recomputed when speed changes, so it
+        // can move by far more than the interpolator's 1-3 step snap. For a
+        // single pad-counter run, Today must still equal the live card.
+        var speedChange = RemoteSessionTracker()
+        _ = speedChange.observe(
+            status(running: true, elapsed: 3_000, distance: 2_900, steps: 4_489),
+            at: base,
+            newSessionID: { "speed-change-walk" }
+        )
+        _ = speedChange.observe(
+            status(running: true, elapsed: 3_001, distance: 2_901, steps: 4_317),
+            at: base.addingTimeInterval(1)
+        )
+        t.expectEqual(speedChange.openWalkTotals?.steps, 4_317, "one walk uses the same live step estimate in both cards")
+        if let open = speedChange.openWalkTotals {
+            var today = DayTotals(day: base)
+            today.addOpenWalk(open, weightKg: 74)
+            t.expectEqual(today.steps, 4_317, "Today card preserves the open walk step estimate")
+        } else {
+            t.check(false, "speed-change walk remains open")
+        }
 
         // Already-inflated tracker (from the old interpolator) heals on the
         // next live frame of the same walk.
@@ -695,6 +731,40 @@ public func treadmillMatchTests(_ t: TestRunner) {
     }
 }
 
+public func counterRestoreTests(_ t: TestRunner) {
+    t.suite("counter-restore") { t in
+        // Real failure shape from 2026-09-04: persistence was disabled, but
+        // 7.10 km of stale offsets turned a 2.45 km walk into 9.55 km.
+        let freshWalk = CounterRestorePlan.make(
+            persistStats: false,
+            savedElapsed: 2_645,
+            savedDistance: 2_450,
+            savedOffsetElapsed: 6_126,
+            savedOffsetDistance: 7_100,
+            savedKcal: 548.5,
+            currentElapsed: 2_645,
+            currentDistance: 2_450
+        )
+        t.expectEqual(freshWalk.offsetElapsed, 0, "non-persistent reconnect drops stale elapsed offset")
+        t.expectEqual(freshWalk.offsetDistance, 0, "non-persistent reconnect drops stale distance offset")
+        t.expectEqual(freshWalk.totalKcal, 0, accuracy: 0.001, "stale cross-session calories are dropped with stale offsets")
+
+        let continuingWalk = CounterRestorePlan.make(
+            persistStats: false,
+            savedElapsed: 600,
+            savedDistance: 500,
+            savedOffsetElapsed: 0,
+            savedOffsetDistance: 0,
+            savedKcal: 30,
+            currentElapsed: 660,
+            currentDistance: 550
+        )
+        t.expectEqual(continuingWalk.totalKcal, 30, accuracy: 0.001, "same counter run restores calories")
+        t.expectEqual(continuingWalk.gapElapsed, 60, "same counter run accounts for reconnect time")
+        t.expectEqual(continuingWalk.gapDistance, 50, "same counter run accounts for reconnect distance")
+    }
+}
+
 public func releaseDistTests(_ t: TestRunner) {
     t.suite("release-dist") { t in
         let tmp = FileManager.default.temporaryDirectory
@@ -761,6 +831,7 @@ public func runAllZ1CoreTests() -> Int32 {
     gaitModelTests(runner)
     stepSanityTests(runner)
     treadmillMatchTests(runner)
+    counterRestoreTests(runner)
     releaseDistTests(runner)
     updateFeedTests(runner)
     openMeteoTests(runner)

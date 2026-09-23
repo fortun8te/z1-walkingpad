@@ -169,12 +169,14 @@ public struct RemoteSessionTracker: Codable, Sendable {
                     current.steps = max(0, current.steps - (current.lastCounters.steps - counters.steps))
                 }
             }
-            // Heal a tracker that already swallowed interpolation snaps:
-            // live pad steps cannot be a fraction of the accumulated total
-            // while distance is still this same walk.
+            // While accumulated distance still matches the pad's current
+            // counter run, this is one uninterrupted walk. Its modelled step
+            // estimate can move up or down when speed changes, so Today must
+            // use the same live estimate instead of accumulating old models.
+            // Once the pad counter has reset, distance no longer matches and
+            // the earlier segment remains correctly accumulated.
             if counters.steps > 0,
-               current.steps > counters.steps * 2 + 20,
-               current.distanceM <= counters.distanceM + 20
+               abs(current.distanceM - counters.distanceM) <= 20
             {
                 current.steps = counters.steps
             }
