@@ -18,9 +18,6 @@ import json
 import sys
 from dataclasses import asdict, dataclass
 
-from bleak import BleakClient, BleakScanner
-from bleak.exc import BleakError
-
 sys.path.insert(0, "src")
 
 from z1_walkingpad_mcp import constants as c
@@ -85,6 +82,9 @@ def idle_gate_passed(
 
 
 async def find_device(name: str | None, timeout: float) -> object:
+    # Bluetooth is optional for importing the pure protocol helpers in tests.
+    from bleak import BleakScanner
+
     if name:
         device = await BleakScanner.find_device_by_name(name, timeout=timeout)
     else:
@@ -100,6 +100,9 @@ async def find_device(name: str | None, timeout: float) -> object:
 
 
 async def probe(name: str | None, scan_timeout: float, idle_guard_s: float) -> ProbeResult:
+    from bleak import BleakClient
+    from bleak.exc import BleakError
+
     device = await find_device(name, scan_timeout)
     motion_samples: list[float] = []
     moving = False

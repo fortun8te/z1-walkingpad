@@ -11,3 +11,23 @@ macos/Z1WalkingPad.app
 macos/Resources/AppIcon.iconset/
 macos/Resources/AppIcon-1024.png
 macos/.build/
+
+# Local experiments, device captures and private measurements are not source.
+/work/
+/research/
+/shortcuts/weight.json
+/health/
+/device-data/
+*.log
+
+# Runtime databases and credentials stay local.
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*.json

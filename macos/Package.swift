@@ -6,14 +6,14 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .library(name: "Z1Core", targets: ["Z1Core"]),
-        .executable(name: "Z1MenuBar", targets: ["Z1MenuBar"]),
+        .executable(name: "Z1App", targets: ["Z1App"]),
         .executable(name: "z1smoke", targets: ["Z1Smoke"]),
     ],
     targets: [
         .target(name: "Z1Core"),
         .target(name: "Z1CoreTestSuite", dependencies: ["Z1Core"]),
         .executableTarget(
-            name: "Z1MenuBar",
+            name: "Z1App",
             dependencies: ["Z1Core"],
             exclude: ["Z1WalkingPad.entitlements"]
         ),

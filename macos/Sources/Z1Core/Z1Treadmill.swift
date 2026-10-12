@@ -9,6 +9,7 @@ public enum Z1Error: Error, Equatable, LocalizedError {
     case controlPointTimeout
     case controlRefused(op: UInt8, result: UInt8)
     case speedOutOfRange(Double)
+    case invalidDeviceName
 
     public var errorDescription: String? {
         switch self {
@@ -26,6 +27,8 @@ public enum Z1Error: Error, Equatable, LocalizedError {
             "control point refused op \(String(format: "%02x", op)): \(Self.cpResultName(result))"
         case .speedOutOfRange(let kmh):
             "speed \(kmh) out of range"
+        case .invalidDeviceName:
+            "pad name is too short to derive its unlock code"
         }
     }
 
@@ -88,10 +91,15 @@ public actor Z1Treadmill {
         public var phase: Phase = .disconnected
         public var deviceName: String?
         public var beltRunning = false
+        /// Stop was accepted; await device telemetry/status before claiming stopped.
+        public var stopRequested = false
         public var speedKmh = 0.0
         public var distanceM = 0
         public var elapsedS = 0
         public var steps = 0
+        /// Raw counter reported by the pad, when available. `steps` is the
+        /// labelled gait-model estimate used by the display.
+        public var padSteps: Int?
         /// Metres per step implied by the live numbers, once meaningful.
         public var impliedStrideM: Double?
         public var caloriesKcal = 0.0
@@ -108,7 +116,7 @@ public actor Z1Treadmill {
     public nonisolated let statusUpdates: AsyncStream<Status>
     private let statusYield: AsyncStream<Status>.Continuation
 
-    private let transport = BLETransport()
+    private nonisolated let transport: any Z1PadTransport
     private var notifyPump: Task<Void, Never>?
 
     private var telemetry = Z1Protocol.TreadmillData()
@@ -123,8 +131,8 @@ public actor Z1Treadmill {
     private var calorieTracker = CalorieTracker()
     private var statOffsets = (elapsed: 0, distance: 0, steps: 0)
     public private(set) var persistStats = false
-    private var stepEstimator = StepEstimator()
-    private var stepSession = StepSession()
+    // Kept for source compatibility. The obsolete per-packet estimator is no
+    // longer run; the UI uses `stepsDisplay` from belt distance.
     public private(set) var lastStepsDelta = 0.0
     public private(set) var lastStepSource = StepSource.unknown
 
@@ -195,13 +203,14 @@ public actor Z1Treadmill {
 
     private typealias VendorWaiter = (waiter: Waiter<Frame>, pred: @Sendable (Frame) -> Bool)
     private var vendorWaiters: [VendorWaiter] = []
-    private var cpWaiters: [Waiter<Data>] = []
+    private var cpWaiters: [(opcode: UInt8, waiter: Waiter<Data>)] = []
 
-    public init(weightKg: Double = Z1Metrics.defaultWeightKg) {
+    public init(weightKg: Double = Z1Metrics.defaultWeightKg, transport: (any Z1PadTransport)? = nil) {
         var cont: AsyncStream<Status>.Continuation!
         statusUpdates = AsyncStream { cont = $0 }
         statusYield = cont
         calorieTracker = CalorieTracker(weightKg: weightKg)
+        self.transport = transport ?? BLETransport()
     }
 
     private var pumpStarted = false
@@ -277,6 +286,7 @@ public actor Z1Treadmill {
                 && transport.hasCharacteristic(Z1Constants.charSupplementNotify)
             unlocked = false
             if usesVendor {
+                guard name.utf8.count >= 4 else { throw Z1Error.invalidDeviceName }
                 try await transport.setNotify(Z1Constants.charSupplementNotify, enable: true)
                 _ = try await vendorRoundtrip(
                     Z1Protocol.unlockFrame(deviceName: name),
@@ -317,7 +327,13 @@ public actor Z1Treadmill {
             mutate { $0.phase = .ready }
         } catch {
             unlocked = false
+            // Cleanup may deliver didDisconnect. Mark it expected before
+            // cancelling so the original failure remains visible.
+            expectingDisconnect = true
             await transport.disconnect()
+            expectingDisconnect = false
+            resetConnectionState()
+            failAllWaiters(error)
             mutate {
                 $0.phase = .error
                 $0.errorMessage = error.localizedDescription
@@ -337,6 +353,7 @@ public actor Z1Treadmill {
         persistCalorieState(force: true)
         expectingDisconnect = true
         await transport.disconnect()
+        expectingDisconnect = false
         resetConnectionState()
         mutate { $0.phase = .disconnected }
     }
@@ -356,6 +373,7 @@ public actor Z1Treadmill {
     }
 
     private func resetConnectionState() {
+        controlCommandEpoch += 1
         unlocked = false
         usesVendor = false
         hasControl = false
@@ -364,15 +382,21 @@ public actor Z1Treadmill {
         telemetry = Z1Protocol.TreadmillData()
         calorieStateRestored = false
         lastTelemetryInstant = nil
-        stepSession = StepSession()
-        mutate { $0.beltRunning = false }
+        mutate {
+            $0.beltRunning = false
+            $0.stopRequested = false
+            $0.speedKmh = 0
+            $0.hasTelemetry = false
+        }
     }
 
     // MARK: - public control API
 
     public func start() async throws {
+        let epoch = controlCommandEpoch
         try requireReady()
         try await ensureControl()
+        guard epoch == controlCommandEpoch else { throw CancellationError() }
         // Skip only when the pad itself is already moving. Do not use last
         // reported speed: FTMS packets often omit the speed field, and we
         // then keep the previous value — a leftover 3 km/h after Stop made
@@ -382,15 +406,17 @@ public actor Z1Treadmill {
                 statOffsets = (elapsed: 0, distance: 0, steps: 0)
                 calorieTracker.reset()
             }
-            try await controlCommand(Data([Z1Constants.opStartOrResume]), tunnelOp: 0x07)
+            try await controlCommand(Data([Z1Constants.opStartOrResume]), tunnelOp: 0x07, intentEpoch: epoch)
         }
+        guard epoch == controlCommandEpoch else { throw CancellationError() }
         lastTargetSpeed = nil // belt restarts at minimum speed
         startHoldUntil = ContinuousClock.now + .seconds(5)
-        mutate { $0.beltRunning = true }
+        mutate { $0.beltRunning = true; $0.stopRequested = false }
     }
 
     @discardableResult
     public func stop() async throws -> SessionSummary {
+        controlCommandEpoch += 1
         try requireReady()
         try await ensureControl()
         // summary first: the pad resets its counters when Stop lands
@@ -398,24 +424,27 @@ public actor Z1Treadmill {
         try await controlCommand(
             Data([Z1Constants.opStopOrPause, Z1Constants.stopParamStop]), tunnelOp: 0x08, tunnelParams: Data([0x01])
         )
-        telemetry.speedKmh = 0
         startHoldUntil = nil
-        mutate { $0.beltRunning = false }
+        mutate { $0.stopRequested = $0.beltRunning }
         return summary
     }
 
     public func pause() async throws {
+        controlCommandEpoch += 1
         try requireReady()
         try await ensureControl()
         try await controlCommand(
             Data([Z1Constants.opStopOrPause, Z1Constants.stopParamPause]), tunnelOp: 0x08, tunnelParams: Data([0x02])
         )
-        telemetry.speedKmh = 0
         startHoldUntil = nil
-        mutate { $0.beltRunning = false }
+        mutate { $0.stopRequested = $0.beltRunning }
     }
 
+    private var controlCommandEpoch = 0
+
     public func setSpeed(_ kmh: Double) async throws {
+        try Task.checkCancellation()
+        let epoch = controlCommandEpoch
         try requireReady()
         guard kmh >= status.minSpeedKmh, kmh <= status.maxSpeedKmh else {
             throw Z1Error.speedOutOfRange(kmh)
@@ -423,7 +452,9 @@ public actor Z1Treadmill {
         try await ensureControl()
         let value = UInt16((kmh * 100).rounded())
         let params = Data([UInt8(value & 0xFF), UInt8(value >> 8)])
-        try await controlCommand(Data([Z1Constants.opSetTargetSpeed]) + params, tunnelOp: 0x02, tunnelParams: params)
+        guard epoch == controlCommandEpoch else { throw CancellationError() }
+        try await controlCommand(Data([Z1Constants.opSetTargetSpeed]) + params, tunnelOp: 0x02, tunnelParams: params, intentEpoch: epoch)
+        guard epoch == controlCommandEpoch else { throw CancellationError() }
         lastTargetSpeed = kmh
     }
 
@@ -550,8 +581,11 @@ public actor Z1Treadmill {
                 w.waiter.cont.resume(returning: frame)
             }
         case Z1Constants.charControlPoint.uuidString:
-            if !cpWaiters.isEmpty {
-                let w = cpWaiters.removeFirst()
+            // FTMS response = 0x80, request opcode, result. Late replies to
+            // timed-out commands must not complete a different command.
+            if data.count >= 3, data[data.startIndex] == 0x80,
+               let i = cpWaiters.firstIndex(where: { $0.opcode == data[data.startIndex + 1] }) {
+                let w = cpWaiters.remove(at: i).waiter
                 w.timeout?.cancel()
                 w.cont.resume(returning: data)
             }
@@ -568,7 +602,7 @@ public actor Z1Treadmill {
             case 1, 2:
                 startHoldUntil = nil
                 telemetry.speedKmh = 0
-                mutate { $0.beltRunning = false } // safety-key / user stop or pause
+                mutate { $0.beltRunning = false; $0.speedKmh = 0; $0.stopRequested = false } // device confirms stop
             default: break
             }
         default:
@@ -580,6 +614,7 @@ public actor Z1Treadmill {
         let telemetryNow = ContinuousClock.now
         let prev = telemetry
         var parsed = Z1Protocol.parseTreadmillData(data)
+        if !usesVendor { parsed.steps = nil } // bit 13 is KingSmith-specific
         // FTMS packets may omit counters. Preserve their last values rather
         // than treating omission as zero and later adding the whole session.
         if parsed.speedKmh == nil { parsed.speedKmh = prev.speedKmh }
@@ -595,23 +630,10 @@ public actor Z1Treadmill {
         }
         if parsed.calories == nil { parsed.calories = prev.calories }
         telemetry = parsed
-        _ = stepSession.ingest(
-            pad: telemetry.steps ?? 0,
-            previousPad: prev.steps,
-            elapsedReset: elapsedReset,
-            distanceReset: distanceReset,
-            distanceM: telemetry.distanceM ?? 0,
-            lastGoodStrideM: UserDefaults.standard.object(forKey: "z1.lastGoodStrideM") as? Double
-        )
-        if let implied = impliedStrideM, (0.35...0.85).contains(implied) {
-            UserDefaults.standard.set(implied, forKey: "z1.lastGoodStrideM")
-        }
-
         if !calorieStateRestored {
             calorieStateRestored = true
             restoreCalorieState()
         }
-        let firstCounters = prev.distanceM == nil || prev.steps == nil
         // pad counter reset (Stop finalizes the pad session, or the pad's
         // own timer). Default: the pad is the master — stats follow it down.
         // With persistStats on: fold the final values into the offsets and
@@ -620,22 +642,21 @@ public actor Z1Treadmill {
             || (prev.distanceM != nil && telemetry.distanceM! < prev.distanceM!)
             || (prev.steps != nil && telemetry.steps! < prev.steps!)
         if regressed {
-            // Disconnect / pad counter reset is not a new walk. Carry the
-            // previous totals; calories stay. User Start on a stopped belt
-            // is what zeros this.
-            statOffsets.elapsed += prev.elapsedS ?? 0
-            statOffsets.distance += prev.distanceM ?? 0
-            statOffsets.steps += stepSession.display(pad: prev.steps ?? 0)
+            // Accumulation is explicit. Otherwise follow the pad's new run;
+            // the session tracker handles a short pause separately.
+            if persistStats {
+                statOffsets.elapsed += prev.elapsedS ?? 0
+                statOffsets.distance += prev.distanceM ?? 0
+                statOffsets.steps += prev.steps ?? 0
+            } else {
+                statOffsets = (elapsed: 0, distance: 0, steps: 0)
+                calorieTracker.reset()
+            }
             lastStepsDelta = 0
             lastStepSource = .unknown
         } else {
-            let result = stepEstimator.feed(
-                previous: prev,
-                current: telemetry,
-                intervalSpeedKmh: prev.speedKmh
-            )
-            lastStepsDelta = firstCounters ? 0 : result.delta
-            lastStepSource = result.source
+            lastStepsDelta = 0
+            lastStepSource = .unknown
         }
         // Credit only normal live telemetry intervals. A long gap is a pause
         // or disconnect, not many minutes of walking at the last known speed.
@@ -686,10 +707,12 @@ public actor Z1Treadmill {
         // Flushed deliberately: this is only worth anything on the *next*
         // launch, and an unsynchronised write is lost if the process is killed
         // rather than quit — which is precisely when you want the fast path.
+        UserDefaults.standard.synchronize()
     }
 
     private func forgetPeripheral() {
         UserDefaults.standard.removeObject(forKey: Self.knownPeripheralKey)
+        UserDefaults.standard.synchronize()
     }
 
     /// Drop the BLE link immediately, without awaiting anything. For process
@@ -715,25 +738,6 @@ public actor Z1Treadmill {
             ],
             forKey: Self.calorieStateKey
         )
-        persistLiveSnapshot()
-    }
-
-    /// Tiny file the MCP reads. No BLE in the agent.
-    private func persistLiveSnapshot() {
-        let url = SessionStore.defaultURL()
-            .deletingLastPathComponent()
-            .appendingPathComponent("live.json")
-        let obj: [String: Any] = [
-            "kmh": telemetry.speedKmh ?? 0,
-            "on": status.beltRunning,
-            "m": displayStat(telemetry.distanceM, statOffsets.distance),
-            "s": displayStat(telemetry.elapsedS, statOffsets.elapsed),
-            "steps": stepsDisplay,
-            "kcal": (calorieTracker.totalKcal * 10).rounded() / 10,
-            "t": Int(Date().timeIntervalSince1970),
-        ]
-        guard let data = try? JSONSerialization.data(withJSONObject: obj) else { return }
-        try? data.write(to: url, options: .atomic)
     }
 
     private func restoreCalorieState() {
@@ -742,17 +746,21 @@ public actor Z1Treadmill {
         let savedDistance = state["distanceM"] as? Int ?? 0
         let curElapsed = telemetry.elapsedS ?? 0
         let curDistance = telemetry.distanceM ?? 0
-        statOffsets.elapsed = state["offsetElapsed"] as? Int ?? statOffsets.elapsed
-        statOffsets.distance = state["offsetDistance"] as? Int ?? statOffsets.distance
-        calorieTracker.totalKcal = state["totalKcal"] as? Double ?? calorieTracker.totalKcal
-        if curElapsed < savedElapsed || curDistance < savedDistance {
-            // Pad reset while this walk is still the same walk.
-            statOffsets.elapsed += savedElapsed
-            statOffsets.distance += savedDistance
-            return
-        }
-        let gapS = curElapsed - savedElapsed
-        let gapD = curDistance - savedDistance
+        let plan = CounterRestorePlan.make(
+            persistStats: persistStats,
+            savedElapsed: savedElapsed,
+            savedDistance: savedDistance,
+            savedOffsetElapsed: state["offsetElapsed"] as? Int ?? 0,
+            savedOffsetDistance: state["offsetDistance"] as? Int ?? 0,
+            savedKcal: state["totalKcal"] as? Double ?? 0,
+            currentElapsed: curElapsed,
+            currentDistance: curDistance
+        )
+        statOffsets.elapsed = plan.offsetElapsed
+        statOffsets.distance = plan.offsetDistance
+        calorieTracker.totalKcal = plan.totalKcal
+        let gapS = plan.gapElapsed
+        let gapD = plan.gapDistance
         if gapS > 0, gapD > 0 {
             calorieTracker.addSample(speedKmh: Double(gapD) / Double(gapS) * 3.6, elapsedS: Double(gapS))
         }
@@ -767,12 +775,14 @@ public actor Z1Treadmill {
         // hold beltRunning for 5s after Start so omitted-speed telemetry can't flip button back
         let holding = startHoldUntil.map { ContinuousClock.now < $0 } ?? false
         s.beltRunning = moving || holding
+        if !s.beltRunning { s.stopRequested = false }
         s.distanceM = displayStat(telemetry.distanceM, statOffsets.distance)
         s.elapsedS = displayStat(telemetry.elapsedS, statOffsets.elapsed)
         s.steps = stepsDisplay
+        s.padSteps = telemetry.steps
         s.impliedStrideM = impliedStrideM
         s.caloriesKcal = calorieTracker.totalKcal
-        s.hasTelemetry = true
+        s.hasTelemetry = lastTelemetryInstant != nil
         // perf: skip duplicate yields (telemetry may re-emit same values)
         if let last = lastEmittedStatus, last == s { return }
         lastEmittedStatus = s
@@ -791,8 +801,10 @@ public actor Z1Treadmill {
     private func vendorRoundtrip(
         _ frame: Data,
         pred: @escaping @Sendable (Frame) -> Bool,
-        timeout: TimeInterval = Z1Constants.vendorResponseTimeout
+        timeout: TimeInterval = Z1Constants.vendorResponseTimeout,
+        intentEpoch: Int? = nil
     ) async throws -> Frame {
+        if let intentEpoch, intentEpoch != controlCommandEpoch { throw CancellationError() }
         let id = UUID()
         return try await withCheckedThrowingContinuation { cont in
             var waiter = Waiter<Frame>(id: id, cont: cont)
@@ -805,6 +817,7 @@ public actor Z1Treadmill {
             Task {
                 do {
                     await paceVendor()
+                    if let intentEpoch, intentEpoch != controlCommandEpoch { throw CancellationError() }
                     try await transport.write(Z1Constants.charSupplementWrite, frame, withResponse: false)
                 } catch {
                     failVendorWaiter(id, error)
@@ -828,7 +841,9 @@ public actor Z1Treadmill {
 
     // MARK: - FTMS control point
 
-    private func cpCommand(_ cmd: Data) async throws -> Data {
+    private func cpCommand(_ cmd: Data, intentEpoch: Int? = nil) async throws -> Data {
+        try Task.checkCancellation()
+        if let intentEpoch, intentEpoch != controlCommandEpoch { throw CancellationError() }
         let id = UUID()
         let resp = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data, Error>) in
             var waiter = Waiter<Data>(id: id, cont: cont)
@@ -837,10 +852,11 @@ public actor Z1Treadmill {
                 guard !Task.isCancelled, let self else { return }
                 await self.timeoutCPWaiter(id)
             }
-            cpWaiters.append(waiter)
+            cpWaiters.append((cmd[cmd.startIndex], waiter))
             Task {
                 do {
                     await paceControl()
+                    if let intentEpoch, intentEpoch != controlCommandEpoch { throw CancellationError() }
                     try await transport.write(Z1Constants.charControlPoint, cmd, withResponse: true)
                 } catch {
                     failCPWaiter(id, error)
@@ -861,10 +877,11 @@ public actor Z1Treadmill {
     /// 0x77 vendor control tunnel — fallback when the control point refuses
     /// (the pad sometimes transiently answers result 4 after a session; the
     /// tunnel is the documented alternate path, see docs/protocol.md).
-    private func vendorControl(_ op: UInt8, params: Data = Data()) async throws {
+    private func vendorControl(_ op: UInt8, params: Data = Data(), intentEpoch: Int? = nil) async throws {
         let reply = try await vendorRoundtrip(
             Z1Protocol.buildFrame(cmd0: 0x77, cmd1: 0x01, data: Data([op]) + params),
-            pred: { $0.cmd0 == 0x77 && $0.cmd1 == 0x81 && $0.data.first == op }
+            pred: { $0.cmd0 == 0x77 && $0.cmd1 == 0x81 && $0.data.first == op },
+            intentEpoch: intentEpoch
         )
         let status = reply.data.count >= 2 ? reply.data[reply.data.startIndex + 1] : 0xFF
         guard status == 0 || status == 0x81 else {
@@ -874,16 +891,17 @@ public actor Z1Treadmill {
 
     /// Send a control command, retrying once after a transient refusal
     /// (result 4), then falling back to the 0x77 vendor tunnel.
-    private func controlCommand(_ cpBytes: Data, tunnelOp: UInt8, tunnelParams: Data = Data()) async throws {
+    private func controlCommand(_ cpBytes: Data, tunnelOp: UInt8, tunnelParams: Data = Data(), intentEpoch: Int? = nil) async throws {
         do {
-            _ = try await cpCommand(cpBytes)
+            _ = try await cpCommand(cpBytes, intentEpoch: intentEpoch)
         } catch Z1Error.controlRefused(_, 4) {
             try await Task.sleep(for: .seconds(3))
             do {
-                _ = try await cpCommand(cpBytes)
+                _ = try await cpCommand(cpBytes, intentEpoch: intentEpoch)
             } catch Z1Error.controlRefused(_, 4) {
+                if let intentEpoch, intentEpoch != controlCommandEpoch { throw CancellationError() }
                 if usesVendor {
-                    try await vendorControl(tunnelOp, params: tunnelParams)
+                    try await vendorControl(tunnelOp, params: tunnelParams, intentEpoch: intentEpoch)
                 } else {
                     throw Z1Error.controlRefused(op: tunnelOp, result: 4)
                 }
@@ -892,14 +910,15 @@ public actor Z1Treadmill {
     }
 
     private func timeoutCPWaiter(_ id: UUID) {
-        guard let i = cpWaiters.firstIndex(where: { $0.id == id }) else { return }
-        let w = cpWaiters.remove(at: i)
+        guard let i = cpWaiters.firstIndex(where: { $0.waiter.id == id }) else { return }
+        let w = cpWaiters.remove(at: i).waiter
+        w.timeout?.cancel()
         w.cont.resume(throwing: Z1Error.controlPointTimeout)
     }
 
     private func failCPWaiter(_ id: UUID, _ error: Error) {
-        guard let i = cpWaiters.firstIndex(where: { $0.id == id }) else { return }
-        let w = cpWaiters.remove(at: i)
+        guard let i = cpWaiters.firstIndex(where: { $0.waiter.id == id }) else { return }
+        let w = cpWaiters.remove(at: i).waiter
         w.timeout?.cancel()
         w.cont.resume(throwing: error)
     }
@@ -920,7 +939,7 @@ public actor Z1Treadmill {
         }
         let cps = cpWaiters
         cpWaiters.removeAll()
-        for w in cps {
+        for (_, w) in cps {
             w.timeout?.cancel()
             w.cont.resume(throwing: error)
         }

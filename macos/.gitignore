@@ -1,2 +1,4 @@
 .build/
 Z1WalkingPad.app/
+.build-*/
+dist/

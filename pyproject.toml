@@ -1,18 +1,18 @@
 [project]
 name = "z1-walkingpad-mcp"
 version = "0.1.0"
-description = "BLE control and MCP server for the KingSmith WalkingPad Z1 treadmill (FTMS protocol)"
+description = "Read-only local stats MCP for the Z1 WalkingPad macOS app"
 requires-python = ">=3.10"
 dependencies = [
-    "bleak>=0.22",
+    "mcp>=1.0",
 ]
 
 [project.optional-dependencies]
-mcp = ["mcp>=1.0"]
+mcp = []  # Compatibility extra; MCP is required by the read-only package.
 dev = ["pytest", "ruff"]
 
 [project.scripts]
-z1-walkingpad = "z1_walkingpad_mcp.cli:run"
+z1-walkingpad = "z1_walkingpad_mcp.server:run"
 z1-walkingpad-mcp = "z1_walkingpad_mcp.server:run"
 
 [build-system]
@@ -21,3 +21,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/z1_walkingpad_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+norecursedirs = ["docs/legacy-python-tests", "scripts", ".git", ".venv", "macos", "work"]

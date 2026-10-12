@@ -1,5 +1,10 @@
 # Strava → Apple Health pipeline
 
+> Archived design notes. The Strava Python uploader and `treadmill_stop`
+> control tool were removed from this rebuild. The current Health route is the
+> [single-file Shortcuts queue](apple-health.md). The commands below no longer
+> run; they are retained only to explain the former integration.
+
 The most automatic Apple Health route from a Mac: `treadmill_stop` uploads
 each session to Strava as a Walk activity, and the Strava iOS app syncs it
 into Apple Health natively (activity type, distance, time, calories —
