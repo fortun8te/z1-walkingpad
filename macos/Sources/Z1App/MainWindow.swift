@@ -26,6 +26,12 @@ final class MainWindow: NSObject, NSWindowDelegate {
         if window.contentView is NSHostingView<RootView> == false {
             install(in: window)
         }
+        // The harness shows the window without taking focus, so typing in
+        // another app never lands in it.
+        if TreadmillViewModel.isPreview {
+            window.orderFrontRegardless()
+            return
+        }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate()
     }

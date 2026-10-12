@@ -9,6 +9,7 @@ import Z1Core
 /// Environment:
 /// - `Z1_PREVIEW_PHASE` ready | scanning | disconnected
 /// - `Z1_PREVIEW_SPEED` belt speed in km/h; above 0 means walking
+/// - `Z1_PREVIEW_QUEUED` a speed (km/h) queued for Start at a standstill
 /// - `Z1_PREVIEW_PAGE` now | history | records | settings
 /// - `Z1_PREVIEW_LENS` day | week | month
 /// - `Z1_PREVIEW_DEMO=1` five weeks of plausible walks (otherwise empty)
@@ -102,6 +103,7 @@ enum PreviewHarness {
             }
         }
         model.setStatus(s)
+        if let queued = Double(env["Z1_PREVIEW_QUEUED"] ?? "") { model.previewQueueSpeed(queued) }
         guard env["Z1_PREVIEW_TICK"] == "1", s.beltRunning else { return }
         var distance = Double(s.distanceM)
         let timer = Timer(timeInterval: 1, repeats: true) { _ in

@@ -58,7 +58,7 @@ final class TreadmillViewModel {
     var weightKg: Double {
         didSet {
             UserDefaults.standard.set(weightKg, forKey: Self.weightKey)
-            Task { await treadmill.setWeight(weightKg) }
+            if canCommand { Task { await treadmill.setWeight(weightKg) } }
             recomputeToday()
         }
     }
@@ -68,7 +68,7 @@ final class TreadmillViewModel {
     var unitsImperial: Bool {
         didSet {
             UserDefaults.standard.set(unitsImperial, forKey: Self.unitsKey)
-            Task { try? await treadmill.setDisplayUnits(imperial: unitsImperial) }
+            if canCommand { Task { try? await treadmill.setDisplayUnits(imperial: unitsImperial) } }
         }
     }
 
@@ -81,7 +81,7 @@ final class TreadmillViewModel {
     var strideOverrideM: Double {
         didSet {
             UserDefaults.standard.set(strideOverrideM, forKey: Self.strideKey)
-            Task { await treadmill.setStrideOverride(strideOverrideM > 0 ? strideOverrideM : nil) }
+            if canCommand { Task { await treadmill.setStrideOverride(strideOverrideM > 0 ? strideOverrideM : nil) } }
         }
     }
 
@@ -89,7 +89,7 @@ final class TreadmillViewModel {
     var persistStats: Bool {
         didSet {
             UserDefaults.standard.set(persistStats, forKey: Self.persistKey)
-            Task { await treadmill.setPersistStats(persistStats) }
+            if canCommand { Task { await treadmill.setPersistStats(persistStats) } }
         }
     }
 
@@ -337,8 +337,12 @@ final class TreadmillViewModel {
 
     // MARK: - actions
 
+    /// The harness has no pad: actions are inert there, and touching
+    /// `treadmill` would create a Bluetooth central.
+    private var canCommand: Bool { !Self.isPreview }
+
     func connectTapped() {
-        guard !busy else { return }
+        guard canCommand, !busy else { return }
         run {
             if self.isConnected {
                 self.automaticConnectionEnabled = false
@@ -359,7 +363,7 @@ final class TreadmillViewModel {
     }
 
     func startStopTapped() {
-        guard !busy, isConnected else { return }
+        guard canCommand, !busy, isConnected else { return }
         // Latch the intent at tap. Re-reading beltRunning inside `run` races
         // telemetry: a leftover speed from the last walk made Start send Stop.
         let stopping = status.beltRunning
@@ -385,7 +389,7 @@ final class TreadmillViewModel {
     /// The pad only accepts speed changes while the belt moves, so a value
     /// picked at a standstill is remembered and applied right after Start.
     func setSpeed(_ displayValue: Double) {
-        guard isConnected else { return }
+        guard canCommand, isConnected else { return }
         let kmh = unitsImperial ? Z1Units.mphToKmh(displayValue) : displayValue
         let clamped = (min(max(kmh, status.minSpeedKmh), status.maxSpeedKmh) * 10).rounded() / 10
         guard status.beltRunning else {
@@ -420,14 +424,45 @@ final class TreadmillViewModel {
         return unitsImperial ? Z1Units.kmhToMph(pendingTargetKmh) : pendingTargetKmh
     }
 
-    func speedUpTapped() {
-        guard isConnected, status.beltRunning else { return }
-        enqueueSpeedChange(deltaKmh: speedStepKmh)
+    func speedUpTapped() { nudge(byKmh: speedStepKmh) }
+    func speedDownTapped() { nudge(byKmh: -speedStepKmh) }
+
+    /// ↑ / ↓: half a unit at a time.
+    func bigSpeedUpTapped() { nudge(byKmh: halfUnitKmh) }
+    func bigSpeedDownTapped() { nudge(byKmh: -halfUnitKmh) }
+
+    private var halfUnitKmh: Double { unitsImperial ? Z1Units.mphToKmh(0.5) : 0.5 }
+
+    /// While walking a nudge goes to the pad; at a standstill it moves the
+    /// speed the next Start will use, so the speed can be set before walking.
+    private func nudge(byKmh delta: Double) {
+        guard canCommand, isConnected else { return }
+        if status.beltRunning {
+            enqueueSpeedChange(deltaKmh: delta)
+            return
+        }
+        let base = pendingTargetKmh ?? status.minSpeedKmh
+        let next = (min(max(base + delta, status.minSpeedKmh), status.maxSpeedKmh) * 10).rounded() / 10
+        if pendingTargetKmh != next { pendingTargetKmh = next }
     }
 
-    func speedDownTapped() {
-        guard isConnected, status.beltRunning else { return }
-        enqueueSpeedChange(deltaKmh: -speedStepKmh)
+    /// Harness only: a speed queued for Start, to show the standstill flow.
+    func previewQueueSpeed(_ kmh: Double) {
+        guard Self.isPreview else { return }
+        pendingTargetKmh = kmh
+    }
+
+    /// One-click speeds in the display unit, inside the pad's range.
+    var speedPresets: [Double] {
+        let values = unitsImperial ? [1.5, 2.0, 2.5, 3.0, 3.5] : [2.5, 3.0, 3.5, 4.0, 4.5]
+        let range = speedRange
+        return values.filter { range.contains($0) }
+    }
+
+    /// The speed the readout should point at: the belt's while it moves, the
+    /// one queued for Start while it does not.
+    var targetDisplaySpeed: Double? {
+        live.beltRunning ? displaySpeed : pendingTargetDisplaySpeed
     }
 
     /// Rapid taps accumulate and go out once, 120 ms after the last.
@@ -450,6 +485,7 @@ final class TreadmillViewModel {
     }
 
     func clearStatsTapped() {
+        guard canCommand else { return }
         Task { await treadmill.clearStats() }
     }
 
@@ -571,8 +607,9 @@ final class TreadmillViewModel {
             persistHealthTracker()
             scheduleReconnect(after: newStatus.phase == .error ? 10 : 1)
         }
-        guard newStatus.phase == .ready, newStatus.hasTelemetry else { return }
-        observeWalk()
+        if newStatus.phase == .ready, newStatus.hasTelemetry {
+            observeWalk()
+        }
     }
 
     /// The one place a status frame lands: the logic copy, then the
@@ -756,18 +793,17 @@ final class TreadmillViewModel {
             }
             let kcal = Z1Metrics.kcalPerMinute(walk.avgSpeedKmh, weightKg: weightKg)
                 * Double(walk.activeDurationS) / 60
-            let added = sessionStore.append(
-                WalkSession(
-                    id: walk.id,
-                    startedAt: walk.startedAt,
-                    endedAt: walk.endedAt,
-                    activeDurationS: walk.activeDurationS,
-                    distanceM: walk.distanceM,
-                    steps: walk.steps,
-                    caloriesKcal: (kcal * 10).rounded() / 10,
-                    exportedToHealth: false
-                )
+            let session = WalkSession(
+                id: walk.id,
+                startedAt: walk.startedAt,
+                endedAt: walk.endedAt,
+                activeDurationS: walk.activeDurationS,
+                distanceM: walk.distanceM,
+                steps: walk.steps,
+                caloriesKcal: (kcal * 10).rounded() / 10,
+                exportedToHealth: false
             )
+            let added = sessionStore.append(session)
             healthTracker.acknowledgeLog(sessionID: walk.id)
             guard added, notificationsEnabled else { continue }
             let minutes = max(1, walk.activeDurationS / 60)

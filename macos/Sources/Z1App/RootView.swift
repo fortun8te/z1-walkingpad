@@ -45,7 +45,7 @@ final class Navigation {
 /// resizing, no slot that appears or disappears. The top line shares the
 /// transparent title bar with the traffic lights.
 struct RootView: View {
-    static let size = CGSize(width: 320, height: 568)
+    static let size = CGSize(width: 320, height: 476)
 
     let model: TreadmillViewModel
     let navigation: Navigation
@@ -183,11 +183,15 @@ private struct TabBar: View {
 
 // MARK: - Now
 
+/// What matters while walking, and nothing else: the speed, the control that
+/// sets it, Start/Stop, this walk's numbers, and today against the goal. The
+/// almanac lives on History.
 struct NowPage: View {
     let model: TreadmillViewModel
 
-    /// The speed the dial shows. Tracks the pad while untouched and stops
-    /// tracking while you drag or type, so telemetry cannot yank the control.
+    /// The speed the ruler shows. Tracks the pad (or the speed queued for
+    /// Start) while untouched, and stops tracking while you drag or type, so
+    /// telemetry cannot yank the control.
     @State private var speedDraft = 0.0
     @State private var isPickingSpeed = false
     @State private var isTypingSpeed = false
@@ -198,11 +202,12 @@ struct NowPage: View {
             hero
             primary
             LiveSlot(model: model)
-                .padding(.bottom, 4)
-            AlmanacCard(model: model)
+            TodayCard(model: model)
         }
+        .background { ArrowKeys(model: model) }
         .onAppear(perform: syncSpeedDraft)
         .onChange(of: model.displaySpeed) { _, _ in syncSpeedDraft() }
+        .onChange(of: model.pendingTargetKmh) { _, _ in syncSpeedDraft() }
         .onChange(of: model.unitsImperial) { _, _ in syncSpeedDraft() }
         .onChange(of: speedFieldFocused) { _, focused in
             // Clicking away mid-edit: drop the half-typed value and follow
@@ -218,16 +223,17 @@ struct NowPage: View {
     // MARK: hero
 
     private var hero: some View {
-        Card(padding: 14) {
+        Card(padding: 14, live: running) {
             VStack(spacing: 14) {
                 speedReadout
                     .frame(maxWidth: .infinity)
-                    .frame(height: 44)
-                HStack(spacing: 10) {
+                    .frame(height: 56)
+                HStack(alignment: .top, spacing: 10) {
                     IconButton(
                         symbol: "minus",
+                        size: 40,
                         enabled: nudgeEnabled,
-                        help: nudgeHelp,
+                        help: "Slower (← 0.1, ↓ 0.5)",
                         key: .leftArrow,
                         action: model.speedDownTapped
                     )
@@ -237,26 +243,31 @@ struct NowPage: View {
                         enabled: model.isConnected,
                         onEditingChanged: { isPickingSpeed = $0 },
                         onCommit: commitSpeedDraft,
-                        height: 28,
+                        height: 40,
                         live: running
                     )
                     IconButton(
                         symbol: "plus",
+                        size: 40,
                         enabled: nudgeEnabled,
-                        help: nudgeHelp,
+                        help: "Faster (→ 0.1, ↑ 0.5)",
                         key: .rightArrow,
                         action: model.speedUpTapped
                     )
                 }
-                .frame(height: 28)
+                SpeedPresets(
+                    values: model.speedPresets,
+                    current: model.targetDisplaySpeed,
+                    enabled: model.isConnected
+                ) { preset in
+                    speedDraft = preset
+                    model.setSpeed(preset)
+                }
             }
         }
     }
 
-    private var nudgeEnabled: Bool { running && !model.busy }
-    private var nudgeHelp: String {
-        running ? "Nudge the speed (← →)" : "The pad takes speed changes only while the belt moves"
-    }
+    private var nudgeEnabled: Bool { model.isConnected && !model.busy }
 
     @ViewBuilder
     private var speedReadout: some View {
@@ -264,10 +275,10 @@ struct NowPage: View {
             if isTypingSpeed {
                 TextField("", value: $speedDraft, format: .number.precision(.fractionLength(0...1)))
                     .textFieldStyle(.plain)
-                    .font(.system(size: 36, weight: .light).monospacedDigit())
+                    .font(.system(size: 44, weight: .light).monospacedDigit())
                     .multilineTextAlignment(.center)
                     .foregroundStyle(Theme.ink)
-                    .frame(width: 96, height: 44)
+                    .frame(width: 120, height: 56)
                     .focused($speedFieldFocused)
                     // Focus must be requested once the field exists.
                     .onAppear { speedFieldFocused = true }
@@ -282,8 +293,8 @@ struct NowPage: View {
             } else {
                 DotMatrixText(
                     text: String(format: "%.1f", isPickingSpeed ? speedDraft : model.displaySpeed),
-                    dot: 4.4,
-                    gap: 1.9,
+                    dot: 5.6,
+                    gap: 2.3,
                     lit: model.isConnected
                 )
                 .contentShape(.rect)
@@ -296,7 +307,7 @@ struct NowPage: View {
             Text(model.speedUnitLabel)
                 .font(Theme.caption)
                 .foregroundStyle(Theme.faint)
-                .padding(.bottom, 1)
+                .padding(.bottom, 2)
         }
     }
 
@@ -305,7 +316,7 @@ struct NowPage: View {
     /// One button, one verb. Disconnected it connects; connected it starts
     /// and stops. Space presses it.
     private var primary: some View {
-        PrimaryButton(title: primaryTitle, action: primaryAction)
+        PrimaryButton(title: primaryTitle, height: 44, action: primaryAction)
             .keyboardShortcut(.space, modifiers: [])
             .disabled(model.busy || model.isConnecting)
             .help(model.isConnected
@@ -332,10 +343,7 @@ struct NowPage: View {
 
     private func syncSpeedDraft() {
         guard !isPickingSpeed, !speedFieldFocused else { return }
-        let live = model.displaySpeed
-        speedDraft = live > 0
-            ? live
-            : (model.pendingTargetDisplaySpeed ?? model.speedRange.lowerBound)
+        speedDraft = model.targetDisplaySpeed ?? model.speedRange.lowerBound
     }
 
     /// The field flushes its text into the draft while it is torn down, so
@@ -352,6 +360,54 @@ struct NowPage: View {
         let clamped = min(max(speedDraft, range.lowerBound), range.upperBound)
         speedDraft = (clamped * 10).rounded() / 10
         model.setSpeed(speedDraft)
+    }
+}
+
+/// ↑ / ↓ move the speed half a unit. ← / → sit on the − / + buttons. These
+/// buttons have no size and no look; they only carry the shortcuts.
+private struct ArrowKeys: View {
+    let model: TreadmillViewModel
+
+    var body: some View {
+        ZStack {
+            Button("Faster by half", action: model.bigSpeedUpTapped)
+                .keyboardShortcut(.upArrow, modifiers: [])
+            Button("Slower by half", action: model.bigSpeedDownTapped)
+                .keyboardShortcut(.downArrow, modifiers: [])
+        }
+        .opacity(0)
+        .frame(width: 0, height: 0)
+        .accessibilityHidden(true)
+    }
+}
+
+// MARK: - Today
+
+/// Today against the goal: ticks, the number, and the distance. One line
+/// while walking is all the history the Now page needs.
+private struct TodayCard: View {
+    let model: TreadmillViewModel
+
+    var body: some View {
+        let today = model.today
+        Card {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("Today")
+                        .font(Theme.bodyMedium)
+                        .foregroundStyle(Theme.ink)
+                    Spacer(minLength: Theme.related)
+                    Text(model.goalText(for: today))
+                        .font(Theme.bodyMedium.monospacedDigit())
+                        .foregroundStyle(Theme.ink)
+                    Text("· \(model.formatDistance(today.distanceM))")
+                        .font(Theme.body.monospacedDigit())
+                        .foregroundStyle(Theme.dim)
+                }
+                TickLine(progress: model.goalProgress(for: today), tint: Theme.accent)
+                    .frame(height: 10)
+            }
+        }
     }
 }
 

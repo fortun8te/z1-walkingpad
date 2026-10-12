@@ -79,8 +79,10 @@ struct HistoryPage: View {
     var body: some View {
         let walks = model.recentWalks
         PageScaffold {
+            AlmanacCard(model: model)
             if walks.isEmpty {
                 Note(text: "No walks yet.")
+                    .padding(.top, 4)
             } else {
                 ForEach(groups(walks), id: \.day) { group in
                     GroupLabel(text: dayTitle(group.day))

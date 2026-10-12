@@ -3,13 +3,19 @@ import SwiftUI
 // The small component set: Card, PrimaryButton, SecondaryButtonStyle,
 // IconButton, StatusDot, StatCell, TickLine, ChipPicker, PillToggleStyle,
 // SettingRow, RowDivider, GroupLabel, FieldPlate. Each is drawn from `Theme`
-// and nothing else: flat fills, one hairline, no glass, no glow.
+// and nothing else: flat fills and one hairline. The only light is the
+// hero card edge-lit in blue while the belt moves.
 
 // MARK: - Card
 
 /// A surface one step off the ground, with one hairline.
+///
+/// `live` edge-lights it from below in the one blue: a still pool of light
+/// at the bottom edge and a hairline that warms into it. It snaps on and off
+/// with the belt and never moves.
 struct Card<Content: View>: View {
     var padding: CGFloat = Theme.inner
+    var live = false
     @ViewBuilder var content: Content
 
     var body: some View {
@@ -17,8 +23,39 @@ struct Card<Content: View>: View {
         content
             .padding(padding)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(shape.fill(Theme.surface))
-            .overlay(shape.strokeBorder(Theme.hairline, lineWidth: Theme.edgeWidth))
+            .background {
+                ZStack {
+                    shape.fill(Theme.surface)
+                    if live {
+                        GeometryReader { proxy in
+                            // A wide, shallow ellipse of light sitting on the
+                            // bottom edge, not a tint over the whole card.
+                            RadialGradient(
+                                colors: [Theme.glow, Theme.glow.opacity(0)],
+                                center: .bottom,
+                                startRadius: 0,
+                                endRadius: proxy.size.width * 0.5
+                            )
+                            .scaleEffect(x: 1, y: 0.42, anchor: .bottom)
+                        }
+                        .clipShape(shape)
+                    }
+                }
+            }
+            .overlay {
+                if live {
+                    shape.strokeBorder(
+                        LinearGradient(
+                            colors: [Theme.hairline, Theme.litEdge],
+                            startPoint: .center,
+                            endPoint: .bottom
+                        ),
+                        lineWidth: Theme.edgeWidth
+                    )
+                } else {
+                    shape.strokeBorder(Theme.hairline, lineWidth: Theme.edgeWidth)
+                }
+            }
     }
 }
 
@@ -27,14 +64,15 @@ struct Card<Content: View>: View {
 /// Full-width, 40 pt, a surface pill with a hairline. One per page.
 struct PrimaryButton: View {
     var title: String
+    var height: CGFloat = 40
     var action: () -> Void
 
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(Theme.bodyMedium)
+                .font(height > 40 ? Theme.emphasis : Theme.bodyMedium)
                 .frame(maxWidth: .infinity)
-                .frame(height: 40)
+                .frame(height: height)
                 .contentShape(.rect)
         }
         .buttonStyle(PrimaryButtonStyle())
@@ -86,9 +124,10 @@ struct SecondaryButtonStyle: ButtonStyle {
     }
 }
 
-/// A 28 pt round control for − / + and similar.
+/// A round control for − / + and similar; 28 pt unless asked bigger.
 struct IconButton: View {
     var symbol: String
+    var size: CGFloat = 28
     var enabled = true
     var help: String = ""
     /// Bare key (no modifiers) that presses it while the window is key.
@@ -100,8 +139,8 @@ struct IconButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: 11, weight: .semibold))
-                .frame(width: 28, height: 28)
+                .font(.system(size: size > 32 ? 15 : 11, weight: .semibold))
+                .frame(width: size, height: size)
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)

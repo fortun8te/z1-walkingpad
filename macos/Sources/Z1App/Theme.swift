@@ -10,33 +10,41 @@ import SwiftUI
 enum Theme {
     // MARK: colour
 
-    static let ground = dynamic(light: 0xF3F3F1, dark: 0x0F1012)
-    static let surface = dynamic(light: 0xFFFFFF, dark: 0x18191C)
+    // Dark is near-black, not grey: the ground is almost black, a card is one
+    // small step up, and contrast comes from the ink, not from grey fills.
+    static let ground = dynamic(light: 0xF3F3F1, dark: 0x050506)
+    static let surface = dynamic(light: 0xFFFFFF, dark: 0x101012)
 
     /// Text and marks. Full strength for every number, measured or estimated.
-    static let ink = dynamic(light: 0x16171A, dark: 0xF4F5F7)
+    static let ink = dynamic(light: 0x16171A, dark: 0xF6F6F8)
     /// Secondary text: units, captions that carry information.
-    static let dim = ink.opacity(0.62)
+    static let dim = ink(light: 0.62, dark: 0.68)
     /// Labels under numbers, axis marks.
-    static let faint = ink.opacity(0.42)
+    static let faint = ink(light: 0.46, dark: 0.52)
     /// Unlit ticks, tracks.
-    static let track = ink.opacity(0.13)
+    static let track = ink(light: 0.14, dark: 0.18)
     /// Empty bars and cells.
-    static let wash = ink.opacity(0.06)
+    static let wash = ink(light: 0.06, dark: 0.07)
+    /// A chart bar that is not the focused day: quiet, never a mid grey.
+    static let barRest = ink(light: 0.28, dark: 0.22)
 
-    static let hairline = dynamic(light: 0x000000, lightAlpha: 0.09, dark: 0xFFFFFF, darkAlpha: 0.08)
+    static let hairline = dynamic(light: 0x000000, lightAlpha: 0.09, dark: 0xFFFFFF, darkAlpha: 0.09)
     /// The chosen chip or tab.
-    static let selection = dynamic(light: 0x000000, lightAlpha: 0.07, dark: 0xFFFFFF, darkAlpha: 0.13)
+    static let selection = dynamic(light: 0x000000, lightAlpha: 0.07, dark: 0xFFFFFF, darkAlpha: 0.14)
     /// Round controls (− / +) at rest and under the pointer.
-    static let control = dynamic(light: 0x000000, lightAlpha: 0.06, dark: 0xFFFFFF, darkAlpha: 0.10)
-    static let controlHover = dynamic(light: 0x000000, lightAlpha: 0.11, dark: 0xFFFFFF, darkAlpha: 0.16)
+    static let control = dynamic(light: 0x000000, lightAlpha: 0.06, dark: 0xFFFFFF, darkAlpha: 0.09)
+    static let controlHover = dynamic(light: 0x000000, lightAlpha: 0.11, dark: 0xFFFFFF, darkAlpha: 0.15)
     /// Dot-matrix dots that are off: just perceptible, never a texture.
-    static let unlitDot = dynamic(light: 0x000000, lightAlpha: 0.045, dark: 0xFFFFFF, darkAlpha: 0.05)
+    static let unlitDot = dynamic(light: 0x000000, lightAlpha: 0.045, dark: 0xFFFFFF, darkAlpha: 0.055)
 
     static let accent = dynamic(light: 0x2F6FE4, dark: 0x4C8DFF)
+    /// The accent as light: the pool under the hero card while the belt moves.
+    static let glow = dynamic(light: 0x2F6FE4, lightAlpha: 0.16, dark: 0x4C8DFF, darkAlpha: 0.30)
+    /// The hero card's bottom hairline while the belt moves.
+    static let litEdge = dynamic(light: 0x2F6FE4, lightAlpha: 0.38, dark: 0x4C8DFF, darkAlpha: 0.60)
     static let trouble = dynamic(light: 0xB86E00, dark: 0xF5A524)
 
-    static let nsGround = nsDynamic(light: 0xF3F3F1, dark: 0x0F1012)
+    static let nsGround = nsDynamic(light: 0xF3F3F1, dark: 0x050506)
 
     // MARK: geometry (8-pt grid)
 
@@ -64,6 +72,12 @@ enum Theme {
     static let press = Animation.easeOut(duration: 0.12)
 
     // MARK: helpers
+
+    /// The ink at a strength that can differ per appearance: on near-black a
+    /// label needs a little more than on white to read the same.
+    private static func ink(light: CGFloat, dark: CGFloat) -> Color {
+        dynamic(light: 0x16171A, lightAlpha: light, dark: 0xF6F6F8, darkAlpha: dark)
+    }
 
     private static func dynamic(
         light: UInt32, lightAlpha: CGFloat = 1,

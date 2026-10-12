@@ -218,7 +218,7 @@ private struct AlmanacChart: View {
                             .fill(Theme.wash)
                         if !day.isEmpty {
                             RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                .fill(Theme.ink.opacity(isFocused ? 0.88 : 0.30))
+                                .fill(isFocused ? Theme.ink : Theme.barRest)
                                 .frame(height: max(4, barArea * CGFloat(progress)))
                         }
                     }
