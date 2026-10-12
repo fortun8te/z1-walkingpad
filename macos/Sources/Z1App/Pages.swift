@@ -105,7 +105,8 @@ struct HistoryPage: View {
                 Text(walk.startedAt, format: .dateTime.hour().minute())
                     .font(Theme.bodyMedium.monospacedDigit())
                     .foregroundStyle(Theme.ink)
-                Text("\(walk.steps.formatted()) steps est. · \(Int(walk.caloriesKcal.rounded())) kcal est.")
+                // Steps the pad counted are measured; modelled ones say so.
+                Text("\(walk.steps.formatted()) \(walk.stepsAreEstimated ? "steps est." : "steps") · \(Int(walk.caloriesKcal.rounded())) kcal est.")
                     .font(Theme.caption.monospacedDigit())
                     .foregroundStyle(Theme.dim)
             }

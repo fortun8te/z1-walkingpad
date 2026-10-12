@@ -172,6 +172,9 @@ final class TreadmillViewModel {
     @ObservationIgnored private var highestDisplayedSteps = 0
     @ObservationIgnored var healthTracker: RemoteSessionTracker
     @ObservationIgnored let sessionStore: SessionStore
+    /// `live.json` for Superapp. Nil in the harness, which must never write
+    /// real files.
+    @ObservationIgnored private let liveExport: LiveExport?
     @ObservationIgnored private let sleepBlocker = SleepBlocker()
     @ObservationIgnored private let notifier = Notifier()
     @ObservationIgnored private let hotKey = GlobalHotKey()
@@ -226,6 +229,7 @@ final class TreadmillViewModel {
         useHealthWeight = defaults.object(forKey: Self.useHealthWeightKey) as? Bool ?? true
         healthTracker = Self.restoreHealthTracker(from: defaults)
         sessionStore = Self.isPreview ? PreviewHarness.sessionStore() : SessionStore()
+        liveExport = Self.isPreview ? nil : LiveExport()
 
         if Self.isPreview {
             refreshHistory()
@@ -519,6 +523,11 @@ final class TreadmillViewModel {
         hotKey.unregister()
         persistHealthTracker()
         guard !Self.isPreview else { return }
+        // Readers of live.json must not see a walk that nobody is recording.
+        var gone = status
+        gone.phase = .disconnected
+        gone.beltRunning = false
+        publishLive(gone)
         let treadmill = self.treadmill
         await withTaskGroup(of: Void.self) { group in
             group.addTask {
@@ -598,10 +607,15 @@ final class TreadmillViewModel {
         if newStatus.phase == .disconnected || newStatus.phase == .error {
             healthTracker.markConnectionDrop()
             persistHealthTracker()
+            // A run cut off by the drop gets its own short deadline; without
+            // this it would wait for the next frame or launch to be recorded.
+            scheduleHealthFinalization(deadline: healthTracker.finalizationDeadline)
             scheduleReconnect(after: newStatus.phase == .error ? 10 : 1)
         }
         if newStatus.phase == .ready, newStatus.hasTelemetry {
             observeWalk()
+        } else {
+            publishLive()
         }
     }
 
@@ -619,6 +633,19 @@ final class TreadmillViewModel {
         logCompletedWalks(observation.completed)
         scheduleHealthFinalization(deadline: observation.finalizationDeadline)
         recomputeToday()
+        publishLive()
+    }
+
+    /// Hands Superapp (and anything else reading `live.json`) the current
+    /// frame and today's totals. The writer caps itself at 1 Hz and writes a
+    /// disconnect at once.
+    private func publishLive(_ frame: Z1Treadmill.Status? = nil) {
+        guard let liveExport else { return }
+        do {
+            try liveExport.publish(status: frame ?? status, today: today, goalProgress: goalProgress(for: today))
+        } catch {
+            NSLog("Z1App: live.json not written: \(error.localizedDescription)")
+        }
     }
 
     /// The step interpolation timer runs only while it could do anything:
@@ -794,10 +821,14 @@ final class TreadmillViewModel {
                 distanceM: walk.distanceM,
                 steps: walk.steps,
                 caloriesKcal: (kcal * 10).rounded() / 10,
-                exportedToHealth: false
+                exportedToHealth: false,
+                rawPadSteps: walk.rawPadSteps,
+                stepModelVersion: walk.rawPadSteps == nil ? "gait-v1" : nil
             )
             let added = sessionStore.append(session)
             healthTracker.acknowledgeLog(sessionID: walk.id)
+            // The store groups segments into Health workouts and queues them
+            // for the iPhone Shortcut itself; the app only appends.
             guard added, notificationsEnabled else { continue }
             let minutes = max(1, walk.activeDurationS / 60)
             let body = "\(minutes) min · \(formatDistance(walk.distanceM)) · \(walk.steps) steps est."
