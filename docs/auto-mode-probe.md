@@ -18,8 +18,8 @@ write property 10. Running it while the pad is powered on but empty is the
 safest next step:
 
 ```bash
-cd /Users/michael/z1-walkingpad
-./.venv/bin/python scripts/auto_mode_probe.py
+# from the repository root
+.venv/bin/python scripts/auto_mode_probe.py
 ```
 
 Expected output includes `mode_name`, `mode_raw`, `belt_seen_moving`, and

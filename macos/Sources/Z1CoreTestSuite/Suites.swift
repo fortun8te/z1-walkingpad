@@ -32,11 +32,6 @@ public func protocolTests(_ t: TestRunner) {
             "truncated body rejected"
         )
 
-        // unlock-ok detection
-        t.check(Z1Protocol.isUnlockOK(Z1Protocol.buildFrame(cmd0: 0x71, cmd1: 0x80)), "isUnlockOK true")
-        t.check(!Z1Protocol.isUnlockOK(Z1Protocol.buildFrame(cmd0: 0x71, cmd1: 0x81)), "isUnlockOK false for 71 81")
-        t.check(!Z1Protocol.isUnlockOK(Data([0x00, 0x01, 0x02])), "isUnlockOK false for garbage")
-
         // spec vector: SETTING_GET (all) = 72 00 01 00 73
         t.expectEqual(
             Z1Protocol.settingGetFrame(),
@@ -88,14 +83,13 @@ public func protocolTests(_ t: TestRunner) {
 /// MET table / calorie math tests.
 public func metricsTests(_ t: TestRunner) {
     t.suite("metrics") { t in
-        t.expectEqual(Z1Metrics.metForSpeed(0.0), 1.0, accuracy: 1e-12, "MET at 0.0 (resting)")
+        t.expectEqual(Z1Metrics.vo2ForSpeed(0.0), 3.5, accuracy: 1e-12, "VO2 at rest is 1 MET")
         // ACSM level-walking: VO2 = 0.1 * (km/h * 1000/60) + 3.5
-        // 3.2 km/h = 53.33 m/min -> VO2 8.833 -> MET 2.524
+        // 3.2 km/h = 53.33 m/min -> VO2 8.833
         t.expectEqual(Z1Metrics.vo2ForSpeed(3.2), 8.833, accuracy: 0.001, "VO2 at 3.2 km/h")
-        t.expectEqual(Z1Metrics.metForSpeed(3.2), 8.833 / 3.5, accuracy: 0.001, "MET at 3.2")
         // 6.4 km/h = 106.67 m/min -> VO2 14.167
         t.expectEqual(Z1Metrics.vo2ForSpeed(6.4), 14.167, accuracy: 0.001, "VO2 at max speed")
-        t.expectEqual(Z1Metrics.metForSpeed(-1), 1.0, accuracy: 1e-12, "negative speed clamps to resting")
+        t.expectEqual(Z1Metrics.vo2ForSpeed(-1), 3.5, accuracy: 1e-12, "negative speed clamps to resting")
 
         // 8.833 * 75 / 200 = 3.3125
         t.expectEqual(Z1Metrics.kcalPerMinute(3.2, weightKg: 75), 3.3125, accuracy: 0.001, "kcal/min known vector")
@@ -131,13 +125,6 @@ public func unitsTests(_ t: TestRunner) {
         t.expectEqual(Z1Units.metersToMiles(1609), 1.0, accuracy: 0.001, "1609 m -> 1.0 mi")
         t.expectEqual(Z1Units.metersToFeet(100), 328.084, accuracy: 0.001, "100 m -> 328 ft")
 
-        t.expectEqual(Z1Units.kgToLb(75), 165.3, accuracy: 0.05, "75 kg -> 165.3 lb")
-        t.expectEqual(Z1Units.lbToKg(165.3), 75, accuracy: 0.05, "165.3 lb -> ~75 kg")
-        t.check(
-            abs(Z1Units.lbToKg(Z1Units.kgToLb(82.5)) - 82.5) < 1e-9,
-            "lb<->kg roundtrip"
-        )
-
         // property 1, bit 0x0002: set = miles, clear = km; other bits preserved
         // (docs/protocol.md property table; hardware unit reports 0x0003)
         t.expectEqual(Z1Units.displayUnitsValue(current: 0x0003, imperial: true), 0x0003, "bit set keeps miles")
@@ -169,50 +156,32 @@ public func truncatedTelemetryTests(_ t: TestRunner) {
     }
 }
 
-/// Interpolation must tick the display without inflating the session total.
-public func stepSmootherTests(_ t: TestRunner) {
-    t.suite("step-smoother") { t in
-        var clock = StepSmoother()
-        clock.speedKmh = 3.0
-        clock.strideM = 0.75
-        // 3 km/h / 0.75 m = 1.11 steps/s. Ten 1 Hz packets of 1 step each.
-        for _ in 0 ..< 10 {
-            clock.addDelta(1)
-            clock.interpolate(secondsSincePacket: 0.9)
-            t.check(clock.displaySteps >= clock.packetSteps, "display never behind packet")
-            t.check(clock.displaySteps <= clock.packetSteps + 3, "display cap")
-        }
-        t.expectEqual(clock.packetSteps, 10, accuracy: 1e-9, "packets are the total")
-        clock.addDelta(0)
-        t.expectEqual(clock.displaySteps, 10, accuracy: 1e-9, "next packet snaps leftover ticks away")
-
-        // The old interpolator added expected steps on top of the packet
-        // delta every second, so 10s of walking stored ~20 steps.
-        t.check(clock.packetSteps < 15, "must not double-count interpolated ticks")
-
-        var monotonic = StepSmoother()
-        monotonic.speedKmh = 3.7
-        monotonic.strideM = 0.68
-        monotonic.ingest(reportedSteps: 4_489, distanceM: 2_900)
-        monotonic.interpolate(secondsSincePacket: 0.9)
-        let before = monotonic.displaySteps
+/// The modelled step total only ever grows within a run.
+public func stepCounterTests(_ t: TestRunner) {
+    t.suite("step-counter") { t in
+        var counter = StepCounter()
+        counter.strideM = 0.68
+        counter.ingest(reportedSteps: 4_489, distanceM: 2_900)
+        t.expectEqual(counter.steps, 4_489, accuracy: 1e-9, "the first packet is taken as it is")
+        let before = counter.steps
         // Recalculating the entire walk at a new speed used to report 4,317
         // and visibly run the counter backwards.
-        monotonic.ingest(reportedSteps: 4_317, distanceM: 2_901)
-        t.check(monotonic.displaySteps >= before, "speed changes never make live steps go backwards")
-        let afterMetre = monotonic.displaySteps
-        monotonic.ingest(reportedSteps: 4_317, distanceM: 2_901)
-        t.check(monotonic.displaySteps >= afterMetre, "duplicate packets do not snap interpolated steps backwards")
-        monotonic.interpolate(secondsSincePacket: 0.1)
-        t.check(monotonic.displaySteps >= afterMetre, "interpolation after a fresh packet preserves the in-run floor")
-        monotonic.ingest(reportedSteps: 10, distanceM: 6)
-        t.expectEqual(monotonic.displaySteps, 10, accuracy: 0.001, "counter reset drops the previous run's display floor")
+        counter.ingest(reportedSteps: 4_317, distanceM: 2_901)
+        t.check(counter.steps >= before, "speed changes never make steps go backwards")
+        t.expectEqual(counter.steps, before + 1 / 0.68, accuracy: 1e-9, "one new metre adds one metre of steps")
+        let afterMetre = counter.steps
+        counter.ingest(reportedSteps: 4_317, distanceM: 2_901)
+        t.expectEqual(counter.steps, afterMetre, accuracy: 1e-9, "a duplicate packet adds nothing")
+        counter.ingest(reportedSteps: 10, distanceM: 6)
+        t.expectEqual(counter.steps, 10, accuracy: 1e-9, "a counter reset starts the new run from the pad's count")
+        counter.reset()
+        t.expectEqual(counter.steps, 0, accuracy: 1e-9, "reset clears the run")
     }
 }
 
-/// Physical-remote session merging tests.
-public func automaticHealthExportTests(_ t: TestRunner) {
-    t.suite("automatic-health-export") { t in
+/// Belt-run tracking: segments, stop grace, drops and relaunch recovery.
+public func remoteSessionTrackerTests(_ t: TestRunner) {
+    t.suite("remote-session-tracker") { t in
         func status(
             running: Bool,
             elapsed: Int,
@@ -295,7 +264,6 @@ public func automaticHealthExportTests(_ t: TestRunner) {
             t.expectEqual(walk.id, "remote-session-1", "history entry shares the session ID")
             t.expectEqual(walk.activeDurationS, 901, "active time excludes the break")
             t.expectEqual(walk.distanceM, 701, "distance spans both walking segments")
-            t.check(!walk.offeredToHealth, "local history never claims a Health export")
             tracker.acknowledgeLog(sessionID: walk.id)
         }
         t.check(
@@ -339,8 +307,10 @@ public func automaticHealthExportTests(_ t: TestRunner) {
         )
         t.expectEqual(speedChange.openWalkTotals?.steps, 4_317, "one walk uses the same live step estimate in both cards")
         if let open = speedChange.openWalkTotals {
-            var today = DayTotals(day: base)
-            today.addOpenWalk(open, weightKg: 74)
+            let today = WalkDisplayTotals.addingTrackedWalks(
+                to: DayTotals(day: base), savedSessionIDs: [], tracker: speedChange, weightKg: 74
+            )
+            t.expectEqual(open.steps, 4_317, "the open walk keeps its step estimate")
             t.expectEqual(today.steps, 4_317, "Today card preserves the open walk step estimate")
         } else {
             t.check(false, "speed-change walk remains open")
@@ -460,10 +430,6 @@ func historyAndCompatibilityTests(_ t: TestRunner) {
         _ = tracker.observe(status(running: false, elapsed: 300, distance: 260, steps: 400), at: stopped)
         let due = tracker.finalizeIfDue(at: stopped.addingTimeInterval(RemoteSessionTracker.stopGraceSeconds))
         t.expectEqual(due.completed.count, 1, "a five-minute walk still reaches the history")
-        t.check(
-            due.completed.first?.offeredToHealth == false,
-            "local history never claims a Health export"
-        )
 
         // A ten-second nudge of the belt is noise, not a walk.
         var noise = RemoteSessionTracker()
@@ -604,15 +570,19 @@ public func healthWeightTests(_ t: TestRunner) {
         t.expectEqual(HealthWeight.parse(data: Data("{\"lb\": 163,8}".utf8))?.kg ?? 0, 74.3, accuracy: 0.05, "decimal comma in pounds")
         t.check(HealthWeight.parse(data: Data("{\"kg\": 74,3,".utf8)) == nil, "still rejects real garbage")
 
-        let xml = """
-        <?xml version="1.0"?>
-        <HealthData>
-        <Record type="HKQuantityTypeIdentifierBodyMass" sourceName="Health" startDate="2026-08-01 07:00:00 +0000" endDate="2026-08-01 07:00:00 +0000" value="80.0" unit="kg"/>
-        <Record type="HKQuantityTypeIdentifierBodyMass" sourceName="Health" startDate="2026-08-31 07:00:00 +0000" endDate="2026-08-31 07:00:00 +0000" value="74.3" unit="kg"/>
-        </HealthData>
-        """.data(using: .utf8)!
-        let fromXML = HealthWeight.parseExportXML(data: xml)
-        t.expectEqual(fromXML?.kg ?? 0, 74.3, accuracy: 0.01, "latest BodyMass from export.xml")
+        // The newest of several files wins.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("z1-weight-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let older = dir.appendingPathComponent("older.json")
+            let newer = dir.appendingPathComponent("newer.json")
+            try Data(#"{"kg": 80.0, "measuredAt": "2026-08-01T07:00:00Z"}"#.utf8).write(to: older)
+            try Data(#"{"kg": 74.3, "measuredAt": "2026-08-31T07:00:00Z"}"#.utf8).write(to: newer)
+            let missing = dir.appendingPathComponent("missing.json")
+            t.expectEqual(HealthWeight.load(from: [older, missing, newer])?.kg ?? 0, 74.3, accuracy: 0.001, "the latest sample wins")
+            t.check(HealthWeight.load(from: [missing]) == nil, "no file, no weight")
+        } catch { t.check(false, "weight fixture: \(error)") }
     }
 }
 
@@ -620,23 +590,13 @@ public func gaitModelTests(_ t: TestRunner) {
     t.suite("gait-model") { t in
         let length = GaitModel.stepLengthM(speedKmh: 3.24)
         t.expectEqual(length, 0.64037, accuracy: 0.0001, "3.24 km/h step length")
-        let modelled = GaitModel.steps(distanceKm: 8.31, speedKmh: 3.24)
+        let modelled = GaitModel.steps(distanceM: 8_310, speedKmh: 3.24)
         t.check((12_970...12_990).contains(modelled), "8.31 km at 3.24 km/h ≈ 12,980")
-        let fromTime = GaitModel.steps(distanceM: 8_310, durationS: Int((2.5667 * 3600).rounded()))
-        t.check((12_970...12_990).contains(fromTime), "same walk from duration")
-        let calibrated = GaitModel.steps(distanceM: 115, durationS: 120, calibratedM: 115.0 / 200.0)
-        t.expectEqual(calibrated, 200, "200-step calibration wins")
-    }
-}
-
-public func stepSanityTests(_ t: TestRunner) {
-    t.suite("step-sanity") { t in
-        t.expectEqual(
-            GaitModel.steps(distanceM: 1_180, durationS: 0),
-            GaitModel.steps(distanceM: 1_180, speedKmh: 3.0),
-            "no duration uses 3 km/h"
-        )
         t.expectEqual(GaitModel.steps(distanceM: 0, speedKmh: 3.2), 0, "no distance, no steps")
+        t.expectEqual(
+            GaitModel.stepLengthM(speedKmh: 99), GaitModel.stepLengthM(speedKmh: GaitModel.maxSpeedKmh),
+            "speed is clamped to the model's range"
+        )
     }
 }
 
@@ -651,7 +611,7 @@ public func treadmillMatchTests(_ t: TestRunner) {
             "generic desk treadmill name alone is insufficient"
         )
         t.check(
-            !TreadmillMatch.accepts(name: "DESKTOP-5A7GPB1", serviceUUIDs: [Z1Constants.fitnessMachineService]),
+            !TreadmillMatch.accepts(name: "DESKTOP-AB12CDE", serviceUUIDs: [Z1Constants.fitnessMachineService]),
             "Windows PC is never selected, even with FTMS"
         )
         t.check(
@@ -703,19 +663,19 @@ public func runAllZ1CoreTests() async -> Int32 {
     metricsTests(runner)
     unitsTests(runner)
     truncatedTelemetryTests(runner)
-    stepSmootherTests(runner)
-    automaticHealthExportTests(runner)
+    stepCounterTests(runner)
+    remoteSessionTrackerTests(runner)
     historyAndCompatibilityTests(runner)
     sessionStoreTests(runner)
     healthWeightTests(runner)
     gaitModelTests(runner)
-    stepSanityTests(runner)
     treadmillMatchTests(runner)
     counterRestoreTests(runner)
     beltSegmentRegressionTests(runner)
     sessionMigrationRegressionTests(runner)
     realHistoryCopyRegressionTests(runner)
     healthQueueRegressionTests(runner)
+    healthQueueResetFileTests(runner)
     await pendingWalkDisplayTests(runner)
     adversarialPersistenceTests(runner)
     await liveExportRegressionTests(runner)
@@ -730,6 +690,7 @@ public func runAllZ1CoreTests() async -> Int32 {
     auditHistoryTests(runner)
     await auditLiveExportTests(runner)
     auditCalendarTests(runner)
+    appSupportTests(runner)
     if runner.failures == 0 {
         print("PASS: \(runner.checks) checks, 0 failures")
         return 0

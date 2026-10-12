@@ -9,6 +9,14 @@
 #   Z1_DISABLE_SWIFT_SANDBOX=1         for an already sandboxed build host
 #   Z1_BUILD_DIST=/private/tmp/z1-dist optional bundle output directory
 #
+# Version: CFBundleShortVersionString is 2.0 (Z1_SHORT_VERSION overrides it).
+# CFBundleVersion is the minute of the build as yyyyMMddHHmm, so every build
+# has a higher number than the last (Z1_BUNDLE_VERSION overrides it). Settings
+# and the About panel show both: "Z1 2.0 (build 202610131200)".
+#
+# Icon: Resources/AppIcon.icns is the app's icon (white Z1 on red). It is the
+# only icon the build uses; replace that file to change it.
+#
 # The bundle id stays dev.z1walkingpad.menubar on purpose: settings, the
 # remembered pad, the open-walk tracker and the Bluetooth permission all hang
 # off it. To use the build, quit the old app and copy the bundle to
@@ -57,6 +65,8 @@ if ! "${BUILD[@]}" >"$LOG" 2>&1; then
   cat "$LOG" >&2; rm -f "$LOG"; exit 1
 fi
 [[ $QUIET -eq 1 ]] || tail -n 3 "$LOG"
+# A warning is never swallowed, even in a build that succeeds.
+grep -A2 "warning:" "$LOG" >&2 || true
 rm -f "$LOG"
 BIN_DIR="$("${BUILD[@]}" --show-bin-path 2>/dev/null)"
 
@@ -119,4 +129,4 @@ if [[ "$IDENT" != "$BUNDLE_ID" ]]; then
   echo "error: expected identifier $BUNDLE_ID, got: $IDENT" >&2
   exit 1
 fi
-say "==> built $(cd "$DIST" && pwd)/$APP_NAME.app"
+say "==> built $(cd "$DIST" && pwd)/$APP_NAME.app: Z1 $SHORT (build $VERSION)"

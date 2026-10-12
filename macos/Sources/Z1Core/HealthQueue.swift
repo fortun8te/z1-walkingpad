@@ -64,18 +64,6 @@ public final class HealthQueue {
         return true
     }
 
-    /// Compare the existing queue with stored sessions on startup without
-    /// rewriting either. Returns the number of stored session IDs already in
-    /// the queue. Historical backfill requires an explicit grouped export
-    /// after the older queue is checked on the phone.
-    @discardableResult
-    public func reconcile(sessions: [WalkSession]) throws -> Int {
-        lock.lock()
-        defer { lock.unlock() }
-        let queuedIDs = Self.ids(in: try read().workouts)
-        return sessions.reduce(0) { $0 + (queuedIDs.contains($1.id) ? 1 : 0) }
-    }
-
     /// Derive complete Health workouts from distinct belt-run segments.
     /// Segments separated by at most 10 minutes share one workout. The last
     /// segment must also be at least 10 minutes old, so a resume cannot alter

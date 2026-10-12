@@ -9,8 +9,6 @@ public struct CompletedWalk: Equatable, Sendable {
     public let distanceM: Int
     public let steps: Int
     public let rawPadSteps: Int?
-    /// Kept for Codable compatibility of WalkSession; always false.
-    public let offeredToHealth: Bool
 
     public init(
         id: String,
@@ -19,7 +17,6 @@ public struct CompletedWalk: Equatable, Sendable {
         activeDurationS: Int,
         distanceM: Int,
         steps: Int,
-        offeredToHealth: Bool,
         rawPadSteps: Int? = nil
     ) {
         self.id = id
@@ -29,7 +26,6 @@ public struct CompletedWalk: Equatable, Sendable {
         self.distanceM = distanceM
         self.steps = steps
         self.rawPadSteps = rawPadSteps
-        self.offeredToHealth = offeredToHealth
     }
 
     public var avgSpeedKmh: Double {
@@ -265,7 +261,7 @@ public struct RemoteSessionTracker: Codable, Sendable {
         session?.wasRunning = false
     }
 
-    /// Called by the menu app's deadline task and again on launch. Repeated
+    /// Called by the app's deadline task and again on launch. Repeated
     /// calls are idempotent because a finalized session is removed here.
     public mutating func finalizeIfDue(at now: Date = Date()) -> Observation {
         finalizeDueSession(at: now)
@@ -313,7 +309,6 @@ public struct RemoteSessionTracker: Codable, Sendable {
             activeDurationS: current.activeDurationS,
             distanceM: current.distanceM,
             steps: raw ?? current.steps,
-            offeredToHealth: false,
             rawPadSteps: raw
         )
     }

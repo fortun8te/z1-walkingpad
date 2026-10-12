@@ -11,18 +11,14 @@ import Z1Core
 @Observable
 final class LiveState {
     private(set) var phase: Z1Treadmill.Phase = .disconnected
-    private(set) var deviceName: String?
     private(set) var beltRunning = false
     private(set) var stopRequested = false
     private(set) var hasTelemetry = false
     private(set) var speedKmh = 0.0
     private(set) var elapsedS = 0
     private(set) var distanceM = 0
-    private(set) var steps = 0
-    private(set) var caloriesKcal = 0.0
     private(set) var minSpeedKmh = 1.6
     private(set) var maxSpeedKmh = 6.4
-    private(set) var impliedStrideM: Double?
     private(set) var errorMessage: String?
 
     var isConnected: Bool { phase == .ready }
@@ -32,18 +28,14 @@ final class LiveState {
     /// Observable write notifies its readers even when the value is the same.
     func apply(_ status: Z1Treadmill.Status) {
         update(\.phase, status.phase)
-        update(\.deviceName, status.deviceName)
         update(\.beltRunning, status.beltRunning)
         update(\.stopRequested, status.stopRequested)
         update(\.hasTelemetry, status.hasTelemetry)
         update(\.speedKmh, status.speedKmh)
         update(\.elapsedS, status.elapsedS)
         update(\.distanceM, status.distanceM)
-        update(\.steps, status.steps)
-        update(\.caloriesKcal, status.caloriesKcal)
         update(\.minSpeedKmh, status.minSpeedKmh)
         update(\.maxSpeedKmh, status.maxSpeedKmh)
-        update(\.impliedStrideM, status.impliedStrideM)
         update(\.errorMessage, status.errorMessage)
     }
 

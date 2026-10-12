@@ -37,26 +37,6 @@ enum LoginItem {
             return error.localizedDescription
         }
     }
-
-    /// True once macOS has the registration but the user has not approved it
-    /// yet (System Settings → General → Login Items).
-    static var needsApproval: Bool {
-        isAvailable && SMAppService.mainApp.status == .requiresApproval
-    }
-
-    /// Raw status, recorded to defaults so a failed registration can be
-    /// diagnosed without a debugger — ad-hoc signed builds and bundles outside
-    /// /Applications both fail here, silently, in different ways.
-    static var statusDescription: String {
-        guard isAvailable else { return "unavailable (no app bundle)" }
-        switch SMAppService.mainApp.status {
-        case .enabled: return "enabled"
-        case .requiresApproval: return "requiresApproval"
-        case .notRegistered: return "notRegistered"
-        case .notFound: return "notFound"
-        @unknown default: return "unknown"
-        }
-    }
 }
 
 /// Keeps the Mac awake while the belt is moving.
@@ -69,8 +49,6 @@ enum LoginItem {
 @MainActor
 final class SleepBlocker {
     private var token: NSObjectProtocol?
-
-    var isHolding: Bool { token != nil }
 
     func setActive(_ active: Bool) {
         if active {

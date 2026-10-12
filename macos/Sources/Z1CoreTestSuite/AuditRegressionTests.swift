@@ -14,14 +14,14 @@ private let ftms = [Z1Constants.fitnessMachineService]
 
 public func auditMatchAndTimerTests(_ t: TestRunner) async {
     t.suite("audit-01 DESKTOP PCs are never the pad") { t in
-        for name in ["DESKTOP-5A7GPB1", "desktop-5a7gpb1", "Desktop-ABC", "DESKTOP-0000000"] {
+        for name in ["DESKTOP-AB12CDE", "desktop-ab12cde", "Desktop-ABC", "DESKTOP-0000000"] {
             t.check(!TreadmillMatch.accepts(name: name, serviceUUIDs: []), "\(name) without FTMS")
             t.check(!TreadmillMatch.accepts(name: name, serviceUUIDs: ftms), "\(name) with FTMS")
             t.check(TreadmillMatch.excludes(name: name), "\(name) is excluded from re-adoption too")
         }
         // The old rule accepted any name containing "desk", "walk" or "tread",
         // and any advertisement with the FTMS service whatever its name.
-        for name in ["Walk Tracker", "Desk Lamp", "My Desk", "Heart Rate Strap", "MacBook Pro", "Michael's iPhone"] {
+        for name in ["Walk Tracker", "Desk Lamp", "My Desk", "Heart Rate Strap", "MacBook Pro", "Sam's iPhone"] {
             t.check(!TreadmillMatch.accepts(name: name, serviceUUIDs: []), "\(name) without FTMS")
         }
         t.check(!TreadmillMatch.accepts(name: "Heart Rate Strap", serviceUUIDs: ftms), "an FTMS strap is not a treadmill")
@@ -110,7 +110,7 @@ public func auditDriverLinkTests(_ t: TestRunner) async {
         await driver.disconnect()
     }
 
-    // --- audit-04: expectingDisconnect cannot stay set.
+    // --- audit-04: an own disconnect cannot mask a later real drop.
     await t.suite("audit-04 own disconnect never swallows a later real drop") { t in
         let echoes: [(String, DisconnectEcho)] = [
             ("no callback (no peripheral / 5 s fallback)", .none),
@@ -382,7 +382,7 @@ public func auditHistoryTests(_ t: TestRunner) {
             t.expectEqual(store.sessions.map(\.id), ["a", "b"], "adjacent walks are not merged on load")
             t.expectEqual(store.sessions.map(\.steps), [1_234, 99], "stored steps are not replaced by the gait model")
             t.expectEqual(store.sessions.first?.rawPadSteps, 1_234, "the pad's own count is kept")
-            t.expectEqual(store.sessions.last?.effectiveStepModelVersion, "legacy", "a count with no provenance is labelled legacy")
+            t.expectEqual(store.sessions.last?.stepModelVersion, "legacy", "a count with no provenance is labelled legacy")
             t.expectEqual(try Data(contentsOf: url), bytes, "load wrote nothing")
         } catch { t.check(false, "load fixture: \(error)") }
     }
@@ -643,10 +643,6 @@ public func auditCalendarTests(_ t: TestRunner) {
         t.expectEqual(Z1Units.kmhToMph(1.609344), 1, accuracy: 1e-12, "1.609344 km/h is 1 mph")
         t.expectEqual(Z1Units.mphToKmh(1), 1.609344, accuracy: 1e-12, "1 mph in km/h")
         t.expectEqual(Z1Units.metersToFeet(0.3048), 1, accuracy: 1e-12, "one foot")
-        t.expectEqual(Z1Units.kgToLb(0.45359237), 1, accuracy: 1e-12, "one pound")
-        for kg in stride(from: 40.0, through: 160.0, by: 0.1) {
-            if abs(Z1Units.lbToKg(Z1Units.kgToLb(kg)) - kg) > 1e-9 { t.check(false, "kg round trip at \(kg)"); break }
-        }
         for kmh in stride(from: 0.5, through: 12.0, by: 0.1) {
             if abs(Z1Units.mphToKmh(Z1Units.kmhToMph(kmh)) - kmh) > 1e-9 { t.check(false, "speed round trip at \(kmh)"); break }
         }
@@ -774,20 +770,6 @@ public func auditStoreWiringTests(_ t: TestRunner) {
             _ = recovered.append(walk("later", start: now.addingTimeInterval(-3_000)))
             t.check(recovered.sessions.contains { $0.id == "later" }, "and the store keeps working")
         } catch { t.check(false, "wiring fixture: \(error)") }
-    }
-
-    t.suite("new-14 a huge Health export is skipped, not parsed on the main thread") { t in
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("z1-new14-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let xml = dir.appendingPathComponent("export.xml")
-        let record = #"<Record type="HKQuantityTypeIdentifierBodyMass" sourceName="Health" startDate="2026-08-31 07:00:00 +0000" endDate="2026-08-31 07:00:00 +0000" value="74.3" unit="kg"/>"#
-        do {
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            try Data("<?xml version=\"1.0\"?><HealthData>\(record)</HealthData>".utf8).write(to: xml)
-            t.expectEqual(HealthWeight.load(from: [xml], maxExportXMLBytes: 1_000_000)?.kg ?? 0, 74.3, accuracy: 0.01, "an export within the cap is read")
-            t.check(HealthWeight.load(from: [xml], maxExportXMLBytes: 50) == nil, "an export over the cap is skipped")
-            t.check(HealthWeight.maxExportXMLBytes <= 128 * 1024 * 1024, "the default cap keeps memory and main-thread time bounded")
-        } catch { t.check(false, "weight fixture: \(error)") }
     }
 }
 

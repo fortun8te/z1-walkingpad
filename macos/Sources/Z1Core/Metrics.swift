@@ -8,9 +8,8 @@ import Foundation
 ///     kcal/min        = VO2 * weight_kg / 200           (5 kcal per L O2)
 ///
 /// Best validated for ~3-6 km/h; expect ~±13% error in field conditions.
-/// Mirrors `metrics.py`.
 public enum Z1Metrics {
-    public static let defaultWeightKg = 74.3
+    public static let defaultWeightKg = 75.0
 
     /// Resting component (3.5 ml/kg/min = 1 MET).
     static let restingVO2 = 3.5
@@ -21,10 +20,6 @@ public enum Z1Metrics {
     public static func vo2ForSpeed(_ kmh: Double) -> Double {
         let speedMPerMin = max(0.0, kmh) * 1000 / 60
         return speedCoeff * speedMPerMin + restingVO2
-    }
-
-    public static func metForSpeed(_ kmh: Double) -> Double {
-        vo2ForSpeed(kmh) / restingVO2
     }
 
     public static func kcalPerMinute(_ kmh: Double, weightKg: Double) -> Double {

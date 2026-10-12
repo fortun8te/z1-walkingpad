@@ -3,10 +3,6 @@ import Z1Core
 
 /// Today's totals, the daily goal, and the seven-day week History shows.
 extension TreadmillViewModel {
-    /// The walk still in progress (or inside its stop-grace window). It does
-    /// not reach the store until the tracker finalizes it.
-    var openWalk: CompletedWalk? { healthTracker.openWalkTotals }
-
     /// Saved IDs win over both tracker states during the save/acknowledge handoff.
     func displayTotals(addingTo stored: DayTotals) -> DayTotals {
         WalkDisplayTotals.addingTrackedWalks(

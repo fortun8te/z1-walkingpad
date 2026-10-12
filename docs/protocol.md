@@ -1,10 +1,10 @@
 # WalkingPad Z1 — BLE Wire Protocol Specification
 
 Authoritative spec for the KingSmith WalkingPad Z1 (BLE name `KS-HD-Z1D`,
-firmware V0.0.6), verified on hardware 2026-07-30. Both implementations in
-this repo — the Python core (`src/z1_walkingpad_mcp/`) and the macOS app
-(`macos/`) — follow this document. If they disagree with it, the document
-wins (it is what the pad does).
+firmware V0.0.6), verified on hardware 2026-07-30. The macOS app (`macos/`)
+and the Python protocol definitions (`src/z1_walkingpad_mcp/`, used by the
+scripts in `scripts/`) follow this document. If they disagree with it, the
+document wins (it is what the pad does).
 
 Derived from the [duttke.de Web Bluetooth implementation](https://www.duttke.de/en/walkingpad/)
 and from blutter disassembly of the KS Fit Android app (v5.9.10 / v6.0.7).
@@ -180,13 +180,13 @@ under load (walking). Counters persist across BLE connections while the
 pad's session is open, and reset when the pad finalizes a session (Stop)
 or on its own schedule — clients display them as-is (pad-as-master).
 
-**Step accuracy note:** the Z1's own error has not yet been measured; generic
-consumer-counter studies are not a Z1 validation. Both clients therefore keep
-every raw step at ≥3 km/h but learn stride only from stable 12-second windows.
-A 0.5 km/h bucket needs three accepted windows and 100 m, and impossible
-0.30–1.50 m/step outliers are rejected. Below 3 km/h, calibrated steps are
-derived from belt distance. The displayed total remains continuous before,
-during, and after calibration.
+**Step accuracy note:** the Z1's own step error has not been measured; generic
+consumer-counter studies are not a Z1 validation. The macOS app therefore
+models steps from belt distance and speed (`GaitModel`: step length grows with
+speed) and adds only newly travelled metres, so the total never runs backwards
+when the speed changes. The pad's own count is kept alongside as `rawPadSteps`
+when it agrees with the belt (0.30 to 1.50 m per step) and is dropped when it
+does not. Belt distance is the only exact figure.
 
 ## Calories (computed locally)
 
@@ -203,5 +203,5 @@ Continuous in speed — no bucket interpolation. Best validated around
 study found ~13% overprediction for unloaded walking — treat the number as
 ±10–15%. Chosen over the Compendium MET table because research shows the
 fixed MET buckets misclassify intensity at exactly these slow speeds
-(PubMed 35876127, 2022). Weight defaults to 75 kg (`Z1_WEIGHT_KG` in
-Python, in-app setting on macOS).
+(PubMed 35876127, 2022). Weight defaults to 75 kg; the macOS app follows the
+latest `weight.json` the iPhone Shortcut saves (see apple-health.md).

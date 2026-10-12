@@ -6,7 +6,8 @@ the Health database. iOS apps (Strava, WHOOP, Metric, scale apps) talk to
 HealthKit on the phone. Mac apps that show Health data import an
 `export.xml`, or they get a file from an iPhone Shortcut.
 
-This project uses the Shortcut route, same folder as the workout queue.
+This project uses the Shortcut route, same folder as the workout queue. The
+Mac app does not read an `export.xml`.
 
 ## Latest weight → calories
 
@@ -28,8 +29,10 @@ This project uses the Shortcut route, same folder as the workout queue.
 
 2. Automation: Time of Day each morning, or App → Health / your scale app → Is Opened.
 
-3. In the Mac app: Settings → **Use latest Apple Health weight**. The app
-   reads that file and uses it for ACSM kcal.
+3. Nothing to switch on in the Mac app: it reads that file at launch, on wake,
+   when its window comes forward and when a walk ends, and uses the newest
+   weight for the ACSM kilocalories in its history and `live.json`. Without
+   the file it uses the weight it last had, or 75 kg.
 
 The file on the Mac is:
 
@@ -69,7 +72,7 @@ iCloud → See All → Shortcuts.
   distance.
 - **Shortcut v3.1 also logs a step sample spanning the walk window.** If your
   iPhone was on you while you walked, it may have counted steps too. WalkingPad
-  steps may be estimates; see "Your stride" in `../macos/README.md`.
+  steps are an estimate from belt distance and speed (see protocol.md).
 - The bridge sends **no calorie sample** — WHOOP computes calories and Strain
   from the band's own heart rate and ignores anything we send.
 - The Mac app connects automatically and watches the Z1 without starting
@@ -82,7 +85,7 @@ iCloud → See All → Shortcuts.
   - A **Health workout** groups runs whose gaps are at most **10 minutes**. It
     is queued once the last run has been stopped for 10 minutes.
   A walk is never held open for hours: History and "Today" see a finished run
-  about 2 minutes after Stop. The standalone CLI does not export to Health.
+  about 2 minutes after Stop.
 - If the app is quit (or crashes) mid-walk, the saved run is closed at the last
   moment the app saw it moving when the app next starts, so it cannot stay open
   and swallow the next walk.
@@ -190,9 +193,12 @@ Phone testing must establish that the query sees the relevant previously
 imported records and any other sources used for reconciliation.
 
 Before retrying an interrupted v3.1 import, compare the queued entries with
-Health on the iPhone. The previously reported five queued walks from 23 and
-24 August need this reconciliation; do not discard or backfill them merely
-because they are old. Their current phone state has not been verified.
+Health on the iPhone. Walks that earlier builds left in the queue may already
+be in Health, and the Mac cannot check; do not discard or backfill them merely
+because they are old. On 13 October 2026 the batch that had been waiting was
+backed up and the queue file reset to an empty batch
+(`{"schema_version":2,"workouts":[]}`), so new walks append to a clean file.
+Whether the walks in the backup ever reached Health has not been verified.
 
 To unblock implementation, export a minimal Shortcut authored on the iPhone
 that finds Walking workouts and exposes their start, end, source and distance,

@@ -55,7 +55,7 @@ public func sessionMigrationRegressionTests(_ t: TestRunner) {
             t.expectEqual(reopened.sessions.map(\.id), old.map(\.id), "legacy IDs survive load")
             t.expectEqual(reopened.sessions.map(\.steps), [1_111, 2_222], "stored step values survive load")
             t.expectEqual(reopened.sessions.map(\.exportedToHealth), [true, false], "export flags survive load")
-            t.expectEqual(reopened.sessions.map(\.effectiveStepModelVersion), ["legacy", "legacy"], "old step values are labelled estimates")
+            t.expectEqual(reopened.sessions.map(\.stepModelVersion), ["legacy", "legacy"], "old step values are labelled estimates")
             t.expectEqual(try Data(contentsOf: source), bytes, "opening history does not rewrite its bytes")
 
             let added = regressionWalk("new-session", start: base.addingTimeInterval(7_200))
@@ -167,6 +167,54 @@ public func beltSegmentRegressionTests(_ t: TestRunner) {
     }
 }
 
+/// The state the queue is in after it has been backed up and reset: the file
+/// exists with an empty batch and the receipts remember older walks.
+public func healthQueueResetFileTests(_ t: TestRunner) {
+    t.suite("Health queue reset file") { t in
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("z1-health-reset-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let queueURL = directory.appendingPathComponent("health-queue.json")
+        let receiptsURL = directory.appendingPathComponent("health-queue-receipts.json")
+        let base = Date(timeIntervalSince1970: 2_000_000_000)
+        let older = regressionWalk("older-queued-walk", start: base)
+        let fresh = regressionWalk("fresh-walk", start: base.addingTimeInterval(86_400))
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try Data(#"{"schema_version":2,"workouts":[]}"#.utf8).write(to: queueURL)
+            try Data(#"{"schema_version":1,"queued_session_ids":["older-queued-walk"]}"#.utf8).write(to: receiptsURL)
+
+            let queue = HealthQueue(url: queueURL, receiptsURL: receiptsURL)
+            let added = try queue.enqueueReadyGroups(
+                sessions: [older, fresh], now: fresh.endedAt.addingTimeInterval(601), notBefore: base
+            )
+            t.expectEqual(added, 1, "the next walk is appended to the emptied file")
+            let root = try JSONSerialization.jsonObject(with: Data(contentsOf: queueURL)) as? [String: Any]
+            t.expectEqual(root?["schema_version"] as? Int, 2, "the file stays schema 2")
+            let workouts = root?["workouts"] as? [[String: Any]] ?? []
+            t.expectEqual(workouts.compactMap { $0["session_id"] as? String }, ["fresh-walk"], "only the new walk, not the receipted one")
+
+            // The keys the Z1 Import Health Shortcut reads.
+            for key in ["started_at", "ended_at", "wall_duration_min", "distance_m", "steps"] {
+                t.check(workouts.first?[key] != nil, "workout carries \(key)")
+            }
+            let receipts = try JSONSerialization.jsonObject(with: Data(contentsOf: receiptsURL)) as? [String: Any]
+            t.expectEqual(
+                Set(receipts?["queued_session_ids"] as? [String] ?? []),
+                Set(["older-queued-walk", "fresh-walk"]),
+                "receipts keep the old walk and add the new one"
+            )
+            t.expectEqual(
+                try queue.enqueueReadyGroups(
+                    sessions: [older, fresh], now: fresh.endedAt.addingTimeInterval(700), notBefore: base
+                ),
+                0,
+                "a second pass queues nothing while the batch waits"
+            )
+        } catch { t.check(false, "reset-file fixture: \(error)") }
+    }
+}
+
 public func healthQueueRegressionTests(_ t: TestRunner) {
     t.suite("Health queue") { t in
         let directory = FileManager.default.temporaryDirectory
@@ -197,7 +245,6 @@ public func healthQueueRegressionTests(_ t: TestRunner) {
             t.check((workouts.first?["started_at"] as? String)?.hasSuffix("Z") == true, "UTC timestamp")
 
             let reopened = HealthQueue(url: queueURL)
-            t.expectEqual(try reopened.reconcile(sessions: [pending, imported]), 1, "read-only reconciliation finds the queued ID")
             t.check(try !reopened.enqueue(pending), "dedupe survives reload")
             let later = regressionWalk("queue-later", start: base.addingTimeInterval(7_200))
             let phoneSnapshot = try Data(contentsOf: queueURL)

@@ -51,7 +51,7 @@ public func adversarialPersistenceTests(_ t: TestRunner) {
             var calendar = Calendar(identifier: .gregorian)
             calendar.timeZone = TimeZone(secondsFromGMT: 0)!
             let midnight = calendar.startOfDay(for: base)
-            let cross = CompletedWalk(id: "midnight", startedAt: midnight.addingTimeInterval(-600), endedAt: midnight.addingTimeInterval(600), activeDurationS: 1200, distanceM: 1000, steps: 1601, offeredToHealth: false)
+            let cross = CompletedWalk(id: "midnight", startedAt: midnight.addingTimeInterval(-600), endedAt: midnight.addingTimeInterval(600), activeDurationS: 1200, distanceM: 1000, steps: 1601)
             let midnightStore = SessionStore(url: root.appendingPathComponent("midnight/sessions.json"))
             var emptyTracker = RemoteSessionTracker()
             t.check(midnightStore.record(cross, weightKg: 75, tracker: &emptyTracker), "cross-midnight walk is saved")

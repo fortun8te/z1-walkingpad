@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import Z1Core
 
 @main
 enum Z1App {
@@ -42,6 +43,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         mainWindow.show()
         if TreadmillViewModel.isPreview, let window = mainWindow.window {
             print("Z1_PREVIEW_WINDOW \(window.windowNumber)")
+            if PreviewHarness.opensAbout {
+                showAbout(nil)
+                if let about = NSApp.windows.last(where: { $0 !== window && $0.isVisible }) {
+                    print("Z1_PREVIEW_ABOUT_WINDOW \(about.windowNumber)")
+                }
+            }
             fflush(stdout)
         }
     }
@@ -113,6 +120,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         mainWindow.show()
     }
 
+    /// The standard panel, with the build line the Settings page shows.
+    @objc private func showAbout(_ sender: Any?) {
+        let info = BuildInfo()
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .applicationName: "Z1 WalkingPad",
+            .applicationVersion: info.version ?? "development build",
+            .version: info.build.map { "build \($0)" } ?? "",
+        ])
+    }
+
     @objc private func showSettings(_ sender: Any?) {
         navigation.show(.settings, model: model)
         mainWindow.show()
@@ -156,7 +173,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         let name = "Z1 WalkingPad"
 
         let app = submenu(name, in: main)
-        app.addItem(withTitle: "About \(name)", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        app.addItem(item("About \(name)", #selector(showAbout(_:)), ""))
         app.addItem(.separator())
         app.addItem(item("Settings…", #selector(showSettings(_:)), ","))
         app.addItem(.separator())

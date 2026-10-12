@@ -16,6 +16,7 @@ import Z1Core
 /// - `Z1_PREVIEW_TYPED` digits already typed into the speed panel (e.g. `3`)
 /// - `Z1_PREVIEW_TICK=1` fake telemetry once a second, for CPU measurement
 /// - `Z1_PREVIEW_APPEARANCE` light | dark (otherwise the system's)
+/// - `Z1_PREVIEW_ABOUT=1` also opens the About panel and prints `Z1_PREVIEW_ABOUT_WINDOW <n>`
 ///
 /// It never touches the real history: the store is a scratch file.
 @MainActor
@@ -32,6 +33,10 @@ enum PreviewHarness {
     static var typedSpeed: String? {
         guard TreadmillViewModel.isPreview else { return nil }
         return env["Z1_PREVIEW_TYPED"]
+    }
+
+    static var opensAbout: Bool {
+        TreadmillViewModel.isPreview && env["Z1_PREVIEW_ABOUT"] == "1"
     }
 
     static var appearance: NSAppearance? {

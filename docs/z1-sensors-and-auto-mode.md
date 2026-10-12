@@ -22,8 +22,8 @@ hardware used by other WalkingPad models.
 
 Run 5–10 minute trials at 1.6, 2.0, 2.5, 3.0, 4.0, and 5.0 km/h. For each,
 record manually counted steps, raw Z1 steps, and belt distance. Repeat each
-speed three times. That gives the Z1-specific error curve and a trustworthy
-personal stride calibration.
+speed three times. That gives the Z1-specific error curve and a stride you can
+trust.
 
 ## Auto-speed decision
 

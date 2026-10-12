@@ -53,9 +53,9 @@ final class TreadmillViewModel {
 
     // MARK: persisted settings (UserDefaults, the same store @AppStorage uses)
 
-    /// Body weight in kg, for the calorie figure that goes to Apple Health.
-    /// Not shown: it follows the latest weight in a Health export, else the
-    /// stored or default value.
+    /// Body weight in kg, for the calorie figures in history and `live.json`.
+    /// Not shown: it follows the latest weight the iPhone Shortcut saved
+    /// (`HealthWeight`), else the stored or default value.
     var weightKg: Double {
         didSet {
             settingsDefaults.set(weightKg, forKey: Self.weightKey)
@@ -81,17 +81,15 @@ final class TreadmillViewModel {
         }
     }
 
-    /// Quiet-day nudges. Strictly capped: work hours, weekdays, at most two a day.
+    /// Quiet-day nudges, capped by `WalkReminderPolicy`.
     var remindersEnabled: Bool {
         didSet {
             settingsDefaults.set(remindersEnabled, forKey: Self.remindersKey)
-            if remindersEnabled, !Self.isPreview { notifier.requestAuthorizationIfNeeded() }
+            guard !Self.isPreview else { return }
+            if remindersEnabled { notifier.requestAuthorizationIfNeeded() }
+            armReminderTimer()
         }
     }
-
-    /// Hours without a walk before a reminder, and the minimum gap between two.
-    private static let reminderGapHours = 3
-
 
     var launchAtLogin: Bool {
         didSet {
@@ -116,11 +114,9 @@ final class TreadmillViewModel {
     @ObservationIgnored private var reconnectTask: Task<Void, Never>?
     @ObservationIgnored private var automaticConnectionEnabled = true
     @ObservationIgnored private var healthFinalizeTask: Task<Void, Never>?
+    /// Armed only while reminders are on, for the next moment one could be due.
     @ObservationIgnored private var reminderTimer: Timer?
-    @ObservationIgnored private var weightTimer: Timer?
-    @ObservationIgnored private var liveStepTimer: Timer?
-    @ObservationIgnored private var stepSmoother = StepSmoother()
-    @ObservationIgnored private var lastStepPacketAt = Date()
+    @ObservationIgnored private var stepCounter = StepCounter()
     @ObservationIgnored var healthTracker: RemoteSessionTracker
     @ObservationIgnored let sessionStore: SessionStore
     /// `live.json` for Superapp. Nil in the harness, which must never write
@@ -129,8 +125,6 @@ final class TreadmillViewModel {
     @ObservationIgnored private let sleepBlocker = SleepBlocker()
     @ObservationIgnored private let notifier = Notifier()
     @ObservationIgnored private let hotKey = GlobalHotKey()
-    @ObservationIgnored private var housekeepingTask: Task<Void, Never>?
-    @ObservationIgnored private var wakeObserver: NSObjectProtocol?
     /// Guards against an old reconnect task clearing a newer one's handle.
     @ObservationIgnored private var reconnectGeneration = 0
     /// Coalesced speed target for rapid − / + taps, so `busy` drops none.
@@ -152,9 +146,9 @@ final class TreadmillViewModel {
     static let goalKey = "dailyGoalMinutes"
     static let remindersKey = "remindersEnabled"
     static let reminderLogKey = "z1.reminderLog"
-    static let strideKey = "z1.calibratedStrideM"
-    static let loginStatusKey = "loginItemStatus"
     static let connectionLogKey = "z1.connectionLog"
+    /// The open walk. The key predates the tracker's current name; renaming it
+    /// would orphan a walk saved by an earlier build.
     static let healthTrackerKey = "z1.automaticHealthSession"
 
     private var settingsDefaults: UserDefaults { Self.settingsStore }
@@ -184,12 +178,6 @@ final class TreadmillViewModel {
         }
 
         Task { await treadmill.setWeight(weightKg) }
-        // A stride measured by hand in an earlier version still feeds the
-        // step estimate that goes to Health; there is no control for it now.
-        let stride = defaults.double(forKey: Self.strideKey)
-        if stride > 0 {
-            Task { await treadmill.setStrideOverride(stride) }
-        }
         pumpTask = Task { [weak self] in
             guard let self else { return }
             for await s in self.treadmill.statusUpdates {
@@ -199,12 +187,6 @@ final class TreadmillViewModel {
         }
         scheduleHealthFinalization()
         scheduleReconnect(after: 0.5)
-        // First check only after a settling period: being reminded to walk
-        // thirty seconds after logging in is how reminders get turned off.
-        reminderTimer = Timer.scheduledTimer(withTimeInterval: 15 * 60, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.checkWalkReminder() }
-        }
-        reminderTimer?.tolerance = 60
         // The pad accepts one central at a time, so a link left up at exit is
         // what makes the next launch fail to connect. Drop it on the way out.
         NotificationCenter.default.addObserver(
@@ -214,23 +196,22 @@ final class TreadmillViewModel {
         ) { [treadmill] _ in
             treadmill.cancelConnectionNow()
         }
-        undoAutomaticLoginItem()
         refreshHistory()
-        installPowerObservers()
-        updateHousekeeping()
+        installSystemObservers()
         applyGlobalShortcut()
         if remindersEnabled { notifier.requestAuthorizationIfNeeded() }
+        // First reminder check only after a settling period: being reminded
+        // to walk thirty seconds after logging in is how reminders get turned off.
+        armReminderTimer()
         applyHealthWeightIfAvailable()
-        // Body weight changes a few times a week at most.
-        weightTimer = Timer.scheduledTimer(withTimeInterval: 10 * 60, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.applyHealthWeightIfAvailable() }
-        }
-        weightTimer?.tolerance = 60
     }
 
     // No deinit: this model lives as long as the process.
 
-    func applyHealthWeightIfAvailable() {
+    /// Body weight changes a few times a week at most, so it is read when it
+    /// can matter (launch, wake, the window coming forward, a walk ending),
+    /// never on a timer.
+    private func applyHealthWeightIfAvailable() {
         guard !Self.isPreview, let sample = HealthWeight.load() else { return }
         let rounded = (sample.kg * 10).rounded() / 10
         if abs(weightKg - rounded) >= 0.05 {
@@ -244,7 +225,6 @@ final class TreadmillViewModel {
     // MARK: - display-unit helpers
 
     var speedUnitLabel: String { unitsImperial ? "mph" : "km/h" }
-    var weightUnitLabel: String { unitsImperial ? "lb" : "kg" }
 
     /// Current belt speed in the display unit.
     var displaySpeed: Double {
@@ -611,18 +591,17 @@ final class TreadmillViewModel {
         }
         if newStatus.phase == .ready, newStatus.hasTelemetry,
            newStatus.distanceM < status.distanceM || newStatus.elapsedS < status.elapsedS {
-            stepSmoother.reset()
+            stepCounter.reset()
         }
-        stepSmoother.speedKmh = newStatus.speedKmh
-        stepSmoother.strideM = newStatus.impliedStrideM
+        // The driver models the whole run at the current speed, which would
+        // rewrite steps already taken whenever the speed changes. The counter
+        // keeps them and adds only new metres; the driver's figure seeds it.
+        stepCounter.strideM = newStatus.impliedStrideM
             ?? GaitModel.stepLengthM(speedKmh: max(0.8, newStatus.speedKmh))
-        stepSmoother.ingest(reportedSteps: newStatus.steps, distanceM: newStatus.distanceM)
-        lastStepPacketAt = Date()
-        let packetDisplay = Int(stepSmoother.displaySteps.rounded(.down))
+        stepCounter.ingest(reportedSteps: newStatus.steps, distanceM: newStatus.distanceM)
         var next = newStatus
-        next.steps = packetDisplay
+        next.steps = Int(stepCounter.steps.rounded(.down))
         setStatus(next)
-        updateLiveStepTimer()
         if newStatus.phase != previousPhase {
             recordConnectionChange(newStatus)
             if newStatus.phase == .error {
@@ -647,7 +626,6 @@ final class TreadmillViewModel {
         } else {
             publishLive()
         }
-        updateHousekeeping()
     }
 
     /// The one place a status frame lands: the logic copy, then the
@@ -680,41 +658,6 @@ final class TreadmillViewModel {
         }
     }
 
-    /// The step interpolation timer runs only while it could do anything:
-    /// connected, streaming, belt moving. An idle app wakes for nothing.
-    private func updateLiveStepTimer() {
-        let needed = status.phase == .ready && status.hasTelemetry
-            && (status.speedKmh > 0.3 || status.beltRunning)
-        if needed, liveStepTimer == nil {
-            let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
-                Task { @MainActor in self?.tickLiveSteps() }
-            }
-            timer.tolerance = 0.05
-            RunLoop.main.add(timer, forMode: .common)
-            liveStepTimer = timer
-        } else if !needed, let timer = liveStepTimer {
-            timer.invalidate()
-            liveStepTimer = nil
-        }
-    }
-
-    /// The pad's counters arrive in visible chunks. Fill the quiet gaps with
-    /// at most three modelled steps, preserving progress within this run. The
-    /// same value goes to the open-walk tracker so the live row and Today
-    /// tick together.
-    private func tickLiveSteps() {
-        guard status.phase == .ready, status.hasTelemetry,
-              status.speedKmh > 0.3 || status.beltRunning
-        else { return }
-        stepSmoother.interpolate(secondsSincePacket: Date().timeIntervalSince(lastStepPacketAt))
-        let candidate = Int(stepSmoother.displaySteps.rounded(.down))
-        guard candidate != status.steps else { return }
-        var next = status
-        next.steps = candidate
-        setStatus(next)
-        observeWalk()
-    }
-
     private func scheduleHealthFinalization(deadline: Date? = nil) {
         healthFinalizeTask?.cancel()
         let target = deadline ?? healthTracker.finalizationDeadline
@@ -744,7 +687,6 @@ final class TreadmillViewModel {
         logCompletedWalks(observation.completed)
         scheduleHealthFinalization(deadline: observation.finalizationDeadline)
         recomputeToday()
-        updateHousekeeping()
     }
 
     /// Saves the open walk so a crash or kill loses at most a few seconds of
@@ -777,45 +719,43 @@ final class TreadmillViewModel {
         var line = "\(stamp) \(String(describing: newStatus.phase))"
         if let name = newStatus.deviceName { line += " \(name)" }
         if let error = newStatus.errorMessage { line += " — \(error)" }
-        var log = UserDefaults.standard.stringArray(forKey: Self.connectionLogKey) ?? []
+        var log = settingsDefaults.stringArray(forKey: Self.connectionLogKey) ?? []
         log.append(line)
         if log.count > 40 { log.removeFirst(log.count - 40) }
         settingsDefaults.set(log, forKey: Self.connectionLogKey)
     }
 
-    /// One build briefly registered a login item on the user's behalf. Reverse
-    /// exactly that, once, and then never touch it again: start-at-login is
-    /// the toggle in Settings and nothing else.
-    private func undoAutomaticLoginItem() {
-        let defaults = UserDefaults.standard
-        defer { defaults.set(LoginItem.statusDescription, forKey: Self.loginStatusKey) }
-        guard defaults.object(forKey: "launchAtLoginConfigured") != nil else { return }
-        defaults.removeObject(forKey: "launchAtLoginConfigured")
-        _ = LoginItem.set(false)
-        launchAtLogin = LoginItem.isEnabled
-    }
-
     // MARK: - walk reminders
 
-    private func checkWalkReminder(now: Date = Date()) {
-        guard remindersEnabled else { return }
-        let calendar = Calendar.current
-        let hour = calendar.component(.hour, from: now)
-        let weekday = calendar.component(.weekday, from: now)
-        guard (9..<18).contains(hour), (2...6).contains(weekday) else { return }
-        guard !status.beltRunning, healthTracker.openWalkTotals == nil else { return }
-
-        let lastEnd = sessionStore.sessions.last?.endedAt ?? .distantPast
-        let quietHours = now.timeIntervalSince(lastEnd) / 3600
-        guard quietHours >= Double(Self.reminderGapHours) else { return }
-
-        // At most two per day, and never two inside one gap window.
-        var log = (UserDefaults.standard.array(forKey: Self.reminderLogKey) as? [Date]) ?? []
-        let todays = log.filter { calendar.isDate($0, inSameDayAs: now) }
-        guard todays.count < 2 else { return }
-        if let last = todays.last, now.timeIntervalSince(last) / 3600 < Double(Self.reminderGapHours) {
-            return
+    /// One timer, armed for the next moment a reminder could be due
+    /// (`WalkReminderPolicy.nextCheck`) and only while reminders are on, so an
+    /// idle app sleeps for hours between looks and wakes for nothing else.
+    private func armReminderTimer() {
+        reminderTimer?.invalidate()
+        reminderTimer = nil
+        guard remindersEnabled, !Self.isPreview else { return }
+        let when = WalkReminderPolicy.nextCheck(
+            after: Date(), lastWalkEnd: sessionStore.sessions.last?.endedAt, reminders: reminderLog
+        )
+        let timer = Timer(fire: when, interval: 0, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.checkWalkReminder() }
         }
+        timer.tolerance = 60
+        RunLoop.main.add(timer, forMode: .common)
+        reminderTimer = timer
+    }
+
+    private var reminderLog: [Date] {
+        settingsDefaults.array(forKey: Self.reminderLogKey) as? [Date] ?? []
+    }
+
+    private func checkWalkReminder(now: Date = Date()) {
+        defer { armReminderTimer() }
+        guard remindersEnabled, !status.beltRunning, healthTracker.openWalkTotals == nil else { return }
+        var log = reminderLog
+        guard WalkReminderPolicy.isDue(
+            now: now, lastWalkEnd: sessionStore.sessions.last?.endedAt, reminders: log
+        ) else { return }
 
         let lines = [
             "The belt has been quiet for a while.",
@@ -835,6 +775,7 @@ final class TreadmillViewModel {
     /// Record every finished walk in local history.
     private func logCompletedWalks(_ walks: [CompletedWalk]) {
         guard !walks.isEmpty else { return }
+        applyHealthWeightIfAvailable()
         if let historyRetryAt, historyRetryAt > Date() {
             // A second walk may finish during backoff. Publish its pending
             // display state without attempting an early disk retry.
@@ -913,10 +854,12 @@ final class TreadmillViewModel {
         return c
     }
 
-    // MARK: - power management
+    // MARK: - system events
 
-    private func installPowerObservers() {
-        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+    /// Everything that changes with the clock or the machine arrives as a
+    /// notification, so an idle app has nothing to poll.
+    private func installSystemObservers() {
+        NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification,
             object: nil,
             queue: .main
@@ -925,10 +868,12 @@ final class TreadmillViewModel {
             // there and the backoff would otherwise idle for 30 s.
             Task { @MainActor in
                 self?.refreshHistory()
+                self?.applyHealthWeightIfAvailable()
+                self?.armReminderTimer()
                 self?.scheduleReconnect(after: 1, force: true)
             }
         }
-        // Rolls Today over at midnight without a timer of our own.
+        // Rolls Today over at midnight.
         NotificationCenter.default.addObserver(
             forName: .NSCalendarDayChanged,
             object: nil,
@@ -936,25 +881,12 @@ final class TreadmillViewModel {
         ) { [weak self] _ in
             Task { @MainActor in self?.refreshHistory() }
         }
-    }
-
-    /// The two-minute refresh keeps Today current while something is moving: a
-    /// connected pad or a walk still open. With neither, nothing is scheduled
-    /// and the app is fully idle. Midnight rollover and wake are handled by
-    /// notifications (`installPowerObservers`), not by polling.
-    private func updateHousekeeping() {
-        let needed = status.phase == .ready || healthTracker.openWalkTotals != nil
-        if needed, housekeepingTask == nil {
-            housekeepingTask = Task { [weak self] in
-                while !Task.isCancelled {
-                    try? await Task.sleep(for: .seconds(120))
-                    guard !Task.isCancelled else { return }
-                    self?.refreshHistory()
-                }
-            }
-        } else if !needed, let task = housekeepingTask {
-            task.cancel()
-            housekeepingTask = nil
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.applyHealthWeightIfAvailable() }
         }
     }
 

@@ -53,11 +53,6 @@ public enum Z1Protocol {
         return Data([Z1Constants.vopUnlock, 0x00, 0x05, 0x01] + token + [UInt8(checksum)])
     }
 
-    public static func isUnlockOK(_ raw: Data) -> Bool {
-        guard let parsed = parseFrame(raw) else { return false }
-        return parsed.cmd0 == Z1Constants.vopUnlock && parsed.cmd1 == 0x80
-    }
-
     public static func sysInfoFrame(unixTime: UInt32, userID: UInt32 = 0) -> Data {
         var data = Data()
         data.append(contentsOf: le32(unixTime))

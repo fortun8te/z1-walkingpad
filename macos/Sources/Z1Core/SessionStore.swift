@@ -44,10 +44,6 @@ public struct WalkSession: Codable, Equatable, Sendable, Identifiable {
         self.stepModelVersion = rawPadSteps == nil ? stepModelVersion : nil
     }
 
-    public var effectiveStepModelVersion: String? {
-        rawPadSteps == nil ? stepModelVersion : nil
-    }
-
     private enum CodingKeys: String, CodingKey {
         case id, startedAt, endedAt, activeDurationS, distanceM, steps
         case caloriesKcal, exportedToHealth, rawPadSteps, stepModelVersion
@@ -105,29 +101,6 @@ public struct DayTotals: Equatable, Sendable, Identifiable {
         distanceM += portion(session.distanceM)
         steps += portion(session.steps)
         caloriesKcal += session.caloriesKcal * (upper - lower)
-    }
-
-    /// Fold a still-open walk into today's history card without replacing
-    /// its live step estimate with a second calculation.
-    public mutating func addOpenWalk(_ walk: CompletedWalk, weightKg: Double) {
-        let priorWalks = walks
-        add(WalkSession(
-            id: walk.id, startedAt: walk.startedAt, endedAt: walk.endedAt,
-            activeDurationS: walk.activeDurationS, distanceM: walk.distanceM,
-            steps: walk.steps,
-            caloriesKcal: Z1Metrics.kcalPerMinute(walk.avgSpeedKmh, weightKg: weightKg)
-                * Double(walk.activeDurationS) / 60,
-            exportedToHealth: false
-        ))
-        walks = priorWalks
-    }
-
-    public mutating func addDay(_ other: DayTotals) {
-        walks += other.walks
-        activeDurationS += other.activeDurationS
-        distanceM += other.distanceM
-        steps += other.steps
-        caloriesKcal += other.caloriesKcal
     }
 }
 
@@ -442,7 +415,7 @@ public final class SessionStore: @unchecked Sendable {
         return gap >= 0 && gap <= mergeGap
     }
 
-    /// Save atomically; called from background — safe to run while swift build holds lock.
+    /// Writes the history atomically, keeping the first-upgrade copies and a rescue copy of anything unreadable.
     @discardableResult
     private func save() -> Bool {
         if sessions.isEmpty, FileManager.default.fileExists(atPath: url.path) {

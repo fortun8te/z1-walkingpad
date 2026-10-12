@@ -32,12 +32,20 @@ extension View {
     /// hairline in the same shape.
     @ViewBuilder
     func glass<S: Shape>(in shape: S, interactive: Bool = false) -> some View {
+        #if compiler(>=6.2) // the macOS 26 SDK; older toolchains build the flat fallback
         if #available(macOS 26.0, *) {
             glassEffect(interactive ? .regular.interactive() : .regular, in: shape)
         } else {
-            background(shape.fill(Theme.surface))
-                .overlay(shape.stroke(Theme.hairline, lineWidth: Theme.edgeWidth))
+            flat(in: shape)
         }
+        #else
+        flat(in: shape)
+        #endif
+    }
+
+    private func flat<S: Shape>(in shape: S) -> some View {
+        background(shape.fill(Theme.surface))
+            .overlay(shape.stroke(Theme.hairline, lineWidth: Theme.edgeWidth))
     }
 
     func chromeCapsule() -> some View { glass(in: Capsule()) }

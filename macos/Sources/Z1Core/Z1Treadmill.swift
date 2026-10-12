@@ -60,24 +60,6 @@ public enum Z1Error: Error, Equatable, LocalizedError {
     }
 }
 
-public struct SessionSummary: Sendable, Equatable {
-    public var durationS: Int
-    public var distanceM: Int
-    public var steps: Int
-    public var avgSpeedKmh: Double
-    public var caloriesKcal: Double
-    public var weightKgUsed: Double
-
-    public init(durationS: Int, distanceM: Int, steps: Int, avgSpeedKmh: Double, caloriesKcal: Double, weightKgUsed: Double) {
-        self.durationS = durationS
-        self.distanceM = distanceM
-        self.steps = steps
-        self.avgSpeedKmh = avgSpeedKmh
-        self.caloriesKcal = caloriesKcal
-        self.weightKgUsed = weightKgUsed
-    }
-}
-
 /// Async BLE client for the KingSmith WalkingPad Z1.
 ///
 /// Protocol recap (see docs/protocol.md): the pad ignores every FTMS control
@@ -88,8 +70,6 @@ public struct SessionSummary: Sendable, Equatable {
 /// 2. send unlock frame (write WITHOUT response)
 /// 3. await 71 80 -> send SYS_INFO -> SETTING_GET
 /// 4. FTMS works from here on: request control -> start/stop/set speed
-///
-/// Mirrors `client.py`.
 public actor Z1Treadmill {
 
     public enum Phase: String, Sendable {
@@ -143,47 +123,28 @@ public actor Z1Treadmill {
     private var calorieTracker = CalorieTracker()
     private let defaults: UserDefaults
 
-    /// Optional 200-step calibration. Nil = speed-dependent gait model.
-    public private(set) var strideOverrideM: Double?
-
-    /// Belt metres ÷ modelled step length at this walk's average speed.
-    /// Pad step register is never used.
-    public var stepsDisplay: Int {
+    /// The speed to model steps at: the belt's own while it moves, else this
+    /// walk's average, else 3 km/h.
+    private var modelSpeedKmh: Double {
+        let live = telemetry.speedKmh ?? 0
+        if live > 0.4 { return live }
         let metres = max(0, telemetry.distanceM ?? 0)
         let seconds = max(0, telemetry.elapsedS ?? 0)
-        let live = telemetry.speedKmh ?? 0
-        let speed = live > 0.4
-            ? live
-            : (seconds > 0 ? Double(metres) / Double(seconds) * 3.6 : 3.0)
-        return GaitModel.steps(
-            distanceM: metres,
-            speedKmh: speed,
-            calibratedM: strideOverrideM
-        )
+        return seconds > 0 ? Double(metres) / Double(seconds) * 3.6 : 3.0
     }
 
-    /// Modelled (or calibrated) step length in metres.
-    public var impliedStrideM: Double? {
-        let metres = max(0, telemetry.distanceM ?? 0)
-        guard metres >= 10 else { return nil }
-        let seconds = max(0, telemetry.elapsedS ?? 0)
-        let live = telemetry.speedKmh ?? 0
-        let speed = live > 0.4
-            ? live
-            : (seconds > 0 ? Double(metres) / Double(seconds) * 3.6 : 3.0)
-        return GaitModel.stepLengthM(speedKmh: speed, calibratedM: strideOverrideM)
+    /// Belt metres ÷ modelled step length. The pad's step register is not used.
+    private var modelledSteps: Int {
+        GaitModel.steps(distanceM: max(0, telemetry.distanceM ?? 0), speedKmh: modelSpeedKmh)
     }
 
-    public func setStrideOverride(_ metres: Double?) {
-        if let metres, metres > 0.3, metres < 1.5 {
-            strideOverrideM = metres
-        } else {
-            strideOverrideM = nil
-        }
-        emitStatus()
+    /// Modelled step length in metres, once the walk is long enough to say.
+    private var impliedStrideM: Double? {
+        guard max(0, telemetry.distanceM ?? 0) >= 10 else { return nil }
+        return GaitModel.stepLengthM(speedKmh: modelSpeedKmh)
     }
+
     private var calorieStateRestored = false
-    private var lastTargetSpeed: Double?
     /// After Start, keep beltRunning true for a beat so omitted-speed
     /// telemetry cannot flip the button back to Start before the belt moves.
     private var startHoldUntil: ContinuousClock.Instant?
@@ -193,7 +154,6 @@ public actor Z1Treadmill {
     private var unlocked = false
     /// KingSmith supplement channel. Generic FTMS pads leave this false.
     private var usesVendor = false
-    private var expectingDisconnect = false
     private var lastVendorWrite: ContinuousClock.Instant?
     private var lastControlWrite: ContinuousClock.Instant?
     private var vendorSlotEnd: ContinuousClock.Instant?
@@ -256,11 +216,6 @@ public actor Z1Treadmill {
             }
         }
     }
-
-    public var deviceName: String? { status.deviceName }
-
-    /// Estimated calories for the current session (since last `start()`).
-    public var caloriesKcal: Double { calorieTracker.totalKcal }
 
     public func setWeight(_ kg: Double) {
         guard kg > 0 else { return }
@@ -463,7 +418,6 @@ public actor Z1Treadmill {
         unlocked = false
         usesVendor = false
         hasControl = false
-        lastTargetSpeed = nil
         startHoldUntil = nil
         startHoldExpiry?.cancel()
         startHoldExpiry = nil
@@ -494,7 +448,6 @@ public actor Z1Treadmill {
             try await controlCommand(Data([Z1Constants.opStartOrResume]), tunnelOp: 0x07, intentEpoch: epoch)
         }
         guard epoch == controlCommandEpoch else { throw CancellationError() }
-        lastTargetSpeed = nil // belt restarts at minimum speed
         startHoldUntil = ContinuousClock.now + startHold
         mutate { $0.beltRunning = true; $0.stopRequested = false }
         scheduleStartHoldExpiry()
@@ -522,27 +475,12 @@ public actor Z1Treadmill {
         emitStatus()
     }
 
-    @discardableResult
-    public func stop() async throws -> SessionSummary {
+    public func stop() async throws {
         controlCommandEpoch += 1
         try requireReady()
         try await ensureControl()
-        // summary first: the pad resets its counters when Stop lands
-        let summary = sessionSummary()
         try await controlCommand(
             Data([Z1Constants.opStopOrPause, Z1Constants.stopParamStop]), tunnelOp: 0x08, tunnelParams: Data([0x01])
-        )
-        startHoldUntil = nil
-        mutate { $0.stopRequested = $0.beltRunning }
-        return summary
-    }
-
-    public func pause() async throws {
-        controlCommandEpoch += 1
-        try requireReady()
-        try await ensureControl()
-        try await controlCommand(
-            Data([Z1Constants.opStopOrPause, Z1Constants.stopParamPause]), tunnelOp: 0x08, tunnelParams: Data([0x02])
         )
         startHoldUntil = nil
         mutate { $0.stopRequested = $0.beltRunning }
@@ -563,34 +501,6 @@ public actor Z1Treadmill {
         guard epoch == controlCommandEpoch else { throw CancellationError() }
         try await controlCommand(Data([Z1Constants.opSetTargetSpeed]) + params, tunnelOp: 0x02, tunnelParams: params, intentEpoch: epoch)
         guard epoch == controlCommandEpoch else { throw CancellationError() }
-        lastTargetSpeed = kmh
-    }
-
-    /// Nudge speed up; returns the new target.
-    @discardableResult
-    public func speedUp(deltaKmh: Double = 0.1) async throws -> Double {
-        try await nudgeSpeed(deltaKmh)
-    }
-
-    /// Nudge speed down; returns the new target.
-    @discardableResult
-    public func speedDown(deltaKmh: Double = 0.1) async throws -> Double {
-        try await nudgeSpeed(-deltaKmh)
-    }
-
-    private func nudgeSpeed(_ delta: Double) async throws -> Double {
-        // prefer the last commanded target: telemetry lags ~1s
-        let current = lastTargetSpeed ?? telemetry.speedKmh ?? status.minSpeedKmh
-        // delta already snapped to 0.1 kmh by ViewModel; just add and snap
-        var target = ((current + delta) * 10).rounded() / 10
-        if target == current {
-            // tiny delta rounded away — force exactly one pad step in delta direction
-            let step = delta >= 0 ? 0.1 : -0.1
-            target = ((current + step) * 10).rounded() / 10
-        }
-        target = max(status.minSpeedKmh, min(status.maxSpeedKmh, target))
-        try await setSpeed(target)
-        return target
     }
 
     /// Sync the pad's own LED display units. Per the docs/protocol.md property
@@ -626,23 +536,6 @@ public actor Z1Treadmill {
             pred: { $0.cmd0 == Z1Constants.vopProperty && $0.cmd1 == 0x81 && $0.data.first == 10 }
         )
         mutate { $0.properties[10] = value }
-    }
-
-    /// Current session metrics: the pad's own counters plus our kcal.
-    public func sessionSummary() -> SessionSummary {
-        let durationS = max(0, telemetry.elapsedS ?? 0)
-        let distanceM = max(0, telemetry.distanceM ?? 0)
-        let avg: Double = (durationS > 0 && distanceM > 0)
-            ? (Double(distanceM) / Double(durationS) * 3.6 * 100).rounded() / 100
-            : 0
-        return SessionSummary(
-            durationS: durationS,
-            distanceM: distanceM,
-            steps: stepsDisplay,
-            avgSpeedKmh: avg,
-            caloriesKcal: (calorieTracker.totalKcal * 10).rounded() / 10,
-            weightKgUsed: calorieTracker.weightKg
-        )
     }
 
     // MARK: - telemetry
@@ -843,7 +736,7 @@ public actor Z1Treadmill {
         if !s.beltRunning { s.stopRequested = false }
         s.distanceM = max(0, telemetry.distanceM ?? 0)
         s.elapsedS = max(0, telemetry.elapsedS ?? 0)
-        s.steps = stepsDisplay
+        s.steps = modelledSteps
         s.padSteps = telemetry.steps
         s.impliedStrideM = impliedStrideM
         s.caloriesKcal = calorieTracker.totalKcal

@@ -69,11 +69,33 @@ struct HistoryPage: View {
 
 // MARK: - Settings
 
-/// Only what changes how the app behaves day to day.
+/// Only what changes how the app behaves day to day, and which build this is.
 struct SettingsPage: View {
     @Bindable var model: TreadmillViewModel
 
+    private static let buildLine = BuildInfo().line
+
     var body: some View {
+        VStack(spacing: 0) {
+            settings
+            Text(Self.buildLine)
+                .font(Theme.caption)
+                .foregroundStyle(Theme.faint)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity)
+                .padding(.top, Theme.related)
+                .textSelection(.enabled)
+                .accessibilityLabel("Build")
+                .accessibilityValue(Self.buildLine)
+        }
+        // The goal field would otherwise take focus on open and swallow
+        // Space and the arrow keys.
+        .onAppear {
+            DispatchQueue.main.async { NSApp.keyWindow?.makeFirstResponder(nil) }
+        }
+    }
+
+    private var settings: some View {
         PageScaffold {
             Card(padding: 0) {
                 VStack(spacing: 0) {
@@ -108,11 +130,6 @@ struct SettingsPage: View {
                     }
                 }
             }
-        }
-        // The goal field would otherwise take focus on open and swallow
-        // Space and the arrow keys.
-        .onAppear {
-            DispatchQueue.main.async { NSApp.keyWindow?.makeFirstResponder(nil) }
         }
     }
 

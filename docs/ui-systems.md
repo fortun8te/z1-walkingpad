@@ -36,6 +36,9 @@ These are settled with Michael. Change them only on his say-so.
 - **Liquid Glass on chrome and controls.** The tab bar, Start/Stop, − / +
   and Retry are glass on macOS 26 (interactive glass, fixed sizes) and flat
   capsules before it. Cards, the panel, the ruler and the bars are matte.
+- **The build is quiet.** Settings ends with one caption line in the faintest
+  ink, `Z1 2.0 (build 202610131200)`, and the About panel shows the same
+  numbers. Nothing else on the pages mentions a version.
 - **Locale.** Numbers follow the user's region: `3,4 km/h` and `3.120 steps`
   in the Netherlands, never a mix of both conventions.
 
