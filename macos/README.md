@@ -40,7 +40,7 @@ settings, the remembered pad and the Bluetooth permission carry over.
 
 ### The window
 
-One small fixed window (320 × 476). Pages swap inside it — **Now**, **History**,
+One small fixed window (320 × 432). Pages swap inside it — **Now**, **History**,
 **Records**, **Settings** (⌘1–⌘4, also in the View menu) — and nothing ever
 resizes or animates. The background is flat and follows the system's light or
 dark appearance (dark is near-black). Blue is the only colour: it means the belt
@@ -48,7 +48,7 @@ is moving, or progress toward today's goal.
 
 - **Now** — only what matters while walking: the pad's state beside the
   traffic lights, a dot-matrix speed readout (click it to type an exact
-  speed), the speed ruler with − / + and five presets, Start/Stop (Space here,
+  speed), the speed ruler with − / +, Start/Stop (Space here,
   ⌃⌥W anywhere), this walk's numbers while the belt moves, and Today against
   the goal. Estimates say "est.".
 - **History** — the almanac (Day / Week / Month with ‹ ›, the focused day's
@@ -71,9 +71,8 @@ speed, page, lens, appearance, ticking telemetry).
 
 ### Picking a speed
 
-Press anywhere on the ruler to jump there, drag to fine-tune, tap a preset
-(2.5–4.5 km/h), or use the keys: ← → move by the configured step (0.1 by
-default), ↑ ↓ by 0.5. Click the readout to type an exact value. The pad only
+Press anywhere on the ruler to jump there, drag to fine-tune, or use the
+keys: ← → move by the configured step (0.1 by default), ↑ ↓ by 0.5. Click the readout to type an exact value. The pad only
 accepts speed changes while the belt is moving, so a speed picked at a
 standstill is queued ("Starts at 3.0 km/h") and applied the moment you press
 Start.

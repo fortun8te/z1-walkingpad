@@ -452,13 +452,6 @@ final class TreadmillViewModel {
         pendingTargetKmh = kmh
     }
 
-    /// One-click speeds in the display unit, inside the pad's range.
-    var speedPresets: [Double] {
-        let values = unitsImperial ? [1.5, 2.0, 2.5, 3.0, 3.5] : [2.5, 3.0, 3.5, 4.0, 4.5]
-        let range = speedRange
-        return values.filter { range.contains($0) }
-    }
-
     /// The speed the readout should point at: the belt's while it moves, the
     /// one queued for Start while it does not.
     var targetDisplaySpeed: Double? {

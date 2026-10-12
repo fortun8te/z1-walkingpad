@@ -38,10 +38,6 @@ enum Theme {
     static let unlitDot = dynamic(light: 0x000000, lightAlpha: 0.045, dark: 0xFFFFFF, darkAlpha: 0.055)
 
     static let accent = dynamic(light: 0x2F6FE4, dark: 0x4C8DFF)
-    /// The accent as light: the pool under the hero card while the belt moves.
-    static let glow = dynamic(light: 0x2F6FE4, lightAlpha: 0.16, dark: 0x4C8DFF, darkAlpha: 0.30)
-    /// The hero card's bottom hairline while the belt moves.
-    static let litEdge = dynamic(light: 0x2F6FE4, lightAlpha: 0.38, dark: 0x4C8DFF, darkAlpha: 0.60)
     static let trouble = dynamic(light: 0xB86E00, dark: 0xF5A524)
 
     static let nsGround = nsDynamic(light: 0xF3F3F1, dark: 0x050506)

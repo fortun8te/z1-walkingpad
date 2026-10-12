@@ -45,7 +45,7 @@ final class Navigation {
 /// resizing, no slot that appears or disappears. The top line shares the
 /// transparent title bar with the traffic lights.
 struct RootView: View {
-    static let size = CGSize(width: 320, height: 476)
+    static let size = CGSize(width: 320, height: 432)
 
     let model: TreadmillViewModel
     let navigation: Navigation
@@ -223,7 +223,7 @@ struct NowPage: View {
     // MARK: hero
 
     private var hero: some View {
-        Card(padding: 14, live: running) {
+        Card(padding: 14) {
             VStack(spacing: 14) {
                 speedReadout
                     .frame(maxWidth: .infinity)
@@ -254,14 +254,6 @@ struct NowPage: View {
                         key: .rightArrow,
                         action: model.speedUpTapped
                     )
-                }
-                SpeedPresets(
-                    values: model.speedPresets,
-                    current: model.targetDisplaySpeed,
-                    enabled: model.isConnected
-                ) { preset in
-                    speedDraft = preset
-                    model.setSpeed(preset)
                 }
             }
         }

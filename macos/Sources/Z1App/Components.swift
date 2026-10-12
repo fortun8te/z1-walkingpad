@@ -3,19 +3,14 @@ import SwiftUI
 // The small component set: Card, PrimaryButton, SecondaryButtonStyle,
 // IconButton, StatusDot, StatCell, TickLine, ChipPicker, PillToggleStyle,
 // SettingRow, RowDivider, GroupLabel, FieldPlate. Each is drawn from `Theme`
-// and nothing else: flat fills and one hairline. The only light is the
-// hero card edge-lit in blue while the belt moves.
+// and nothing else: flat fills and one hairline. No gradients, no glow.
 
 // MARK: - Card
 
-/// A surface one step off the ground, with one hairline.
-///
-/// `live` edge-lights it from below in the one blue: a still pool of light
-/// at the bottom edge and a hairline that warms into it. It snaps on and off
-/// with the belt and never moves.
+/// A flat surface one step off the ground, with one hairline. No gradient,
+/// no glow, no state of its own.
 struct Card<Content: View>: View {
     var padding: CGFloat = Theme.inner
-    var live = false
     @ViewBuilder var content: Content
 
     var body: some View {
@@ -23,39 +18,8 @@ struct Card<Content: View>: View {
         content
             .padding(padding)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background {
-                ZStack {
-                    shape.fill(Theme.surface)
-                    if live {
-                        GeometryReader { proxy in
-                            // A wide, shallow ellipse of light sitting on the
-                            // bottom edge, not a tint over the whole card.
-                            RadialGradient(
-                                colors: [Theme.glow, Theme.glow.opacity(0)],
-                                center: .bottom,
-                                startRadius: 0,
-                                endRadius: proxy.size.width * 0.5
-                            )
-                            .scaleEffect(x: 1, y: 0.42, anchor: .bottom)
-                        }
-                        .clipShape(shape)
-                    }
-                }
-            }
-            .overlay {
-                if live {
-                    shape.strokeBorder(
-                        LinearGradient(
-                            colors: [Theme.hairline, Theme.litEdge],
-                            startPoint: .center,
-                            endPoint: .bottom
-                        ),
-                        lineWidth: Theme.edgeWidth
-                    )
-                } else {
-                    shape.strokeBorder(Theme.hairline, lineWidth: Theme.edgeWidth)
-                }
-            }
+            .background(shape.fill(Theme.surface))
+            .overlay(shape.strokeBorder(Theme.hairline, lineWidth: Theme.edgeWidth))
     }
 }
 
