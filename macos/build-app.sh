@@ -1,61 +1,67 @@
 #!/bin/bash
-# Build Z1WalkingPad.app from the Z1MenuBar executable.
+# Build Z1WalkingPad.app into macos/dist/. Nothing is installed, nothing is
+# launched, no running copy is touched.
 #
-# Silent re-sign: same bundle id, in-place ditto, no repeated dialogs.
-# Running session continues: graceful quit leaves belt moving, auto-reconnect on next launch restores counters via sessionStore + calorieState.
-#   bash macos/build-app.sh                build, sign, install to /Applications
-#   bash macos/build-app.sh --no-install   leave the bundle in macos/
-#   bash macos/build-app.sh --quiet        suppress chatter (for resign loops)
+#   bash macos/build-app.sh            release build -> macos/dist/Z1WalkingPad.app
+#   bash macos/build-app.sh --debug    debug build, faster, for UI work
+#   bash macos/build-app.sh --quiet    less chatter
+#
+# The bundle id stays dev.z1walkingpad.menubar on purpose: settings, the
+# remembered pad, the open-walk tracker and the Bluetooth permission all hang
+# off it. To use the build, quit the old app and copy the bundle to
+# /Applications yourself.
 set -euo pipefail
 
 cd "$(dirname "$0")"
-APP="Z1WalkingPad.app"
-ENTITLEMENTS="Sources/Z1MenuBar/Z1WalkingPad.entitlements"
+APP_NAME="Z1WalkingPad"
+BUNDLE_ID="dev.z1walkingpad.menubar"
+DIST="dist"
+APP="$DIST/$APP_NAME.app"
+SCRATCH=".build-frontend"
+ENTITLEMENTS="Sources/Z1App/Z1WalkingPad.entitlements"
+CONFIG="release"
 QUIET=0
-NO_INSTALL=0
-for arg in "${@:-}"; do
+for arg in "$@"; do
   case "$arg" in
     --quiet|-q) QUIET=1 ;;
-    --no-install) NO_INSTALL=1 ;;
+    --debug) CONFIG="debug" ;;
+    *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
-qecho() { [[ $QUIET -eq 1 ]] || echo "$@"; }
+say() { [[ $QUIET -eq 1 ]] || echo "$@"; }
 
 # No usable Xcode (not installed, or licence not accepted): build with the
 # Command Line Tools and the newest macOS 26 SDK they ship. `xcodebuild
-# -version` still succeeds with the licence unaccepted, so also probe the
-# toolchain itself.
+# -version` still succeeds with the licence unaccepted, so probe the
+# toolchain itself too.
 if ! xcodebuild -version >/dev/null 2>&1 || ! swift --version >/dev/null 2>&1; then
   CLT=/Library/Developer/CommandLineTools
   SDK="$(ls -d "$CLT"/SDKs/MacOSX26*.sdk 2>/dev/null | sort -V | tail -n 1 || true)"
   if [[ -n "$SDK" ]]; then
     export DEVELOPER_DIR="$CLT"
     export SDKROOT="$SDK"
-    qecho "==> Xcode unavailable; using $CLT with $(basename "$SDK")"
+    say "==> Xcode unavailable; using $CLT with $(basename "$SDK")"
   fi
 fi
-qecho "==> swift build -c release --arch arm64 (Z1MenuBar)"
-# Build quietly unless --quiet not set; tee to log for errors
+
+BUILD=(swift build -c "$CONFIG" --arch arm64 --product Z1App --scratch-path "$SCRATCH")
+say "==> ${BUILD[*]}"
 LOG=$(mktemp -t z1build.XXXXXX)
-if ! swift build -c release --arch arm64 --product Z1MenuBar --disable-sandbox >"$LOG" 2>&1; then
+if ! "${BUILD[@]}" >"$LOG" 2>&1; then
   cat "$LOG" >&2; rm -f "$LOG"; exit 1
 fi
-[[ $QUIET -eq 1 ]] || cat "$LOG" | tail -n 20
+[[ $QUIET -eq 1 ]] || tail -n 3 "$LOG"
 rm -f "$LOG"
-BIN_DIR="$(swift build -c release --arch arm64 --show-bin-path --disable-sandbox 2>/dev/null)"
+BIN_DIR="$("${BUILD[@]}" --show-bin-path 2>/dev/null)"
 
 VERSION="${Z1_BUNDLE_VERSION:-$(date +%Y%m%d%H%M)}"
-SHORT="${Z1_SHORT_VERSION:-1.0}"
+SHORT="${Z1_SHORT_VERSION:-2.0}"
 
-qecho "==> bundling $APP ($SHORT $VERSION)"
+say "==> bundling $APP ($SHORT, build $VERSION)"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$BIN_DIR/Z1MenuBar" "$APP/Contents/MacOS/Z1WalkingPad"
+cp "$BIN_DIR/Z1App" "$APP/Contents/MacOS/$APP_NAME"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/"
-cp Resources/apply-update.sh "$APP/Contents/Resources/"
-chmod 755 "$APP/Contents/Resources/apply-update.sh"
-# Remove quarantine so Gatekeeper doesn't nag after ad-hoc resign
-xattr -cr "$APP" 2>/dev/null || true
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -65,11 +71,11 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleExecutable</key>
-    <string>Z1WalkingPad</string>
+    <string>${APP_NAME}</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
-    <string>dev.z1walkingpad.menubar</string>
+    <string>${BUNDLE_ID}</string>
     <key>CFBundleName</key>
     <string>Z1 WalkingPad</string>
     <key>CFBundleDisplayName</key>
@@ -82,69 +88,27 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <string>${VERSION}</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
-    <key>LSUIElement</key>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.healthcare-fitness</string>
+    <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
     <key>NSBluetoothAlwaysUsageDescription</key>
     <string>Z1 WalkingPad uses Bluetooth to connect to and control your KingSmith WalkingPad Z1 treadmill.</string>
-    <key>NSAppTransportSecurity</key>
-    <dict>
-        <key>NSAllowsLocalNetworking</key>
-        <true/>
-    </dict>
 </dict>
 </plist>
 PLIST
 
-# Ad-hoc, timestamp none, runtime hardened off — keeps TCC stable, no network.
-# Suppress output when --quiet
-qecho "==> ad-hoc codesign (stable bundle id + in-place, silent)"
-if [[ $QUIET -eq 1 ]]; then
-  codesign --force --sign - --entitlements "$ENTITLEMENTS" --timestamp=none --options runtime "$APP" >/dev/null 2>&1
-else
-  codesign --force --sign - --entitlements "$ENTITLEMENTS" --timestamp=none --options runtime "$APP"
-fi
-# Also strip quarantine again after sign (signing can re-add)
+# Ad-hoc signature with the Bluetooth entitlement; no timestamp, no network.
+say "==> ad-hoc codesign"
+codesign --force --sign - --entitlements "$ENTITLEMENTS" --timestamp=none --options runtime "$APP" >/dev/null 2>&1
 xattr -cr "$APP" 2>/dev/null || true
+codesign --verify --strict "$APP"
 
-if [[ $NO_INSTALL -eq 1 ]]; then
-    qecho "==> done (not installed): $(pwd)/$APP"
-    exit 0
+IDENT="$(codesign -d --verbose=2 "$APP" 2>&1 | sed -n 's/^Identifier=//p')"
+if [[ "$IDENT" != "$BUNDLE_ID" ]]; then
+  echo "error: expected identifier $BUNDLE_ID, got: $IDENT" >&2
+  exit 1
 fi
-
-# Graceful replace that keeps running walk alive:
-# - If running, try AppleScript quit (triggers cancelConnectionNow, belt stays moving, session persisted)
-# - Wait up to 5s, only then pkill. Data on disk already flushed per-second + throttled.
-if pgrep -f "/Applications/$APP" >/dev/null 2>&1; then
-    qecho "==> quitting running copy (graceful, belt stays moving)"
-    osascript -e 'tell application "Z1WalkingPad" to quit' >/dev/null 2>&1 || true
-    for i in 1 2 3 4 5; do
-      pgrep -f "/Applications/$APP" >/dev/null 2>&1 || break
-      sleep 1
-    done
-    if pgrep -f "/Applications/$APP" >/dev/null 2>&1; then
-      qecho "==> fallback pkill"
-      pkill -f "/Applications/$APP" || true
-      sleep 1
-    fi
-fi
-
-qecho "==> installing to /Applications (in-place ditto; keeps TCC & session)"
-mkdir -p "/Applications/$APP"
-# Ditto preserves TCC identity; --noqtn avoids quarantine flag
-ditto --noqtn "$APP" "/Applications/$APP" 2>/dev/null || ditto "$APP" "/Applications/$APP"
-xattr -cr "/Applications/$APP" 2>/dev/null || true
-rm -rf "$APP"
-
-if [[ $QUIET -eq 0 ]]; then
-  echo "==> verifying signature"
-  codesign -dv --verbose=0 "/Applications/$APP" 2>&1 | head -n 20
-fi
-IDENT="$(codesign -d --verbose=2 "/Applications/$APP" 2>&1 | sed -n 's/^Identifier=//p')"
-if [[ "$IDENT" != "dev.z1walkingpad.menubar" ]]; then
-    echo "error: expected identifier dev.z1walkingpad.menubar, got: $IDENT" >&2
-    exit 1
-fi
-qecho "==> identifier: $IDENT"
-qecho "==> installed: /Applications/$APP (session continues on relaunch — agent-data & sessions.json retained)"
+say "==> built $(pwd)/$APP"
