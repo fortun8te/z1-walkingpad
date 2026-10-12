@@ -40,19 +40,20 @@ settings, the remembered pad and the Bluetooth permission carry over.
 
 ### The window
 
-One small fixed window (320 × 568). Pages swap inside it — **Now**, **History**,
+One small fixed window (320 × 476). Pages swap inside it — **Now**, **History**,
 **Records**, **Settings** (⌘1–⌘4, also in the View menu) — and nothing ever
 resizes or animates. The background is flat and follows the system's light or
-dark appearance. Blue is the only colour: it means the belt is moving, or
-progress toward today's goal.
+dark appearance (dark is near-black). Blue is the only colour: it means the belt
+is moving, or progress toward today's goal.
 
-- **Now** — the pad's state beside the traffic lights, a dot-matrix speed
-  readout (click it to type an exact speed), a tick dial with − / + (← →),
-  Start/Stop (Space here, ⌃⌥W anywhere), this walk's numbers while the belt
-  moves, and the almanac: Day / Week / Month with ‹ ›, today's goal as ticks,
-  and the focused day's distance, time, steps and kcal. Estimates say "est.".
-- **History** — recent walks by day. **Records** — best walks, best days,
-  badges.
+- **Now** — only what matters while walking: the pad's state beside the
+  traffic lights, a dot-matrix speed readout (click it to type an exact
+  speed), the speed ruler with − / + and five presets, Start/Stop (Space here,
+  ⌃⌥W anywhere), this walk's numbers while the belt moves, and Today against
+  the goal. Estimates say "est.".
+- **History** — the almanac (Day / Week / Month with ‹ ›, the focused day's
+  distance, time, steps, kcal), then recent walks by day.
+- **Records** — best walks, best days, badges.
 - **Settings** — daily goal (minutes or steps), speed step, units, body weight
   (optionally from Apple Health), notifications and quiet-day reminders, stride,
   ⌃⌥W, start at login, connect/disconnect, and the two quits.
@@ -65,16 +66,17 @@ pad, **Quit, Keep Walking** leaves the belt as it is.
 UI harness, no Bluetooth and a scratch history:
 `Z1_PREVIEW=1 Z1_PREVIEW_DEMO=1 .build-frontend/debug/Z1App -z1.hasSeenIntro 1`
 prints the window number for `screencapture -l`. See
-`Sources/Z1App/PreviewHarness.swift` for the other switches (speed, page,
-lens, appearance, ticking telemetry).
+`Sources/Z1App/PreviewHarness.swift` for the other switches (speed, queued
+speed, page, lens, appearance, ticking telemetry).
 
 ### Picking a speed
 
-The − / + buttons nudge by the configured step. To go straight to a value,
-drag the dial or click the readout and type it (Enter applies it) — 0.1
-increments across the pad's 1.6–6.4 km/h range. The pad only accepts speed
-changes while the belt is moving, so a speed picked at a standstill is
-remembered and applied the moment you press Start.
+Press anywhere on the ruler to jump there, drag to fine-tune, tap a preset
+(2.5–4.5 km/h), or use the keys: ← → move by the configured step (0.1 by
+default), ↑ ↓ by 0.5. Click the readout to type an exact value. The pad only
+accepts speed changes while the belt is moving, so a speed picked at a
+standstill is queued ("Starts at 3.0 km/h") and applied the moment you press
+Start.
 
 ### Steps
 
