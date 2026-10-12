@@ -1,4 +1,4 @@
-# macOS — Z1 WalkingPad menu-bar app
+# macOS — Z1 WalkingPad app
 
 Native macOS control for FTMS walking pads over BLE (KingSmith WalkingPad Z1
 and other 0x1826 treadmills). KingSmith still gets the vendor unlock. Everyone
@@ -12,106 +12,81 @@ never touch the `0xFFC0`/`0xFFF0`/`0xFF00` services.
 
 | Piece | What |
 |---|---|
-| `Sources/Z1Core` | Pure CoreBluetooth + Foundation library: vendor/FTMS frames, BLE transport, `Z1Treadmill` actor, calorie metrics. No AppKit/SwiftUI. |
-| `Sources/Z1MenuBar` | SwiftUI `MenuBarExtra` app (deployment target macOS 14). Shows a Dock icon by default; Settings can hide it. |
+| `Sources/Z1Core` | Pure CoreBluetooth + Foundation library: vendor/FTMS frames, BLE transport, `Z1Treadmill` actor, calorie metrics, session store. No AppKit/SwiftUI. |
+| `Sources/Z1App` | The app: one small fixed window (AppKit shell, SwiftUI content, deployment target macOS 14), Dock icon, normal menu bar. |
 | `Sources/Z1Smoke` | `z1smoke` — hardware smoke test (connect, unlock, read telemetry; **never moves the belt**). |
 | `Sources/Z1CoreTestSuite` + `Sources/z1tests` | Framework-free unit tests + runner executable (see "Testing"). |
 | `Tests/Z1CoreTests` | `swift test` anchor (compiles/links the suite). |
-| `build-app.sh` | Release build → `Z1WalkingPad.app` → codesign with a stable identity (`Michael Computer Use Signing`, ad-hoc fallback) and Bluetooth entitlements, then **ditto in place** into `/Applications` (keeps Bluetooth TCC). Use `--no-install` to keep the bundle in `macos/`. |
+| `build-app.sh` | Release build → `dist/Z1WalkingPad.app`, ad-hoc signed with the Bluetooth entitlement. It installs nothing and touches no running copy. |
 
 ## Build & run
 
 Requires a Swift 6 toolchain (Command Line Tools is enough — no full Xcode
-needed). Developed with Swift 6.2.3, target `arm64-apple-macosx15.0`.
+needed).
 
 ```bash
 cd macos
 
-swift build                     # debug build of everything
-swift test                      # compiles the test suite (see "Testing")
-swift run z1tests               # actually runs the unit tests
-bash build-app.sh               # release build, stable codesign, in-place install
-                                #   (staging copy in macos/ is removed)
-bash build-app.sh --no-install  # leave the bundle in macos/ instead
+swift build --scratch-path .build-frontend --product Z1App   # debug build of the app
+swift run z1tests                                             # runs the unit tests
+bash build-app.sh                                             # release bundle in dist/
+bash build-app.sh --debug                                     # faster debug bundle
 ```
 
-Updates: the running app serves `http://127.0.0.1:8741`. Publish with
-`bash macos/release/publish.sh` (see [`release/README.md`](release/README.md)).
+To use a build, quit the running copy, then copy `dist/Z1WalkingPad.app` to
+`/Applications` yourself (`ditto dist/Z1WalkingPad.app /Applications/Z1WalkingPad.app`
+replaces it in place). The bundle id stays `dev.z1walkingpad.menubar`, so
+settings, the remembered pad and the Bluetooth permission carry over.
 
-Then open the app:
+### The window
 
-```bash
-open -a Z1WalkingPad           # installed bundle; with --no-install: open macos/Z1WalkingPad.app
-```
+One small fixed window (320 × 568). Pages swap inside it — **Now**, **History**,
+**Records**, **Settings** (⌘1–⌘4, also in the View menu) — and nothing ever
+resizes or animates. The background is flat and follows the system's light or
+dark appearance. Blue is the only colour: it means the belt is moving, or
+progress toward today's goal.
 
-A `Z1` (or a configurable readout) appears in the menu bar. Click it for the popover: connect/disconnect, big speed readout with
-− / + steppers, an exact-speed field and slider, Start/Stop, stats (elapsed,
-distance, steps, estimated kcal), an almanac card whose tile strip toggles
-between This week and 30 days on click, resetting the detail to Today each time
-(each day a small sky tile lit by goal progress), walk history, and a
-Settings section:
+- **Now** — the pad's state beside the traffic lights, a dot-matrix speed
+  readout (click it to type an exact speed), a tick dial with − / + (← →),
+  Start/Stop (Space here, ⌃⌥W anywhere), this walk's numbers while the belt
+  moves, and the almanac: Day / Week / Month with ‹ ›, today's goal as ticks,
+  and the focused day's distance, time, steps and kcal. Estimates say "est.".
+- **History** — recent walks by day. **Records** — best walks, best days,
+  badges.
+- **Settings** — daily goal (minutes or steps), speed step, units, body weight
+  (optionally from Apple Health), notifications and quiet-day reminders, stride,
+  ⌃⌥W, start at login, connect/disconnect, and the two quits.
 
-Steps can be pinned to a **hand-measured stride** (Settings → Your stride).
-This matters more than it looks: the pad's step sensor has never been validated,
-and the stride learner derives its curve *from* that sensor — so if the pad
-over-counts, the learner converges on a correspondingly short stride and every
-number stays self-consistent and wrong. Belt distance is the one exact figure,
-so counting your own steps once and entering metres-per-step makes the rest
-follow from it. Leave it at 0 to trust the pad. The popover shows the stride
-your current numbers imply, in m/step and steps/km, to compare against a count.
+Closing the window keeps the app running (the walk keeps being recorded and
+⌃⌥W keeps working); the Dock icon or ⌘0 brings it back. Quitting while the
+belt moves asks first: **Stop Belt and Quit** stops the belt and sleeps the
+pad, **Quit, Keep Walking** leaves the belt as it is.
 
-Left on auto, the step count is a **self-calibrating estimate**, not a blind
-copy of the pad's number. The app preserves every trusted-speed raw step, learns only from
-stable 12-second windows, requires three windows and 100 m, and rejects
-impossible stride samples. It then derives slow-speed steps from belt distance
-without jumping totals when calibration activates.
-
-- **Units** — Metric (km/h / km / kg) by default, with optional Imperial
-  (mph / mi+ft / lb). Also synced to the pad's own LED display (property 1, bit 0x0002).
-- **Body weight** — entered in the current unit, stored in kg for the
-  calorie math.
-- **Speed step** — stepper nudge size: 0.1 / 0.2 / 0.5 in the display unit
-  (converted to km/h on the wire, rounded to the pad's 0.1 km/h steps).
-- **Persist stats across sessions** — off (default) means pad-as-master:
-  stats follow the pad's counters and its resets. On means time, distance,
-  steps and kcal keep accumulating across Stops until you hit the **Clear**
-  button beside it (which also wipes the on-disk calorie state).
-
-- **Menu bar shows** — icon only, or speed / elapsed / distance / steps /
-  calories / today's minutes / today's steps beside it, with **Show even when
-  stopped** to keep it visible at a standstill.
-- **Daily goal** — minutes per day (default 120) **or** steps per day
-  (default 8,000), selectable in Settings; drives the progress bar under
-  "Today" and the sky tiles in the almanac card.
-- **Start at login** — registers the app with `SMAppService`. Only works from
-  an installed bundle (`build-app.sh` without `--no-install`), and the reason
-  is shown inline when it does not take.
-- **Notify when a walk is recorded** — a local notification per finished walk.
-
-All settings persist across launches. Two exits sit at the bottom of the
-popover: **Quit** leaves the belt exactly as it is (for when you are still
-walking and just want the pad's single BLE slot back), and **Stop belt & quit**
-stops the belt, sleeps the pad, then quits.
+UI harness, no Bluetooth and a scratch history:
+`Z1_PREVIEW=1 Z1_PREVIEW_DEMO=1 .build-frontend/debug/Z1App -z1.hasSeenIntro 1`
+prints the window number for `screencapture -l`. See
+`Sources/Z1App/PreviewHarness.swift` for the other switches (speed, page,
+lens, appearance, ticking telemetry).
 
 ### Picking a speed
 
-The − / + steppers nudge by the configured step. To go straight to a value,
-type it in the **Set** field (Enter applies it) or drag the slider — both in
-0.1 increments across the pad's 1.6–6.4 km/h range. The pad only accepts speed
+The − / + buttons nudge by the configured step. To go straight to a value,
+drag the dial or click the readout and type it (Enter applies it) — 0.1
+increments across the pad's 1.6–6.4 km/h range. The pad only accepts speed
 changes while the belt is moving, so a speed picked at a standstill is
 remembered and applied the moment you press Start.
+
+### Steps
+
+Belt distance is the one exact figure; steps and kcal are estimates and are
+labelled "est." everywhere. Settings shows the stride the current numbers imply.
 
 ### Today and history
 
 Every finished walk of two minutes or more is written to
 `~/Library/Application Support/Z1 WalkingPad/sessions.json`. Walks under
-2 active minutes are treated as noise (stepping on the belt for a moment) and
-are never recorded — this is the app's own history rule, separate from the
-10-minute/100 m minimum Apple Health uses when exporting workouts. The popover
-shows today's totals against your goal, an almanac strip of day tiles lit by
-goal progress that toggles between This week and 30 days on click (Today is
-always the default detail day), and the last five walks, each marked with
-whether it was recorded.
+2 active minutes are treated as noise and never recorded. Today's numbers fold
+in the walk still in progress.
 
 ### Staying connected
 
@@ -122,23 +97,12 @@ holds an idle-sleep assertion for exactly as long as the belt is moving so a
 long walk cannot be cut in half by the Mac dozing off. It cannot defeat closing
 the lid or an explicit Sleep.
 
-### Local session history
-
-Finished walks live only on this Mac:
-`~/Library/Application Support/Z1 WalkingPad/sessions.json`. There is no
-default iCloud Drive, Shortcuts, Apple Health, or WHOOP queue. Use the
-physical remote as usual while the menu-bar app is connected; the popover
-shows today's totals and recent walks from that local file.
-
 ## Bluetooth permission
 
 On first launch macOS asks for Bluetooth permission
-(`NSBluetoothAlwaysUsageDescription` is in the bundled Info.plist). Signed
-with the same identity (`Michael Computer Use Signing`) and **installed in
-place** (the build script ditto's into `/Applications/Z1WalkingPad.app`
-without deleting the bundle first), that prompt happens **once**. Rebuilds
-keep the TCC grant. Ad-hoc signing or deleting the app from `/Applications`
-will make macOS ask again.
+(`NSBluetoothAlwaysUsageDescription` is in the bundled Info.plist). Builds are
+ad-hoc signed, so a replaced bundle may ask again; copying it over the old one
+in place (`ditto`) rather than deleting first keeps that to a minimum.
 
 If you accidentally deny it: System Settings → Privacy & Security → Bluetooth →
 enable "Z1 WalkingPad".
