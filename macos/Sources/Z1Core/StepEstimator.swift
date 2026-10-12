@@ -198,17 +198,15 @@ public struct StepEstimator: Sendable {
     }
 }
 
-/// Smooths the 1 Hz step counter for the popover without changing the total.
-///
-/// Telemetry is the authority. Between packets the display is walked forward
-/// from that packet's total at the current speed/stride so the number ticks
-/// instead of jumping. The next packet **snaps back** to the summed deltas —
-/// leftover interpolation must not be folded in, or steps accumulate ~2×.
+/// Smooths the live step counter without adding interpolation to packet totals.
+/// `ingest` keeps the display monotonic within one counter run and resets it
+/// when distance regresses. Interpolation never changes `packetSteps`.
 public struct StepSmoother: Sendable, Equatable {
     public var packetSteps: Double = 0
     public var displaySteps: Double = 0
     public var speedKmh: Double = 0
     public var strideM: Double = 0.72
+    private var lastDistanceM: Int?
 
     public init() {}
 
@@ -225,6 +223,26 @@ public struct StepSmoother: Sendable, Equatable {
     public mutating func reset() {
         packetSteps = 0
         displaySteps = 0
+        lastDistanceM = nil
+    }
+
+    /// Accept a treadmill update without allowing a changed speed/stride to
+    /// rewrite steps already completed. Only newly travelled metres add new
+    /// steps. A real distance-counter reset starts a fresh displayed run.
+    public mutating func ingest(reportedSteps: Int, distanceM: Int) {
+        guard let previousDistance = lastDistanceM else {
+            set(Double(reportedSteps))
+            lastDistanceM = distanceM
+            return
+        }
+        if distanceM < previousDistance {
+            set(Double(reportedSteps))
+        } else if distanceM > previousDistance {
+            let delta = Double(distanceM - previousDistance) / max(0.31, strideM)
+            packetSteps += delta
+            displaySteps = max(displaySteps, packetSteps)
+        }
+        lastDistanceM = distanceM
     }
 
     /// Advance the display toward `packetSteps + expected`, never the packet total.
@@ -233,6 +251,6 @@ public struct StepSmoother: Sendable, Equatable {
         guard secondsSincePacket > 0.08, secondsSincePacket < 1.2 else { return }
         let expected = speedKmh / 3.6 * secondsSincePacket / strideM
         let target = packetSteps + expected
-        displaySteps = min(packetSteps + 3, max(packetSteps, target))
+        displaySteps = max(displaySteps, min(packetSteps + 3, max(packetSteps, target)))
     }
 }

@@ -10,5 +10,5 @@ import Z1Core
 //
 // Referencing the entry point forces the suite to link into the test bundle.
 enum SuiteAnchor {
-    static let runAll: @Sendable () -> Int32 = runAllZ1CoreTests
+    static let runAll: @Sendable () async -> Int32 = runAllZ1CoreTests
 }

@@ -20,6 +20,11 @@ public final class TestRunner {
         body(self)
     }
 
+    public func suite(_ name: String, _ body: (TestRunner) async -> Void) async {
+        currentSuite = name
+        await body(self)
+    }
+
     public func check(_ condition: Bool, _ message: String) {
         checks += 1
         if !condition {

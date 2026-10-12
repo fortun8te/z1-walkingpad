@@ -38,7 +38,9 @@ public enum Z1Protocol {
     /// For "KS-HD-Z1D" -> 71 00 05 01 2e 5a 31 44 74.
     public static func unlockFrame(deviceName: String) -> Data {
         let bytes = Array(deviceName.utf8)
-        precondition(bytes.count >= 4, "device name \(deviceName) too short to derive unlock code")
+        // A malformed BLE name must never terminate the app. Callers reject
+        // this empty frame before attempting the vendor unlock.
+        guard bytes.count >= 4 else { return Data() }
         let t = Array(bytes.suffix(4))
         let code = (UInt32(t[0]) | UInt32(t[1]) << 8 | UInt32(t[2]) << 16 | UInt32(t[3]) << 24) &+ 1
         let token: [UInt8] = [

@@ -153,9 +153,14 @@ public enum HighScoreComputer {
         // Daily aggregates
         var byDay: [Date: DayTotals] = [:]
         for s in sessions {
-            let d = calendar.startOfDay(for: s.startedAt)
-            if byDay[d] == nil { byDay[d] = DayTotals(day: d) }
-            byDay[d]!.add(s)
+            var day = calendar.startOfDay(for: s.startedAt)
+            let end = max(s.endedAt, s.startedAt.addingTimeInterval(1))
+            while day < end {
+                if byDay[day] == nil { byDay[day] = DayTotals(day: day) }
+                byDay[day]!.add(s, calendar: calendar)
+                guard let next = calendar.date(byAdding: .day, value: 1, to: day) else { break }
+                day = next
+            }
         }
         let days = Array(byDay.values)
         if let best = days.max(by: { $0.steps < $1.steps }) { hs.mostStepsDay = DayTotalsCodable(best) }

@@ -1,7 +1,8 @@
-"""Read-only. python -m z1_walkingpad_mcp.server"""
+"""Read-only WalkingPad stats. Run with python -m z1_walkingpad_mcp.server."""
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -12,52 +13,84 @@ from mcp.server.mcpserver import MCPServer
 
 mcp = MCPServer("z1")
 
+
 def _root() -> Path:
+    """Resolve on each read so a running MCP sees a newly created app folder."""
     paths = []
-    env = os.environ.get("Z1_SESSIONS_DIR")
-    if env:
-        paths.append(Path(env))
+    if env := os.environ.get("Z1_SESSIONS_DIR"):
+        paths.append(Path(env).expanduser())
     if sys.platform == "darwin":
         paths.append(Path.home() / "Library/Application Support/Z1 WalkingPad")
     paths.append(Path.home() / ".z1-walkingpad")
-    for p in paths:
-        if (p / "sessions.json").is_file() or (p / "live.json").is_file():
-            return p
-    return paths[0]
-
-
-ROOT = _root()
+    return next(
+        (path for path in paths if (path / "sessions.json").is_file() or (path / "live.json").is_file()),
+        paths[0],
+    )
 
 
 def _j(name: str) -> dict | list | None:
     try:
-        return json.loads((ROOT / name).read_text())
+        return json.loads((_root() / name).read_text())
     except (OSError, json.JSONDecodeError, TypeError):
         return None
 
 
 def _sessions() -> list[dict]:
     raw = _j("sessions.json")
-    return raw if isinstance(raw, list) else []
+    return [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
 
 
-def _row(s: dict) -> dict:
+def _local_day(timestamp: str) -> str:
+    try:
+        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        return parsed.astimezone().date().isoformat()
+    except (AttributeError, ValueError, TypeError):
+        return ""
+
+
+def _row(session: dict) -> dict:
     return {
-        "d": str(s.get("startedAt") or "")[:10],
-        "m": int(s.get("distanceM") or 0),
-        "s": int(s.get("activeDurationS") or 0),
-        "steps": int(s.get("steps") or 0),
-        "kcal": round(float(s.get("caloriesKcal") or 0), 1),
+        "d": _local_day(session.get("startedAt")),
+        "m": int(session.get("distanceM") or 0),
+        "s": int(session.get("activeDurationS") or 0),
+        "steps": int(session.get("steps") or 0),
+        "kcal": round(float(session.get("caloriesKcal") or 0), 1),
     }
 
 
-def _live() -> dict | None:
+def _fresh_live() -> dict | None:
     data = _j("live.json")
     if not isinstance(data, dict):
         return None
-    t = data.get("t")
-    if isinstance(t, (int, float)) and datetime.now(timezone.utc).timestamp() - t > 90:
+    if data.get("schema") == 1:
+        try:
+            updated = datetime.fromisoformat(data["updatedAt"].replace("Z", "+00:00"))
+            if abs((datetime.now(timezone.utc) - updated).total_seconds()) > 90:
+                return None
+        except (KeyError, AttributeError, TypeError, ValueError):
+            return None
+    else:
+        timestamp = data.get("t")
+        if not isinstance(timestamp, (int, float)) or datetime.now(timezone.utc).timestamp() - timestamp > 90:
+            return None
+    return data
+
+
+def _live() -> dict | None:
+    data = _fresh_live()
+    if data is None:
         return None
+    if data.get("schema") == 1:
+        return {
+            "kmh": data.get("speedKmh"),
+            "on": bool(data.get("beltRunning")),
+            "m": int(data.get("distanceM") or 0),
+            "s": int(data.get("elapsedSec") or 0),
+            "steps": int(data.get("steps") or 0),
+            "kcal": (round(float(data["caloriesKcal"]), 1)
+                     if data.get("caloriesKcal") is not None else None),
+            "connected": bool(data.get("connected")),
+        }
     return {
         "kmh": data.get("kmh"),
         "on": bool(data.get("on")),
@@ -70,30 +103,30 @@ def _live() -> dict | None:
 
 def _sum(rows: list[dict]) -> dict:
     return {
-        "m": sum(r["m"] for r in rows),
-        "s": sum(r["s"] for r in rows),
-        "steps": sum(r["steps"] for r in rows),
-        "kcal": round(sum(r["kcal"] for r in rows), 1),
+        "m": sum(row["m"] for row in rows),
+        "s": sum(row["s"] for row in rows),
+        "steps": sum(row["steps"] for row in rows),
+        "kcal": round(sum(row["kcal"] for row in rows), 1),
     }
 
 
 def _today() -> dict:
     day = date.today().isoformat()
-    rows = [_row(s) for s in _sessions() if str(s.get("startedAt") or "").startswith(day)]
-    tot = _sum(rows)
-    tot["d"] = day
-    live = _live()
-    if live:
-        if live["m"] >= tot["m"]:
-            tot.update({k: live[k] for k in ("m", "s", "steps", "kcal")})
-        else:
-            tot["m"] += live["m"]
-            tot["s"] += live["s"]
-            tot["steps"] += live["steps"]
-            tot["kcal"] = round(tot["kcal"] + live["kcal"], 1)
-        if live.get("on"):
-            tot["kmh"] = live["kmh"]
-    return tot
+    rows = [_row(session) for session in _sessions()]
+    total = _sum([row for row in rows if row["d"] == day])
+    total["d"] = day
+    live = _fresh_live()
+    if live and live.get("schema") == 1 and _local_day(live.get("updatedAt")) == day:
+        # App total includes completed walks and the open walk.
+        total["m"] = int(live.get("todayDistanceM") or 0)
+        total["s"] = int(round(float(live.get("todayMinutes") or 0) * 60))
+        if "todaySteps" in live:
+            total["steps"] = int(live["todaySteps"] or 0)
+        if "todayKcal" in live:
+            total["kcal"] = round(float(live["todayKcal"] or 0), 1)
+        if live.get("beltRunning"):
+            total["kmh"] = live.get("speedKmh")
+    return total
 
 
 @mcp.tool()
@@ -104,15 +137,17 @@ async def z1(q: str = "today") -> dict:
         return _today()
     if q in ("live", "l"):
         return _live() or {}
-    rows = [_row(s) for s in _sessions()]
+    rows = [_row(session) for session in _sessions()]
     if q in ("list", "recent", "r"):
         return {"list": rows[-5:]}
-    tot = _sum(rows)
-    tot["n"] = len(rows)
-    return tot
+    total = _sum(rows)
+    total["n"] = len(rows)
+    return total
 
 
 def run() -> None:
+    parser = argparse.ArgumentParser(description="Read-only Z1 WalkingPad stats MCP server. Control the pad in the macOS app.")
+    parser.parse_args()
     mcp.run()
 
 
