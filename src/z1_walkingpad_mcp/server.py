@@ -6,7 +6,6 @@ import argparse
 import json
 import math
 import os
-import sys
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
@@ -19,9 +18,7 @@ def _root() -> Path:
     paths = []
     if env := os.environ.get("Z1_SESSIONS_DIR"):
         paths.append(Path(env).expanduser())
-    if sys.platform == "darwin":
-        paths.append(Path.home() / "Library/Application Support/Z1 WalkingPad")
-    paths.append(Path.home() / ".z1-walkingpad")
+    paths.append(Path.home() / "Library/Application Support/Z1 WalkingPad")
     return next(
         (path for path in paths if (path / "sessions.json").is_file() or (path / "live.json").is_file()),
         paths[0],
@@ -118,20 +115,16 @@ def _share_of_day(session: dict, first: datetime, last: datetime) -> dict | None
 
 
 def _fresh_live() -> dict | None:
+    """The app's live.json, or None when it is missing or older than 90 s."""
     data = _j("live.json")
-    if not isinstance(data, dict):
+    if not isinstance(data, dict) or data.get("schema") != 1:
         return None
-    if data.get("schema") == 1:
-        try:
-            updated = datetime.fromisoformat(data["updatedAt"].replace("Z", "+00:00"))
-            if abs((datetime.now(timezone.utc) - updated).total_seconds()) > 90:
-                return None
-        except (KeyError, AttributeError, TypeError, ValueError):
+    try:
+        updated = datetime.fromisoformat(data["updatedAt"].replace("Z", "+00:00"))
+        if abs((datetime.now(timezone.utc) - updated).total_seconds()) > 90:
             return None
-    else:
-        timestamp = data.get("t")
-        if not isinstance(timestamp, (int, float)) or datetime.now(timezone.utc).timestamp() - timestamp > 90:
-            return None
+    except (KeyError, AttributeError, TypeError, ValueError):
+        return None
     return data
 
 
@@ -139,24 +132,15 @@ def _live() -> dict | None:
     data = _fresh_live()
     if data is None:
         return None
-    if data.get("schema") == 1:
-        return {
-            "kmh": data.get("speedKmh"),
-            "on": bool(data.get("beltRunning")),
-            "m": _int(data.get("distanceM")),
-            "s": _int(data.get("elapsedSec")),
-            "steps": _int(data.get("steps")),
-            "kcal": (round(_float(data["caloriesKcal"]), 1)
-                     if data.get("caloriesKcal") is not None else None),
-            "connected": bool(data.get("connected")),
-        }
     return {
-        "kmh": data.get("kmh"),
-        "on": bool(data.get("on")),
-        "m": _int(data.get("m")),
-        "s": _int(data.get("s")),
+        "kmh": data.get("speedKmh"),
+        "on": bool(data.get("beltRunning")),
+        "m": _int(data.get("distanceM")),
+        "s": _int(data.get("elapsedSec")),
         "steps": _int(data.get("steps")),
-        "kcal": round(_float(data.get("kcal")), 1),
+        "kcal": (round(_float(data["caloriesKcal"]), 1)
+                 if data.get("caloriesKcal") is not None else None),
+        "connected": bool(data.get("connected")),
     }
 
 
@@ -180,7 +164,7 @@ def _today() -> dict:
     live = _fresh_live()
     # The app labels its totals with the day they belong to. Just after
     # midnight it can still be publishing yesterday's, in a file written today.
-    if live and live.get("schema") == 1 and (live.get("todayDate") or _local_day(live.get("updatedAt"))) == day:
+    if live and (live.get("todayDate") or _local_day(live.get("updatedAt"))) == day:
         # App total includes completed walks and the open walk.
         total["m"] = _int(live.get("todayDistanceM"))
         total["s"] = round(_float(live.get("todayMinutes")) * 60)

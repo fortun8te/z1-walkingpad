@@ -8,11 +8,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-mcp = []  # Compatibility extra; MCP is required by the read-only package.
 dev = ["pytest", "ruff"]
 
 [project.scripts]
-z1-walkingpad = "z1_walkingpad_mcp.server:run"
 z1-walkingpad-mcp = "z1_walkingpad_mcp.server:run"
 
 [build-system]
@@ -25,4 +23,4 @@ packages = ["src/z1_walkingpad_mcp"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-norecursedirs = ["docs/legacy-python-tests", "scripts", ".git", ".venv", "macos", "work"]
+norecursedirs = ["scripts", ".git", ".venv", "macos", "work"]

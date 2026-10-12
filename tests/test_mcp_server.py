@@ -40,7 +40,7 @@ def test_live_calories_are_session_calories(tmp_path, monkeypatch):
     assert server._today()["kcal"] == 87.5
 
 
-def test_old_schema_one_missing_calories_is_unknown(tmp_path, monkeypatch):
+def test_missing_calories_are_unknown(tmp_path, monkeypatch):
     data = snapshot(tmp_path, monkeypatch)
     del data["caloriesKcal"]
     (tmp_path / "live.json").write_text(json.dumps(data))
@@ -62,13 +62,12 @@ def test_stale_snapshot_does_not_override_history(tmp_path, monkeypatch):
     assert server._today()["steps"] == 0
 
 
-def test_entrypoints_resolve_to_read_only_server():
+def test_entrypoint_resolves_to_read_only_server():
     root = Path(__file__).resolve().parents[1]
     config = (root / "pyproject.toml").read_text()
-    for command in ("z1-walkingpad", "z1-walkingpad-mcp"):
-        target = re.search(r'^' + re.escape(command) + r' = "([^"]+)"$', config, re.MULTILINE).group(1)
-        module, function = target.split(":")
-        assert getattr(importlib.import_module(module), function) is server.run
+    target = re.search(r'^z1-walkingpad-mcp = "([^"]+)"$', config, re.MULTILINE).group(1)
+    module, function = target.split(":")
+    assert getattr(importlib.import_module(module), function) is server.run
 
 
 def test_removed_control_command_fails_without_starting_server():
@@ -87,9 +86,7 @@ def test_module_help_describes_read_only_role():
     assert "Read-only" in result.stdout
 
 
-# --- audit: local-day boundaries and the live merge --------------------------
-# Each test below fails on the server the audit described (UTC text prefix for
-# the day, live run replacing the day's total, root fixed at import time).
+# --- local-day boundaries and the live merge ---------------------------------
 
 import time as _time
 from datetime import date as _real_date
@@ -97,8 +94,6 @@ from datetime import date as _real_date
 
 def point_at(tmp_path, monkeypatch):
     monkeypatch.setenv("Z1_SESSIONS_DIR", str(tmp_path))
-    if hasattr(server, "ROOT"):  # the audited server resolved its folder at import
-        monkeypatch.setattr(server, "ROOT", tmp_path)
 
 
 def freeze_today(monkeypatch, year, month, day):
@@ -166,15 +161,9 @@ def test_a_walk_across_local_midnight_is_split_like_the_app_splits_it(tmp_path, 
 
 
 def test_a_live_run_never_replaces_the_days_total(tmp_path, monkeypatch):
-    """Old rule: live.m >= today.m replaced the total with the live run."""
+    """The open walk's counters (distanceM) are not the day's total (todayDistanceM)."""
     point_at(tmp_path, monkeypatch)
-    now = datetime.now().astimezone()
-    start = now.replace(hour=12, minute=0, second=0, microsecond=0)
-    write_sessions(tmp_path, [walk(start.isoformat(), (start + timedelta(minutes=20)).isoformat(),
-                                   meters=3000, seconds=1200, steps=4000, kcal=100.0)])
-    # The compact shape older builds wrote: the open run only, bigger than the day so far.
-    (tmp_path / "live.json").write_text(json.dumps(
-        dict(t=datetime.now(timezone.utc).timestamp(), on=True, kmh=3.2, m=5000, s=3000, steps=7000, kcal=200.0)))
+    snapshot(tmp_path, monkeypatch, distanceM=5000, steps=7000, todayDistanceM=3000, todaySteps=4000)
     today = server._today()
     assert today["m"] == 3000 and today["steps"] == 4000
     assert server._live()["m"] == 5000  # the live run is still readable on its own
@@ -202,16 +191,12 @@ def test_totals_labelled_with_yesterday_are_not_todays(tmp_path, monkeypatch):
 
 
 def test_folder_that_appears_later_is_found(tmp_path, monkeypatch):
-    """The audited server fixed its folder when the module was imported."""
+    """The folder is resolved on every read, not when the module is imported."""
     later = tmp_path / "created-after-import"
     monkeypatch.setenv("Z1_SESSIONS_DIR", str(later))
-    if hasattr(server, "ROOT"):
-        monkeypatch.setattr(server, "ROOT", later)
     assert server._sessions() == []
     later.mkdir()
     (later / "sessions.json").write_text(json.dumps([walk("2026-07-13T09:00:00Z", "2026-07-13T09:20:00Z")]))
-    if hasattr(server, "ROOT"):
-        pytest.skip("audited server cannot see it")
     assert len(server._sessions()) == 1
 
 
