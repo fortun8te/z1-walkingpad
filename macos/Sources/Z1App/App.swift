@@ -40,6 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     func applicationDidFinishLaunching(_ notification: Notification) {
         model = TreadmillViewModel()
         mainWindow = MainWindow(model: model, navigation: navigation)
+        model.windowIsVisible = { [weak self] in self?.mainWindow.isVisible ?? false }
         mainWindow.show()
         if TreadmillViewModel.isPreview, let window = mainWindow.window {
             print("Z1_PREVIEW_WINDOW \(window.windowNumber)")

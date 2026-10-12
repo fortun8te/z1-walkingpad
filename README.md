@@ -41,9 +41,16 @@ The look is settled and described in [docs/ui-systems.md](docs/ui-systems.md).
 ### Staying connected
 
 The app remembers the pad's peripheral identifier and re-adopts it directly
-instead of scanning, retries with a backoff after a drop, reconnects when the
-Mac wakes, and holds an idle-sleep assertion for exactly as long as the belt
-moves so a long walk is not cut in half. It cannot defeat closing the lid.
+instead of scanning, reconnects when the Mac wakes, and holds an idle-sleep
+assertion for exactly as long as the belt moves so a long walk is not cut in
+half. It cannot defeat closing the lid.
+
+Without a pad it scans fast (20 s scans, retries backing off to 30 s) while
+the window is visible or the app is frontmost, for five minutes after launch,
+after a wake and after a lost connection. Otherwise it looks for 10 s every two
+minutes, so a pad that is switched off costs next to nothing. Bringing the
+window forward, Connect and ⌃⌥W look at once. The rule is
+`ReconnectPolicy` in `Z1Core`.
 
 The pad accepts one Bluetooth controller at a time: quit KS Fit (and the
 Python tools in `scripts/`) before connecting, and never pair the pad in macOS
@@ -66,7 +73,7 @@ Belt distance is the one exact figure. Steps and kilocalories are estimates;
 the window does not show them, `live.json` and the history carry them.
 
 An idle app does no work: no polling, no animation. What it schedules is
-one-shot and event-driven: the reconnect backoff while there is no pad, the
+one-shot and event-driven: the paced reconnect look while there is no pad, the
 deadlines that close a walk (two minutes after Stop, ten for the Health
 workout), and one reminder check armed for the next moment a reminder could be
 due.

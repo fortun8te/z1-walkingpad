@@ -247,7 +247,8 @@ public actor Z1Treadmill {
         ownDisconnectsInFlight -= 1
     }
 
-    public func connect() async throws {
+    /// `scanTimeout` bounds the scan for a pad that is not already remembered.
+    public func connect(scanTimeout: TimeInterval = Z1Constants.scanTimeout) async throws {
         guard status.phase == .disconnected || status.phase == .error else { return }
         ensurePumpStarted()
         let epoch = linkEpoch.advance()
@@ -259,7 +260,7 @@ public actor Z1Treadmill {
         do {
             try await transport.waitPoweredOn()
             try ensureCurrent(epoch)
-            let (name, adopted) = try await resolvePeripheral()
+            let (name, adopted) = try await resolvePeripheral(scanTimeout: scanTimeout)
             try ensureCurrent(epoch)
             mutate { $0.phase = .connecting; $0.deviceName = name }
             do {
@@ -645,7 +646,7 @@ public actor Z1Treadmill {
     /// Prefer re-adopting the peripheral macOS already knows (instant) over a
     /// fresh scan (seconds, and it wakes every BLE radio in the room). Returns
     /// the device name and whether it came from the remembered identifier.
-    private func resolvePeripheral() async throws -> (name: String, adopted: Bool) {
+    private func resolvePeripheral(scanTimeout: TimeInterval) async throws -> (name: String, adopted: Bool) {
         if let saved = defaults.string(forKey: Self.knownPeripheralKey),
            let identifier = UUID(uuidString: saved),
            let name = transport.adoptKnownPeripheral(
@@ -655,7 +656,7 @@ public actor Z1Treadmill {
         {
             return (name, true)
         }
-        let name = try await transport.scanForTreadmill(timeout: Z1Constants.scanTimeout)
+        let name = try await transport.scanForTreadmill(timeout: scanTimeout)
         return (name, false)
     }
 

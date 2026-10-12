@@ -59,6 +59,7 @@ final class ScriptedPad: Z1PadTransport, @unchecked Sendable {
     private var controlTimes: [ContinuousClock.Instant] = []
     private var linkedFlag = false
     private var disconnects = 0
+    private var scanTimeoutsSeen: [TimeInterval] = []
 
     // Script. Set before the driver connects.
     var vendor = false
@@ -140,7 +141,11 @@ final class ScriptedPad: Z1PadTransport, @unchecked Sendable {
     func waitPoweredOn() async throws {}
     func adoptKnownPeripheral(identifier: UUID, namePrefix: String) -> String? { nil }
 
+    /// The timeout each scan was asked for.
+    var scanTimeouts: [TimeInterval] { lock.withLock { scanTimeoutsSeen } }
+
     func scanForTreadmill(timeout: TimeInterval) async throws -> String {
+        lock.withLock { scanTimeoutsSeen.append(timeout) }
         if holdScan { await scanGate.wait() }
         return deviceName
     }

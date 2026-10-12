@@ -130,6 +130,10 @@ final class TreadmillViewModel {
     @ObservationIgnored private let hotKey = GlobalHotKey()
     /// Guards against an old reconnect task clearing a newer one's handle.
     @ObservationIgnored private var reconnectGeneration = 0
+    /// How hard to scan while there is no pad: see `ReconnectPolicy`.
+    @ObservationIgnored private var reconnectPolicy = ReconnectPolicy()
+    /// Whether the app's window is on screen. Set by the window's owner.
+    @ObservationIgnored var windowIsVisible: () -> Bool = { false }
     /// Coalesced speed target for rapid − / + taps, so `busy` drops none.
     /// Observed: until telemetry reaches it, it is what the readout shows, so
     /// a tap reads at once instead of after the belt has ramped.
@@ -606,6 +610,7 @@ final class TreadmillViewModel {
         next.steps = Int(stepCounter.steps.rounded(.down))
         setStatus(next)
         if newStatus.phase != previousPhase {
+            if previousPhase == .ready { reconnectPolicy.lastLinkLoss = Date() }
             recordConnectionChange(newStatus)
             if newStatus.phase == .error {
                 failedAttempts += 1
@@ -875,6 +880,7 @@ final class TreadmillViewModel {
             // Waking is the best moment to retry: the pad is usually right
             // there and the backoff would otherwise idle for 30 s.
             Task { @MainActor in
+                self?.reconnectPolicy.lastWake = Date()
                 self?.refreshHistory()
                 self?.applyHealthWeightIfAvailable()
                 self?.armReminderTimer()
@@ -894,8 +900,22 @@ final class TreadmillViewModel {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.applyHealthWeightIfAvailable() }
+            Task { @MainActor in
+                self?.applyHealthWeightIfAvailable()
+                self?.hurryReconnect()
+            }
         }
+    }
+
+    private var reconnectPace: ReconnectPolicy.Pace {
+        reconnectPolicy.pace(at: Date(), watched: NSApp.isActive || windowIsVisible())
+    }
+
+    /// The app has come forward: anyone looking at it is waiting for the pad,
+    /// so a slow wait in progress gives way to a fast look now.
+    private func hurryReconnect() {
+        guard automaticConnectionEnabled, !isConnected, !isConnecting, !busy else { return }
+        scheduleReconnect(after: 0.5, force: true)
     }
 
     // Connecting only scans, unlocks telemetry and reads settings; it never
@@ -912,20 +932,23 @@ final class TreadmillViewModel {
             guard let self else { return }
             defer { if self.reconnectGeneration == generation { self.reconnectTask = nil } }
             if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
-            // Backoff, not a fixed poll: retry hard right after a drop, then
-            // ease off so a pad switched off for the day costs nothing.
+            // Backoff, not a fixed poll, and paced by `ReconnectPolicy`: hard
+            // while someone is looking or the pad was just there, a short look
+            // every two minutes otherwise, so a pad switched off for the day
+            // costs next to nothing.
             var attempt = 0
             while !Task.isCancelled, self.automaticConnectionEnabled {
                 if self.status.phase == .ready { return }
                 if !self.busy,
                    self.status.phase == .disconnected || self.status.phase == .error
                 {
-                    try? await self.treadmill.connect()
+                    let scan = ReconnectPolicy.scanTimeout(for: self.reconnectPace)
+                    try? await self.treadmill.connect(scanTimeout: scan)
                     if self.status.phase == .ready { return }
                 }
                 attempt += 1
-                let backoff = min(30, pow(2, Double(min(attempt, 5))))
-                try? await Task.sleep(for: .seconds(backoff))
+                let pause = ReconnectPolicy.pause(afterAttempt: attempt, pace: self.reconnectPace)
+                try? await Task.sleep(for: .seconds(pause))
             }
         }
     }
