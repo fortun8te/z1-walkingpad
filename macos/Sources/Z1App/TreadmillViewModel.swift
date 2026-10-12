@@ -24,6 +24,9 @@ final class TreadmillViewModel {
     /// Last failed command, shown until the next success. Kept apart from
     /// the status stream, which replaces its own error every second.
     private(set) var commandError: String?
+    private enum FailedCommand { case connection, start, stop, speed(Double) }
+    @ObservationIgnored private var failedCommand: FailedCommand?
+    @ObservationIgnored private var historyRetryAt: Date?
     /// How many scan/connect attempts have failed in a row. One failure is
     /// normal (the pad sleeps); a run of them means it is not there at all.
     private(set) var failedAttempts = 0
@@ -38,26 +41,24 @@ final class TreadmillViewModel {
     /// Bumps whenever the session store's contents change. Anything computed
     /// from the store reads it, so it redraws exactly then.
     private(set) var historyRevision = 0
-    private(set) var recentWalks: [WalkSession] = []
-    private(set) var highScores = HighScores()
-    private(set) var achievements: [Achievement] = []
     /// Today, history plus the walk in progress. Changes with every frame
-    /// while the belt moves; the numbers under the almanac read it.
+    /// while the belt moves; the Today card reads it.
     private(set) var today = DayTotals(day: Date())
-    /// Today again, rounded to what a chart can show (whole minutes, 50 m,
-    /// 50 steps). Bars and cells read this, so they redraw a few times a walk
-    /// instead of every second.
+    /// Today again, rounded to what a bar can show (whole minutes, 50 m).
+    /// The week bars read this, so they redraw a few times a walk instead of
+    /// every second.
     private(set) var todayCoarse = DayTotals(day: Date())
     /// Why start-at-login did not take, if it did not.
     private(set) var loginItemMessage: String?
 
     // MARK: persisted settings (UserDefaults, the same store @AppStorage uses)
 
-    /// Body weight, always stored in kg; displayed and edited in the current
-    /// unit. Fed to the calorie maths in kg.
+    /// Body weight in kg, for the calorie figure that goes to Apple Health.
+    /// Not shown: it follows the latest weight in a Health export, else the
+    /// stored or default value.
     var weightKg: Double {
         didSet {
-            UserDefaults.standard.set(weightKg, forKey: Self.weightKey)
+            settingsDefaults.set(weightKg, forKey: Self.weightKey)
             if canCommand { Task { await treadmill.setWeight(weightKg) } }
             recomputeToday()
         }
@@ -67,85 +68,36 @@ final class TreadmillViewModel {
     /// display (best-effort).
     var unitsImperial: Bool {
         didSet {
-            UserDefaults.standard.set(unitsImperial, forKey: Self.unitsKey)
+            settingsDefaults.set(unitsImperial, forKey: Self.unitsKey)
             if canCommand { Task { try? await treadmill.setDisplayUnits(imperial: unitsImperial) } }
-        }
-    }
-
-    /// − / + nudge size, in the current display unit.
-    var speedStep: Double {
-        didSet { UserDefaults.standard.set(speedStep, forKey: Self.stepKey) }
-    }
-
-    /// Optional hand-measured stride in metres. 0 = gait model from speed.
-    var strideOverrideM: Double {
-        didSet {
-            UserDefaults.standard.set(strideOverrideM, forKey: Self.strideKey)
-            if canCommand { Task { await treadmill.setStrideOverride(strideOverrideM > 0 ? strideOverrideM : nil) } }
-        }
-    }
-
-    /// Accumulate stats across pad restarts until cleared. Off = pad is master.
-    var persistStats: Bool {
-        didSet {
-            UserDefaults.standard.set(persistStats, forKey: Self.persistKey)
-            if canCommand { Task { await treadmill.setPersistStats(persistStats) } }
         }
     }
 
     /// Daily walking target in minutes (0 = no goal).
     var dailyGoalMinutes: Int {
-        didSet { UserDefaults.standard.set(dailyGoalMinutes, forKey: Self.goalKey) }
-    }
-
-    /// Measure the day in steps instead of minutes.
-    var goalIsSteps: Bool {
-        didSet { UserDefaults.standard.set(goalIsSteps, forKey: Self.goalKindKey) }
-    }
-
-    /// Step goal; 8,000 is where the mortality-risk curve plateaus for
-    /// under-60s in the step-count meta-analyses.
-    var dailyGoalSteps: Int {
-        didSet { UserDefaults.standard.set(dailyGoalSteps, forKey: Self.goalStepsKey) }
+        didSet {
+            settingsDefaults.set(dailyGoalMinutes, forKey: Self.goalKey)
+            publishLive()
+        }
     }
 
     /// Quiet-day nudges. Strictly capped: work hours, weekdays, at most two a day.
     var remindersEnabled: Bool {
-        didSet { UserDefaults.standard.set(remindersEnabled, forKey: Self.remindersKey) }
-    }
-
-    var reminderGapHours: Int {
-        didSet { UserDefaults.standard.set(reminderGapHours, forKey: Self.reminderGapKey) }
-    }
-
-    var notificationsEnabled: Bool {
         didSet {
-            UserDefaults.standard.set(notificationsEnabled, forKey: Self.notificationsKey)
-            if notificationsEnabled { notifier.requestAuthorizationIfNeeded() }
+            settingsDefaults.set(remindersEnabled, forKey: Self.remindersKey)
+            if remindersEnabled, !Self.isPreview { notifier.requestAuthorizationIfNeeded() }
         }
     }
 
-    /// ⌃⌥W starts or stops the belt from anywhere.
-    var globalShortcutEnabled: Bool {
-        didSet {
-            UserDefaults.standard.set(globalShortcutEnabled, forKey: Self.globalShortcutKey)
-            applyGlobalShortcut()
-        }
-    }
+    /// Hours without a walk before a reminder, and the minimum gap between two.
+    private static let reminderGapHours = 3
+
 
     var launchAtLogin: Bool {
         didSet {
-            guard launchAtLogin != LoginItem.isEnabled else { return }
+            guard !Self.isPreview, launchAtLogin != LoginItem.isEnabled else { return }
             loginItemMessage = LoginItem.set(launchAtLogin)
             if loginItemMessage != nil { launchAtLogin = LoginItem.isEnabled }
-        }
-    }
-
-    /// Pull the latest Health body-mass sample from the iCloud Shortcuts file.
-    var useHealthWeight: Bool {
-        didSet {
-            UserDefaults.standard.set(useHealthWeight, forKey: Self.useHealthWeightKey)
-            if useHealthWeight { applyHealthWeightIfAvailable() }
         }
     }
 
@@ -169,7 +121,6 @@ final class TreadmillViewModel {
     @ObservationIgnored private var liveStepTimer: Timer?
     @ObservationIgnored private var stepSmoother = StepSmoother()
     @ObservationIgnored private var lastStepPacketAt = Date()
-    @ObservationIgnored private var highestDisplayedSteps = 0
     @ObservationIgnored var healthTracker: RemoteSessionTracker
     @ObservationIgnored let sessionStore: SessionStore
     /// `live.json` for Superapp. Nil in the harness, which must never write
@@ -183,8 +134,14 @@ final class TreadmillViewModel {
     /// Guards against an old reconnect task clearing a newer one's handle.
     @ObservationIgnored private var reconnectGeneration = 0
     /// Coalesced speed target for rapid − / + taps, so `busy` drops none.
-    @ObservationIgnored private var coalescedTargetKmh: Double?
+    /// Observed: until telemetry reaches it, it is what the readout shows, so
+    /// a tap reads at once instead of after the belt has ramped.
+    private var coalescedTargetKmh: Double?
     @ObservationIgnored private var speedTask: Task<Void, Never>?
+    @ObservationIgnored private var speedCommandInFlight = false
+    @ObservationIgnored private var speedGeneration = 0
+    @ObservationIgnored private var controlIntentGeneration = 0
+    @ObservationIgnored private var activeOperations = 0
     /// Today from the store alone, without the open walk.
     @ObservationIgnored var storedToday = DayTotals(day: Date())
     @ObservationIgnored private var historySignature = HistorySignature()
@@ -192,43 +149,32 @@ final class TreadmillViewModel {
 
     static let weightKey = "weightKg"
     static let unitsKey = "unitsImperial"
-    static let stepKey = "speedStep"
-    static let persistKey = "persistStats"
     static let goalKey = "dailyGoalMinutes"
-    static let goalKindKey = "goalIsSteps"
     static let remindersKey = "remindersEnabled"
-    static let reminderGapKey = "reminderGapHours"
     static let reminderLogKey = "z1.reminderLog"
-    static let goalStepsKey = "dailyGoalSteps"
-    static let notificationsKey = "notificationsEnabled"
     static let strideKey = "z1.calibratedStrideM"
-    static let globalShortcutKey = "z1.globalShortcut"
     static let loginStatusKey = "loginItemStatus"
     static let connectionLogKey = "z1.connectionLog"
     static let healthTrackerKey = "z1.automaticHealthSession"
-    static let useHealthWeightKey = "z1.useHealthWeight"
+
+    private var settingsDefaults: UserDefaults { Self.settingsStore }
+    static let settingsStore: UserDefaults = {
+        guard isPreview else { return .standard }
+        // A preview can be clicked freely without altering the installed app.
+        return UserDefaults(suiteName: "dev.z1walkingpad.preview.\(ProcessInfo.processInfo.processIdentifier)")!
+    }()
 
     init() {
-        let defaults = UserDefaults.standard
+        let defaults = Self.settingsStore
         let storedWeight = defaults.double(forKey: Self.weightKey)
         weightKg = storedWeight > 0 ? storedWeight : Z1Metrics.defaultWeightKg
         // The Z1 protocol and display are metric, so default to km/h.
         unitsImperial = defaults.object(forKey: Self.unitsKey) as? Bool ?? false
-        let storedStep = defaults.double(forKey: Self.stepKey)
-        speedStep = storedStep > 0 ? storedStep : 0.1
-        persistStats = defaults.bool(forKey: Self.persistKey)
-        strideOverrideM = defaults.double(forKey: Self.strideKey)
         dailyGoalMinutes = defaults.object(forKey: Self.goalKey) as? Int ?? 120
-        goalIsSteps = defaults.bool(forKey: Self.goalKindKey)
         remindersEnabled = defaults.object(forKey: Self.remindersKey) as? Bool ?? true
-        reminderGapHours = defaults.object(forKey: Self.reminderGapKey) as? Int ?? 3
-        dailyGoalSteps = defaults.object(forKey: Self.goalStepsKey) as? Int ?? 8_000
-        notificationsEnabled = defaults.object(forKey: Self.notificationsKey) as? Bool ?? true
         launchAtLogin = LoginItem.isEnabled
-        globalShortcutEnabled = defaults.object(forKey: Self.globalShortcutKey) as? Bool ?? true
-        useHealthWeight = defaults.object(forKey: Self.useHealthWeightKey) as? Bool ?? true
         healthTracker = Self.restoreHealthTracker(from: defaults)
-        sessionStore = Self.isPreview ? PreviewHarness.sessionStore() : SessionStore()
+        sessionStore = Self.isPreview ? PreviewHarness.sessionStore() : SessionStore(openWalkStartedAt: healthTracker.openWalkTotals?.startedAt, hasPendingHistoryLogs: healthTracker.hasPendingLogs)
         liveExport = Self.isPreview ? nil : LiveExport()
 
         if Self.isPreview {
@@ -238,9 +184,11 @@ final class TreadmillViewModel {
         }
 
         Task { await treadmill.setWeight(weightKg) }
-        Task { await treadmill.setPersistStats(persistStats) }
-        if strideOverrideM > 0 {
-            Task { await treadmill.setStrideOverride(strideOverrideM) }
+        // A stride measured by hand in an earlier version still feeds the
+        // step estimate that goes to Health; there is no control for it now.
+        let stride = defaults.double(forKey: Self.strideKey)
+        if stride > 0 {
+            Task { await treadmill.setStrideOverride(stride) }
         }
         pumpTask = Task { [weak self] in
             guard let self else { return }
@@ -269,9 +217,9 @@ final class TreadmillViewModel {
         undoAutomaticLoginItem()
         refreshHistory()
         installPowerObservers()
-        startHousekeeping()
+        updateHousekeeping()
         applyGlobalShortcut()
-        if notificationsEnabled { notifier.requestAuthorizationIfNeeded() }
+        if remindersEnabled { notifier.requestAuthorizationIfNeeded() }
         applyHealthWeightIfAvailable()
         // Body weight changes a few times a week at most.
         weightTimer = Timer.scheduledTimer(withTimeInterval: 10 * 60, repeats: true) { [weak self] _ in
@@ -283,7 +231,7 @@ final class TreadmillViewModel {
     // No deinit: this model lives as long as the process.
 
     func applyHealthWeightIfAvailable() {
-        guard useHealthWeight, let sample = HealthWeight.load() else { return }
+        guard !Self.isPreview, let sample = HealthWeight.load() else { return }
         let rounded = (sample.kg * 10).rounded() / 10
         if abs(weightKg - rounded) >= 0.05 {
             weightKg = rounded
@@ -303,22 +251,26 @@ final class TreadmillViewModel {
         unitsImperial ? Z1Units.kmhToMph(live.speedKmh) : live.speedKmh
     }
 
-    /// − / + nudge in km/h for the wire protocol, snapped to the pad's 0.1 grid.
-    private var speedStepKmh: Double {
-        let raw = unitsImperial ? Z1Units.mphToKmh(speedStep) : speedStep
-        return max(0.1, (raw * 10).rounded() / 10)
-    }
-
     func formatDistance(_ meters: Int) -> String {
         if unitsImperial {
             let miles = Z1Units.metersToMiles(Double(meters))
             return miles < 0.1
                 ? "\(Int(Z1Units.metersToFeet(Double(meters)).rounded())) ft"
-                : String(format: "%.2f mi", miles)
+                : "\(Self.decimal(miles, digits: 2)) mi"
         }
         // Always km in metric. Switching units at 1000 m made the number jump
         // between "940 m" and "1.02 km" mid-walk, which reads as a reset.
-        return String(format: "%.2f km", Double(meters) / 1000)
+        return "\(Self.decimal(Double(meters) / 1000, digits: 2)) km"
+    }
+
+    /// A speed in the display unit, one decimal, in the user's number format
+    /// (so "3,4" next to "3.120 steps" in a Dutch region, never a mix).
+    func formatSpeed(_ value: Double) -> String {
+        Self.decimal(value, digits: 1)
+    }
+
+    static func decimal(_ value: Double, digits: Int) -> String {
+        value.formatted(.number.precision(.fractionLength(digits)).grouping(.never))
     }
 
     func formatElapsed(_ seconds: Int) -> String {
@@ -334,11 +286,6 @@ final class TreadmillViewModel {
         return h > 0 ? "\(h)h \(m)m" : "\(m)m"
     }
 
-    var strideLabel: String {
-        guard let stride = live.impliedStrideM else { return "—" }
-        return "\(Int((stride * 100).rounded())) cm modelled"
-    }
-
     // MARK: - actions
 
     /// The harness has no pad: actions are inert there, and touching
@@ -347,7 +294,7 @@ final class TreadmillViewModel {
 
     func connectTapped() {
         guard canCommand, !busy else { return }
-        run {
+        run(retry: .connection) {
             if self.isConnected {
                 self.automaticConnectionEnabled = false
                 self.reconnectTask?.cancel()
@@ -367,22 +314,36 @@ final class TreadmillViewModel {
     }
 
     func startStopTapped() {
-        guard canCommand, !busy, isConnected else { return }
+        guard canCommand, isConnected else { return }
         // Latch the intent at tap. Re-reading beltRunning inside `run` races
         // telemetry: a leftover speed from the last walk made Start send Stop.
-        let stopping = status.beltRunning
+        let stopping = status.beltRunning || status.stopRequested || pendingVerb == "Starting…"
+        guard stopping ? pendingVerb != "Stopping…" : !busy else { return }
+        controlIntentGeneration += 1
+        let intent = controlIntentGeneration
+        cancelSpeedCommands()
         pendingVerb = stopping ? "Stopping…" : "Starting…"
-        run {
-            defer { self.pendingVerb = nil }
+        run(retry: stopping ? .stop : .start) {
+            defer { if self.controlIntentGeneration == intent { self.pendingVerb = nil } }
+            guard self.controlIntentGeneration == intent else { throw CancellationError() }
             if stopping {
                 _ = try await self.treadmill.stop()
             } else {
                 try await self.treadmill.start()
+                guard self.controlIntentGeneration == intent else { throw CancellationError() }
                 // A speed picked at a standstill is applied as soon as the belt
                 // moves: the pad always starts at its minimum.
                 if let pending = self.pendingTargetKmh {
                     self.pendingTargetKmh = nil
-                    try await self.treadmill.setSpeed(pending)
+                    // Held as the target so the readout stays on the queued
+                    // speed while the belt ramps up to it.
+                    self.coalescedTargetKmh = pending
+                    do {
+                        try await self.treadmill.setSpeed(pending)
+                    } catch {
+                        self.coalescedTargetKmh = nil
+                        throw error
+                    }
                 }
             }
         }
@@ -393,25 +354,14 @@ final class TreadmillViewModel {
     /// The pad only accepts speed changes while the belt moves, so a value
     /// picked at a standstill is remembered and applied right after Start.
     func setSpeed(_ displayValue: Double) {
-        guard canCommand, isConnected else { return }
+        guard canCommand, isConnected, !busy, displayValue.isFinite else { return }
         let kmh = unitsImperial ? Z1Units.mphToKmh(displayValue) : displayValue
         let clamped = (min(max(kmh, status.minSpeedKmh), status.maxSpeedKmh) * 10).rounded() / 10
         guard status.beltRunning else {
             if pendingTargetKmh != clamped { pendingTargetKmh = clamped }
             return
         }
-        // Dial commits go out at once, not through the − / + queue.
-        coalescedTargetKmh = nil
-        speedTask?.cancel()
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                try await self.treadmill.setSpeed(clamped)
-                self.clearCommandError()
-            } catch {
-                self.commandError = error.localizedDescription
-            }
-        }
+        scheduleSpeedTarget(clamped)
     }
 
     /// Selectable speed range in display units, converted exactly.
@@ -428,25 +378,39 @@ final class TreadmillViewModel {
         return unitsImperial ? Z1Units.kmhToMph(pendingTargetKmh) : pendingTargetKmh
     }
 
-    func speedUpTapped() { nudge(byKmh: speedStepKmh) }
-    func speedDownTapped() { nudge(byKmh: -speedStepKmh) }
+    /// − / +: exactly 0.1 of the display unit per tap (0.1 mph or 0.1 km/h).
+    func speedUpTapped() { nudge(byDisplay: 0.1) }
+    func speedDownTapped() { nudge(byDisplay: -0.1) }
 
     /// ↑ / ↓: half a unit at a time.
-    func bigSpeedUpTapped() { nudge(byKmh: halfUnitKmh) }
-    func bigSpeedDownTapped() { nudge(byKmh: -halfUnitKmh) }
+    func bigSpeedUpTapped() { nudge(byDisplay: 0.5) }
+    func bigSpeedDownTapped() { nudge(byDisplay: -0.5) }
 
-    private var halfUnitKmh: Double { unitsImperial ? Z1Units.mphToKmh(0.5) : 0.5 }
+    /// The pad speed `delta` display units away from `kmh`.
+    ///
+    /// The step is taken in the display unit, from the tenth the readout
+    /// shows, and only the result is converted and snapped to the pad's
+    /// 0.1 km/h grid. A fixed km/h step cannot do this in mph: 0.1 mph is
+    /// 0.161 km/h, which rounds to 0.2 and skips every other reading. The
+    /// grid is finer than 0.1 mph (0.062), so each tap lands on the next
+    /// tenth, and the belt is never more than 0.03 mph from the number shown.
+    private func steppedKmh(from kmh: Double, byDisplay delta: Double) -> Double {
+        let shown = unitsImperial ? Z1Units.kmhToMph(kmh) : kmh
+        let target = (shown * 10).rounded() / 10 + delta
+        let targetKmh = unitsImperial ? Z1Units.mphToKmh(target) : target
+        let clamped = min(max(targetKmh, status.minSpeedKmh), status.maxSpeedKmh)
+        return (clamped * 10).rounded() / 10
+    }
 
     /// While walking a nudge goes to the pad; at a standstill it moves the
     /// speed the next Start will use, so the speed can be set before walking.
-    private func nudge(byKmh delta: Double) {
-        guard canCommand, isConnected else { return }
+    private func nudge(byDisplay delta: Double) {
+        guard canCommand, isConnected, !busy, delta.isFinite else { return }
         if status.beltRunning {
-            enqueueSpeedChange(deltaKmh: delta)
+            enqueueSpeedChange(deltaDisplay: delta)
             return
         }
-        let base = pendingTargetKmh ?? status.minSpeedKmh
-        let next = (min(max(base + delta, status.minSpeedKmh), status.maxSpeedKmh) * 10).rounded() / 10
+        let next = steppedKmh(from: pendingTargetKmh ?? status.minSpeedKmh, byDisplay: delta)
         if pendingTargetKmh != next { pendingTargetKmh = next }
     }
 
@@ -456,34 +420,68 @@ final class TreadmillViewModel {
         pendingTargetKmh = kmh
     }
 
-    /// The speed the readout should point at: the belt's while it moves, the
-    /// one queued for Start while it does not.
+    /// The speed the controls point at: while the belt moves, the one last
+    /// asked for until the belt reaches it, else the belt's own; at a
+    /// standstill, the one queued for Start.
     var targetDisplaySpeed: Double? {
-        live.beltRunning ? displaySpeed : pendingTargetDisplaySpeed
+        guard live.beltRunning else { return pendingTargetDisplaySpeed }
+        guard let requested = coalescedTargetKmh else { return displaySpeed }
+        return unitsImperial ? Z1Units.kmhToMph(requested) : requested
     }
 
-    /// Rapid taps accumulate and go out once, 120 ms after the last.
-    private func enqueueSpeedChange(deltaKmh: Double) {
+    /// Keep the latest requested target until the pad confirms it. Telemetry
+    /// may lag a successful command, so it must not reset the next tap's base.
+    private func enqueueSpeedChange(deltaDisplay: Double) {
         let base = coalescedTargetKmh ?? status.speedKmh
-        let next = min(max(base + deltaKmh, status.minSpeedKmh), status.maxSpeedKmh)
-        coalescedTargetKmh = (next * 10).rounded() / 10
+        scheduleSpeedTarget(steppedKmh(from: base, byDisplay: deltaDisplay))
+    }
+
+    private func scheduleSpeedTarget(_ target: Double) {
+        guard target.isFinite else { return }
+        coalescedTargetKmh = target
+        if speedCommandInFlight { return }
         speedTask?.cancel()
+        speedGeneration += 1
+        let generation = speedGeneration
         speedTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(120))
-            guard !Task.isCancelled, let self, let target = self.coalescedTargetKmh else { return }
-            self.coalescedTargetKmh = nil
-            do {
-                try await self.treadmill.setSpeed(target)
-                self.clearCommandError()
-            } catch {
-                self.commandError = error.localizedDescription
+            guard let self else { return }
+            defer {
+                if self.speedGeneration == generation {
+                    self.speedTask = nil
+                    self.speedCommandInFlight = false
+                }
+            }
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .milliseconds(120)) }
+                catch { return }
+                guard self.speedGeneration == generation, !self.busy,
+                      self.isConnected, self.status.beltRunning,
+                      let next = self.coalescedTargetKmh else { return }
+                self.speedCommandInFlight = true
+                do {
+                    try await self.treadmill.setSpeed(next)
+                    guard !Task.isCancelled, self.speedGeneration == generation else { return }
+                    self.clearCommandError()
+                    self.speedCommandInFlight = false
+                    if self.coalescedTargetKmh == next { return }
+                } catch {
+                    guard !Task.isCancelled, self.speedGeneration == generation else { return }
+                    self.commandError = error.localizedDescription
+                    self.failedCommand = .speed(next)
+                    self.coalescedTargetKmh = nil
+                    return
+                }
             }
         }
     }
 
-    func clearStatsTapped() {
-        guard canCommand else { return }
-        Task { await treadmill.clearStats() }
+    private func cancelSpeedCommands() {
+        speedGeneration += 1
+        speedTask?.cancel()
+        speedTask = nil
+        speedCommandInFlight = false
+        // Runs on every idle frame; an observed write notifies even when equal.
+        if coalescedTargetKmh != nil { coalescedTargetKmh = nil }
     }
 
     // MARK: - quitting
@@ -495,14 +493,9 @@ final class TreadmillViewModel {
         case stopBelt
     }
 
-    /// Set by the in-window Quit buttons, so the terminate check does not ask
+    /// Set by Walk ▸ Stop Pad and Quit, so the terminate check does not ask
     /// a question the user just answered.
     @ObservationIgnored private(set) var requestedQuit: QuitMode?
-
-    func quit() {
-        requestedQuit = .leaveBelt
-        NSApp.terminate(nil)
-    }
 
     func stopBeltAndQuit() {
         requestedQuit = .stopBelt
@@ -519,6 +512,7 @@ final class TreadmillViewModel {
     func shutdown(_ mode: QuitMode) async {
         automaticConnectionEnabled = false
         reconnectTask?.cancel()
+        cancelSpeedCommands()
         sleepBlocker.setActive(false)
         hotKey.unregister()
         persistHealthTracker()
@@ -540,17 +534,23 @@ final class TreadmillViewModel {
         }
     }
 
-    private func run(_ op: @MainActor @escaping () async throws -> Void) {
+    private func run(retry: FailedCommand, _ op: @MainActor @escaping () async throws -> Void) {
+        activeOperations += 1
+        busy = true
         Task {
-            busy = true
-            defer { busy = false }
+            defer {
+                activeOperations -= 1
+                busy = activeOperations > 0
+            }
             do {
                 try await op()
                 clearCommandError()
             } catch {
                 // Surface command failures on screen: a silent retry loop is
                 // how "I hit Start and nothing happens" happens.
+                guard !(error is CancellationError) else { return }
                 commandError = error.localizedDescription
+                failedCommand = retry
                 NSLog("Z1App: \(error.localizedDescription)")
             }
         }
@@ -558,23 +558,44 @@ final class TreadmillViewModel {
 
     private func clearCommandError() {
         if commandError != nil { commandError = nil }
+        failedCommand = nil
+    }
+
+    func retryFailedCommand() {
+        if Self.isPreview {
+            // A UI fixture only: dismiss the simulated failure without BLE.
+            clearCommandError()
+            return
+        }
+        guard let failedCommand else { return }
+        switch failedCommand {
+        case .connection: if !isConnected { connectTapped() } else { clearCommandError() }
+        case .start: if !status.beltRunning { startStopTapped() } else { clearCommandError() }
+        case .stop: if status.beltRunning { startStopTapped() } else { clearCommandError() }
+        case .speed(let kmh):
+            guard isConnected, status.beltRunning, !busy else { return }
+            scheduleSpeedTarget(kmh)
+        }
+    }
+
+    func previewSetCommandError(_ message: String) {
+        guard Self.isPreview else { return }
+        commandError = message
     }
 
     // MARK: - global shortcut
 
+    /// ⌃⌥W, always on: starts or stops the belt, or looks for the pad when
+    /// there is none. Silent either way; the app makes no sounds.
     private func applyGlobalShortcut() {
         guard !Self.isPreview else { return }
-        if globalShortcutEnabled {
-            hotKey.register { [weak self] in
-                guard let self else { return }
-                if self.isConnected {
-                    self.startStopTapped()
-                } else {
-                    NSSound.beep()
-                }
+        hotKey.register { [weak self] in
+            guard let self else { return }
+            if self.isConnected {
+                self.startStopTapped()
+            } else if !self.isConnecting {
+                self.connectTapped()
             }
-        } else {
-            hotKey.unregister()
         }
     }
 
@@ -582,15 +603,24 @@ final class TreadmillViewModel {
 
     private func receiveStatus(_ newStatus: Z1Treadmill.Status) {
         let previousPhase = status.phase
+        if newStatus.phase != .ready || !newStatus.beltRunning {
+            cancelSpeedCommands()
+        } else if !speedCommandInFlight, speedTask == nil,
+                  let target = coalescedTargetKmh, abs(newStatus.speedKmh - target) < 0.05 {
+            coalescedTargetKmh = nil
+        }
+        if newStatus.phase == .ready, newStatus.hasTelemetry,
+           newStatus.distanceM < status.distanceM || newStatus.elapsedS < status.elapsedS {
+            stepSmoother.reset()
+        }
         stepSmoother.speedKmh = newStatus.speedKmh
         stepSmoother.strideM = newStatus.impliedStrideM
             ?? GaitModel.stepLengthM(speedKmh: max(0.8, newStatus.speedKmh))
         stepSmoother.ingest(reportedSteps: newStatus.steps, distanceM: newStatus.distanceM)
         lastStepPacketAt = Date()
         let packetDisplay = Int(stepSmoother.displaySteps.rounded(.down))
-        highestDisplayedSteps = max(highestDisplayedSteps, healthTracker.openWalkTotals?.steps ?? 0, packetDisplay)
         var next = newStatus
-        next.steps = highestDisplayedSteps
+        next.steps = packetDisplay
         setStatus(next)
         updateLiveStepTimer()
         if newStatus.phase != previousPhase {
@@ -617,6 +647,7 @@ final class TreadmillViewModel {
         } else {
             publishLive()
         }
+        updateHousekeeping()
     }
 
     /// The one place a status frame lands: the logic copy, then the
@@ -629,11 +660,12 @@ final class TreadmillViewModel {
 
     func observeWalk() {
         let observation = healthTracker.observe(status)
+        sessionStore.setOpenWalkStartedAt(healthTracker.openWalkTotals?.startedAt)
+        sessionStore.setPendingHistoryLogs(healthTracker.hasPendingLogs)
         persistHealthTracker(throttled: true)
         logCompletedWalks(observation.completed)
         scheduleHealthFinalization(deadline: observation.finalizationDeadline)
         recomputeToday()
-        publishLive()
     }
 
     /// Hands Superapp (and anything else reading `live.json`) the current
@@ -667,7 +699,7 @@ final class TreadmillViewModel {
     }
 
     /// The pad's counters arrive in visible chunks. Fill the quiet gaps with
-    /// at most three modelled steps, then snap to the next real packet. The
+    /// at most three modelled steps, preserving progress within this run. The
     /// same value goes to the open-walk tracker so the live row and Today
     /// tick together.
     private func tickLiveSteps() {
@@ -676,10 +708,9 @@ final class TreadmillViewModel {
         else { return }
         stepSmoother.interpolate(secondsSincePacket: Date().timeIntervalSince(lastStepPacketAt))
         let candidate = Int(stepSmoother.displaySteps.rounded(.down))
-        highestDisplayedSteps = max(highestDisplayedSteps, candidate)
-        guard highestDisplayedSteps != status.steps else { return }
+        guard candidate != status.steps else { return }
         var next = status
-        next.steps = highestDisplayedSteps
+        next.steps = candidate
         setStatus(next)
         observeWalk()
     }
@@ -688,7 +719,9 @@ final class TreadmillViewModel {
         healthFinalizeTask?.cancel()
         let target = deadline ?? healthTracker.finalizationDeadline
         if healthTracker.hasPendingLogs {
+            let delay = max(0, historyRetryAt?.timeIntervalSinceNow ?? 0)
             healthFinalizeTask = Task { [weak self] in
+                if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
                 guard !Task.isCancelled else { return }
                 self?.finalizeHealthIfDue()
             }
@@ -705,10 +738,13 @@ final class TreadmillViewModel {
 
     private func finalizeHealthIfDue() {
         let observation = healthTracker.finalizeIfDue()
+        sessionStore.setOpenWalkStartedAt(healthTracker.openWalkTotals?.startedAt)
+        sessionStore.setPendingHistoryLogs(healthTracker.hasPendingLogs)
         persistHealthTracker()
         logCompletedWalks(observation.completed)
         scheduleHealthFinalization(deadline: observation.finalizationDeadline)
         recomputeToday()
+        updateHousekeeping()
     }
 
     /// Saves the open walk so a crash or kill loses at most a few seconds of
@@ -719,7 +755,7 @@ final class TreadmillViewModel {
         let now = Date()
         if throttled, now.timeIntervalSince(lastTrackerSave) < 10 { return }
         guard let data = try? JSONEncoder().encode(healthTracker) else { return }
-        UserDefaults.standard.set(data, forKey: Self.healthTrackerKey)
+        settingsDefaults.set(data, forKey: Self.healthTrackerKey)
         lastTrackerSave = now
     }
 
@@ -744,7 +780,7 @@ final class TreadmillViewModel {
         var log = UserDefaults.standard.stringArray(forKey: Self.connectionLogKey) ?? []
         log.append(line)
         if log.count > 40 { log.removeFirst(log.count - 40) }
-        UserDefaults.standard.set(log, forKey: Self.connectionLogKey)
+        settingsDefaults.set(log, forKey: Self.connectionLogKey)
     }
 
     /// One build briefly registered a login item on the user's behalf. Reverse
@@ -762,7 +798,7 @@ final class TreadmillViewModel {
     // MARK: - walk reminders
 
     private func checkWalkReminder(now: Date = Date()) {
-        guard remindersEnabled, notificationsEnabled else { return }
+        guard remindersEnabled else { return }
         let calendar = Calendar.current
         let hour = calendar.component(.hour, from: now)
         let weekday = calendar.component(.weekday, from: now)
@@ -771,32 +807,27 @@ final class TreadmillViewModel {
 
         let lastEnd = sessionStore.sessions.last?.endedAt ?? .distantPast
         let quietHours = now.timeIntervalSince(lastEnd) / 3600
-        guard quietHours >= Double(max(1, reminderGapHours)) else { return }
+        guard quietHours >= Double(Self.reminderGapHours) else { return }
 
         // At most two per day, and never two inside one gap window.
         var log = (UserDefaults.standard.array(forKey: Self.reminderLogKey) as? [Date]) ?? []
         let todays = log.filter { calendar.isDate($0, inSameDayAs: now) }
         guard todays.count < 2 else { return }
-        if let last = todays.last, now.timeIntervalSince(last) / 3600 < Double(reminderGapHours) {
+        if let last = todays.last, now.timeIntervalSince(last) / 3600 < Double(Self.reminderGapHours) {
             return
         }
 
-        let body: String
-        if goalIsSteps {
-            body = "Quiet for \(Int(quietHours))h. \(max(0, dailyGoalSteps - today.steps)) steps to go today."
-        } else {
-            let lines = [
-                "The belt has been quiet for a while.",
-                "A short walk would round the day off.",
-                "Still \(max(0, dailyGoalMinutes - today.activeDurationS / 60)) min to today's goal.",
-                "The pad is right there.",
-            ]
-            body = lines[Int(now.timeIntervalSince1970 / 60) % lines.count]
-        }
+        let lines = [
+            "The belt has been quiet for a while.",
+            "A short walk would round the day off.",
+            "Still \(max(0, dailyGoalMinutes - today.activeDurationS / 60)) min to today's goal.",
+            "The pad is right there.",
+        ]
+        let body = lines[Int(now.timeIntervalSince1970 / 60) % lines.count]
         notifier.post(title: "Time for a walk?", body: body, identifier: "reminder-\(Int(now.timeIntervalSince1970))")
         log.append(now)
         if log.count > 20 { log.removeFirst(log.count - 20) }
-        UserDefaults.standard.set(log, forKey: Self.reminderLogKey)
+        settingsDefaults.set(log, forKey: Self.reminderLogKey)
     }
 
     // MARK: - history
@@ -804,35 +835,18 @@ final class TreadmillViewModel {
     /// Record every finished walk in local history.
     private func logCompletedWalks(_ walks: [CompletedWalk]) {
         guard !walks.isEmpty else { return }
+        if let historyRetryAt, historyRetryAt > Date() {
+            // A second walk may finish during backoff. Publish its pending
+            // display state without attempting an early disk retry.
+            refreshHistory()
+            return
+        }
+        historyRetryAt = nil
         for walk in walks {
-            // Stepping on the belt for a moment is not a walk. Drain the log
-            // entry so it is not offered again, but keep it out of history.
-            guard walk.activeDurationS >= 120 else {
-                healthTracker.acknowledgeLog(sessionID: walk.id)
-                continue
+            // A failed save stays in the tracker's log and is retried.
+            if !sessionStore.record(walk, weightKg: weightKg, tracker: &healthTracker) {
+                historyRetryAt = Date().addingTimeInterval(30)
             }
-            let kcal = Z1Metrics.kcalPerMinute(walk.avgSpeedKmh, weightKg: weightKg)
-                * Double(walk.activeDurationS) / 60
-            let session = WalkSession(
-                id: walk.id,
-                startedAt: walk.startedAt,
-                endedAt: walk.endedAt,
-                activeDurationS: walk.activeDurationS,
-                distanceM: walk.distanceM,
-                steps: walk.steps,
-                caloriesKcal: (kcal * 10).rounded() / 10,
-                exportedToHealth: false,
-                rawPadSteps: walk.rawPadSteps,
-                stepModelVersion: walk.rawPadSteps == nil ? "gait-v1" : nil
-            )
-            let added = sessionStore.append(session)
-            healthTracker.acknowledgeLog(sessionID: walk.id)
-            // The store groups segments into Health workouts and queues them
-            // for the iPhone Shortcut itself; the app only appends.
-            guard added, notificationsEnabled else { continue }
-            let minutes = max(1, walk.activeDurationS / 60)
-            let body = "\(minutes) min · \(formatDistance(walk.distanceM)) · \(walk.steps) steps est."
-            notifier.post(title: "Walk recorded", body: body, identifier: walk.id)
         }
         persistHealthTracker()
         refreshHistory()
@@ -847,36 +861,32 @@ final class TreadmillViewModel {
     /// in either means everything computed from it must redraw.
     private struct HistorySignature: Equatable {
         var sessions: [WalkSession] = []
+        var pendingWalks: [CompletedWalk] = []
         var day = Date.distantPast
         var loaded = false
     }
 
-    /// Runs on launch, after each recorded walk, and every two minutes (which
-    /// is what rolls Today over at midnight). Each write is a redraw for
-    /// whoever reads it, so only write what changed.
+    /// Runs on launch, after each recorded walk, on wake and at midnight, and
+    /// every two minutes while connected or a walk is open. Each write is a
+    /// redraw for whoever reads it, so only write what changed.
     func refreshHistory() {
         let calendar = Calendar.current
         let signature = HistorySignature(
             sessions: sessionStore.sessions,
+            pendingWalks: healthTracker.pendingCompletedWalks,
             day: calendar.startOfDay(for: Date()),
             loaded: true
         )
         guard signature != historySignature else { return }
         historySignature = signature
         storedToday = sessionStore.totals()
-        let recent = sessionStore.mostRecent(30)
-        if recent != recentWalks { recentWalks = recent }
-        let scores = sessionStore.highScores
-        if scores != highScores { highScores = scores }
-        let badges = sessionStore.achievements
-        if badges != achievements { achievements = badges }
         historyRevision += 1
         recomputeToday()
     }
 
     // MARK: - today
 
-    /// Rebuilds `today` and `todayCoarse` from the store plus the open walk,
+    /// Rebuilds `today` and `todayCoarse` from saved, pending and open walks,
     /// writing each only when it changed.
     func recomputeToday() {
         var next = storedToday
@@ -885,28 +895,11 @@ final class TreadmillViewModel {
             next = sessionStore.totals()
             storedToday = next
         }
-        if let open = openWalk, !sessionStore.contains(id: open.id) {
-            // A walk that resumes within the store's merge gap folds into the
-            // last stored walk, so it is not a new walk in the count.
-            let last = sessionStore.sessions.last { calendar.isDateInToday($0.startedAt) }
-            let sameWalk = last.map {
-                SessionStore.shouldMerge($0, WalkSession(
-                    id: open.id,
-                    startedAt: open.startedAt,
-                    endedAt: open.endedAt.timeIntervalSince1970 > 0 ? open.endedAt : Date(),
-                    activeDurationS: open.activeDurationS,
-                    distanceM: open.distanceM,
-                    steps: open.steps,
-                    caloriesKcal: 0,
-                    exportedToHealth: false
-                ))
-            } ?? false
-            next.addOpenWalk(open, weightKg: weightKg)
-            if !sameWalk { next.walks += 1 }
-        }
+        next = displayTotals(addingTo: next)
         if next != today { today = next }
         let coarse = Self.coarse(next)
         if coarse != todayCoarse { todayCoarse = coarse }
+        publishLive()
     }
 
     /// Rounded to what a bar or a calendar cell can show.
@@ -930,17 +923,38 @@ final class TreadmillViewModel {
         ) { [weak self] _ in
             // Waking is the best moment to retry: the pad is usually right
             // there and the backoff would otherwise idle for 30 s.
-            Task { @MainActor in self?.scheduleReconnect(after: 1, force: true) }
+            Task { @MainActor in
+                self?.refreshHistory()
+                self?.scheduleReconnect(after: 1, force: true)
+            }
+        }
+        // Rolls Today over at midnight without a timer of our own.
+        NotificationCenter.default.addObserver(
+            forName: .NSCalendarDayChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.refreshHistory() }
         }
     }
 
-    private func startHousekeeping() {
-        housekeepingTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(120))
-                guard !Task.isCancelled else { return }
-                self?.refreshHistory()
+    /// The two-minute refresh keeps Today current while something is moving: a
+    /// connected pad or a walk still open. With neither, nothing is scheduled
+    /// and the app is fully idle. Midnight rollover and wake are handled by
+    /// notifications (`installPowerObservers`), not by polling.
+    private func updateHousekeeping() {
+        let needed = status.phase == .ready || healthTracker.openWalkTotals != nil
+        if needed, housekeepingTask == nil {
+            housekeepingTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(120))
+                    guard !Task.isCancelled else { return }
+                    self?.refreshHistory()
+                }
             }
+        } else if !needed, let task = housekeepingTask {
+            task.cancel()
+            housekeepingTask = nil
         }
     }
 

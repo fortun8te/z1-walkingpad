@@ -10,10 +10,13 @@ import SwiftUI
 enum Theme {
     // MARK: colour
 
-    // Dark is near-black, not grey: the ground is almost black, a card is one
-    // small step up, and contrast comes from the ink, not from grey fills.
-    static let ground = dynamic(light: 0xF3F3F1, dark: 0x050506)
-    static let surface = dynamic(light: 0xFFFFFF, dark: 0x101012)
+    // The window is translucent: the desktop shows through a blur, and this
+    // tint sits on top so dark stays near-black, not grey, and light stays a
+    // warm off-white. A card is one small step up, still a little see-through.
+    static let ground = dynamic(light: 0xF3F3F1, lightAlpha: 0.55, dark: 0x050506, darkAlpha: 0.86)
+    static let surface = dynamic(light: 0xFFFFFF, lightAlpha: 0.62, dark: 0xFFFFFF, darkAlpha: 0.05)
+    /// Solid marks that sit on ink, such as a switch's knob when it is on.
+    static let onInk = dynamic(light: 0xFFFFFF, dark: 0x0A0A0B)
 
     /// Text and marks. Full strength for every number, measured or estimated.
     static let ink = dynamic(light: 0x16171A, dark: 0xF6F6F8)
@@ -31,16 +34,14 @@ enum Theme {
     static let hairline = dynamic(light: 0x000000, lightAlpha: 0.09, dark: 0xFFFFFF, darkAlpha: 0.09)
     /// The chosen chip or tab.
     static let selection = dynamic(light: 0x000000, lightAlpha: 0.07, dark: 0xFFFFFF, darkAlpha: 0.14)
-    /// Round controls (− / +) at rest and under the pointer.
+    /// The fill behind a compact field.
     static let control = dynamic(light: 0x000000, lightAlpha: 0.06, dark: 0xFFFFFF, darkAlpha: 0.09)
-    static let controlHover = dynamic(light: 0x000000, lightAlpha: 0.11, dark: 0xFFFFFF, darkAlpha: 0.15)
     /// Dot-matrix dots that are off: just perceptible, never a texture.
     static let unlitDot = dynamic(light: 0x000000, lightAlpha: 0.045, dark: 0xFFFFFF, darkAlpha: 0.055)
 
     static let accent = dynamic(light: 0x2F6FE4, dark: 0x4C8DFF)
     static let trouble = dynamic(light: 0xB86E00, dark: 0xF5A524)
 
-    static let nsGround = nsDynamic(light: 0xF3F3F1, dark: 0x050506)
 
     // MARK: geometry (8-pt grid)
 

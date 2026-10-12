@@ -142,7 +142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         guard let model else { return false }
         switch item.action {
-        case #selector(toggleWalk(_:)): return model.isConnected && !model.busy
+        case #selector(toggleWalk(_:)): return model.isConnected && (!model.busy || model.live.beltRunning)
         case #selector(toggleConnection(_:)): return !model.busy && !model.isConnecting
         case #selector(showPage(_:)):
             item.state = (item.representedObject as? String) == navigation.page.rawValue ? .on : .off

@@ -103,7 +103,7 @@ final class Notifier {
     func requestAuthorizationIfNeeded() {
         guard isAvailable, !didRequest else { return }
         didRequest = true
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert]) { granted, error in
             if let error { NSLog("Z1App: notification authorization failed: \(error.localizedDescription)") }
             Task { @MainActor in self.authorized = granted }
         }

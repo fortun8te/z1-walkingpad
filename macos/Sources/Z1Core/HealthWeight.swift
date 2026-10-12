@@ -42,9 +42,21 @@ public enum HealthWeight {
         ]
     }
 
-    public static func load(from files: [URL] = defaultFiles()) -> HealthWeightSample? {
+    /// An Apple Health export grows without bound (hundreds of MB after a few
+    /// years). `load` runs on the main thread every few minutes, and parsing
+    /// such a file would stall the window and balloon memory, so a larger
+    /// export is skipped: the Shortcut's small weight.json is the supported
+    /// route.
+    public static let maxExportXMLBytes = 64 * 1024 * 1024
+
+    public static func load(
+        from files: [URL] = defaultFiles(),
+        maxExportXMLBytes: Int = HealthWeight.maxExportXMLBytes
+    ) -> HealthWeightSample? {
         let samples = files.compactMap { url -> HealthWeightSample? in
             if url.pathExtension.lowercased() == "xml" {
+                let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
+                guard size <= maxExportXMLBytes else { return nil }
                 return parseExportXML(file: url)
             }
             return parse(file: url)
@@ -111,9 +123,28 @@ public enum HealthWeight {
     }
 
     public static func parse(data: Data) -> HealthWeightSample? {
-        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return nil
-        }
+        guard let obj = (try? JSONSerialization.jsonObject(with: data))
+            ?? (try? JSONSerialization.jsonObject(with: Self.withDecimalPoints(data)))
+        else { return nil }
+        return parse(object: obj as? [String: Any])
+    }
+
+    /// A Shortcut fills a number into its text using the phone's region, so in
+    /// the Netherlands `{"kg": VALUE}` arrives as `{"kg": 74,3}`: not JSON,
+    /// and the weight would silently never be read. Rewrite a decimal comma
+    /// after one of the weight keys; anything else is left alone.
+    static func withDecimalPoints(_ data: Data) -> Data {
+        guard let text = String(data: data, encoding: .utf8),
+              let regex = try? NSRegularExpression(
+                  pattern: #"("(?:kg|weight_kg|weightKg|lb)"\s*:\s*-?\d+),(\d+)"#
+              )
+        else { return data }
+        let range = NSRange(text.startIndex..., in: text)
+        return Data(regex.stringByReplacingMatches(in: text, range: range, withTemplate: "$1.$2").utf8)
+    }
+
+    private static func parse(object obj: [String: Any]?) -> HealthWeightSample? {
+        guard let obj else { return nil }
         let kg: Double?
         if let v = obj["kg"] as? Double { kg = v }
         else if let v = obj["kg"] as? Int { kg = Double(v) }

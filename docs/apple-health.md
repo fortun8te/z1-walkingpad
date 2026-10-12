@@ -21,13 +21,15 @@ This project uses the Shortcut route, same folder as the workout queue.
      {"kg": VALUE, "measuredAt": DATE, "source": "apple-health"}
      ```
 
-     (Shortcuts can substitute the value and an ISO date.)
+     (Shortcuts can substitute the value and an ISO date. On a phone set to
+     the Netherlands the number arrives with a decimal comma, `74,3`; the Mac
+     reads that too.)
    - Save File → `Shortcuts/z1-walkingpad/weight.json`, overwrite.
 
 2. Automation: Time of Day each morning, or App → Health / your scale app → Is Opened.
 
-3. In the Mac app: Settings → **Use latest Apple Health weight**. The menu bar
-   app reads that file on launch and every 15 minutes and uses it for ACSM kcal.
+3. In the Mac app: Settings → **Use latest Apple Health weight**. The app
+   reads that file and uses it for ACSM kcal.
 
 The file on the Mac is:
 
@@ -35,16 +37,17 @@ The file on the Mac is:
 
 # Apple Health → WHOOP
 
-The Mac now places finished WalkingPad workouts in iCloud Drive automatically.
-The included iPhone Shortcut logs each one as a Walking workout in Apple Health,
-then deletes the queue file. WHOOP supplies heart rate, calories, and Strain
-from the band you are already wearing.
+The Mac queues eligible finished WalkingPad workouts in iCloud Drive. The
+iPhone Shortcut logs each queued walk as a Walking workout in Apple Health,
+then deletes the queue file after logging all walks. WHOOP supplies heart rate,
+calories, and Strain from the band you are already wearing.
 
 ## Easy setup
 
-1. Open [`shortcuts/Z1 Import Health v3.1.shortcut`](../shortcuts/Z1%20Import%20Health%20v3.1.shortcut)
-   and choose **Add Shortcut**. It will sync to the iPhone through iCloud.
-   Delete any older copy — v1 and v2 could not read the queue at all.
+1. The Shortcut source is [`shortcuts/Z1 Import Health.xml`](../shortcuts/Z1%20Import%20Health.xml).
+   Build and sign an installable `.shortcut` using the command below, then
+   add it on the iPhone. Delete any older copy — v1 and v2 could not read the
+   queue at all.
 2. On the iPhone, run **Z1 Import Health** once. Approve Files, Health, and
    deleting files if asked. It is safe if the queue is empty.
 3. In **Shortcuts → Automation → + → App**, choose **WHOOP**, select
@@ -60,20 +63,29 @@ iCloud → See All → Shortcuts.
 
 - A session must contain at least 10 active minutes and 100 metres before it is
   offered to Health. This avoids tiny fragments becoming separate workouts.
-- **Pause**, then resume, keeps a break inside one workout. **Stop** finishes it.
+- Short belt stops can remain inside one workout. A stop of about 10 minutes
+  finishes the workout.
 - Apple Health receives the real start time, wall-clock duration, and belt
   distance.
-- **Shortcut v3.1 also logs a step sample spanning the walk window.** Be aware
-  of the overlap: if your iPhone was on you while you walked, it counted those
-  steps too, and Health will hold both sources for the same minutes. The pad's
-  counter is also unvalidated — see "Your stride" in `../macos/README.md`.
+- **Shortcut v3.1 also logs a step sample spanning the walk window.** If your
+  iPhone was on you while you walked, it may have counted steps too. WalkingPad
+  steps may be estimates; see "Your stride" in `../macos/README.md`.
 - The bridge sends **no calorie sample** — WHOOP computes calories and Strain
   from the band's own heart rate and ignores anything we send.
-- The menu-bar app connects automatically and watches the Z1 without starting
-  or changing it. A physical-remote Start begins/resumes tracking. A physical-
-  remote Stop starts a 10-minute grace period; restarting inside it keeps one
-  workout, while staying stopped exports automatically. The standalone CLI does
-  not currently export to Health.
+- The Mac app connects automatically and watches the Z1 without starting
+  or changing it. A physical-remote Start begins tracking a belt run. Two
+  numbers matter and they are not the same:
+  - A **belt run** (what History stores) ends after the belt has been stopped
+    for **2 minutes**, or when the app sees the link drop and no telemetry
+    follows for 2 minutes. A restart inside those 2 minutes continues the same
+    run. Each run has its own stable ID.
+  - A **Health workout** groups runs whose gaps are at most **10 minutes**. It
+    is queued once the last run has been stopped for 10 minutes.
+  A walk is never held open for hours: History and "Today" see a finished run
+  about 2 minutes after Stop. The standalone CLI does not export to Health.
+- If the app is quit (or crashes) mid-walk, the saved run is closed at the last
+  moment the app saw it moving when the app next starts, so it cannot stay open
+  and swallow the next walk.
 
 ## Where the queue lives (and why it matters)
 
@@ -97,24 +109,103 @@ Neither half of that path is decorative — both were bugs:
    Drive root, so a queue at `iCloud Drive/z1-walkingpad/…` is invisible to the
    phone — found nothing, reported nothing, walks piled up for days.
 
-The menu-bar app folds any per-walk files left by older builds — in either
-location — into the queue file on launch, and removes the empty folders.
+The queue writer publishes immutable batches. While a batch exists, newly
+finished workouts stay safely in the local session history. After the phone
+consumes that batch and its deletion syncs back, the Mac queues the next batch
+on its next check. While a batch is waiting the Mac looks again after one
+minute, then two, four, eight and finally every fifteen minutes, and checks
+immediately whenever history changes, so an iPhone that is off for a week does
+not keep the Mac waking every minute. An active resumed walk also
+holds its group open, including after restoring the app, so the first segment
+is not exported before the resumed segment finishes. This prevents the phone from
+deleting a workout appended after it read the queue. The path and schema stay
+compatible with the existing Shortcut. It does
+not automatically re-queue historical sessions on launch: the older queue may
+contain walks already imported on the phone, and the Mac cannot inspect Apple
+Health. Reconcile that older file against Health before explicitly backfilling
+history. Sessions marked `exportedToHealth: true` are treated as already
+imported and are never newly queued.
+
+The Mac also keeps local queued-session IDs in
+`~/Library/Application Support/Z1 WalkingPad/health-queue-receipts.json`. This
+prevents a completed walk from being recreated after the Shortcut deletes the
+queue. That receipt records queueing, not successful Health import. The Mac
+groups short belt runs with gaps up to 10 minutes and queues a workout only
+after the final run has been stopped for 10 minutes.
+The production queue refuses direct per-segment writes; the grouped writer is
+the only automatic path into that file.
 
 The Shortcut reads the file, logs every workout, and only then deletes it,
-finishing with a notification saying how many it imported.
+finishing with a notification saying how many it imported. Queueing a walk on
+the Mac does not confirm that it reached Health or WHOOP.
 
-That ordering is deliberate and was reversed in v3.1. Delete-then-log gives
-at-most-once delivery, which sounds safer — but the Mac keeps a durable receipt
-and never re-queues a walk, so any failure inside the Shortcut loses those walks
-*permanently and silently*. After two consecutive Shortcut bugs, the better
-posture is at-least-once: if something fails, the queue file survives and the
-walks are retried. The worst case becomes a duplicate workout you can see and
-delete, instead of a walk that quietly never existed.
+That ordering is deliberate. If an action fails before the Shortcut deletes
+the file, the workouts remain in the queue for a retry. A retry can create a
+duplicate in Health if some workouts were logged before the failure.
 
-The menu-bar app's queue directory and thresholds above are fixed in code, not
-configurable. Only the standalone Python MCP server / CLI path (not this
-automatic Mac pipeline) reads `Z1_HEALTH_QUEUE_DIR`, `Z1_HEALTH_MIN_ACTIVE_S`,
-and `Z1_HEALTH_MIN_DISTANCE_M` as overrides for its own, separate queue writer.
+**Known leftover, still open on 12 October 2026.** Import is at-least-once.
+The source has no Health lookup before writing. If workout 1 of 3 succeeds
+and workout 2 fails, retrying writes workout 1 again. If the workout write
+succeeds and its separate step write fails, the workout is already in Health
+while the queue still exists. Retrying can duplicate both kinds of sample.
+If file deletion succeeds and the notification fails, the batch has already
+been consumed. The final notification counts queued entries, not confirmed
+Health records.
+
+A phone-side fix must use an Apple-exported action schema, not guessed action
+identifiers. The current repository contains only the logging actions; the
+installed Mac ActionKit health constants contain units, not the iPhone Health
+query/filter schema. Apple's [Find and Filter guide](https://support.apple.com/en-lb/guide/shortcuts/apd3c845e881/ios)
+confirms Find Health Samples exists but does not specify its serialized
+parameters or prove that a particular workout filter works on the phone.
+No executable deduplication patch has been made on this evidence alone.
+
+The required retry behavior is:
+
+- Match the same Walking workout window, including both start and end.
+  A date-only or start-only match can mistake an unrelated workout for this
+  entry. Do not round to the minute or match any overlapping workout.
+- Match the window actually written by Log Workout. In v3.1 its start is the
+  parsed `started_at` and its duration is `wall_duration_min`. Its calculated
+  end can differ from `ended_at`: the Mac serializes date fields to whole
+  seconds but rounds the original elapsed duration to 0.001 minute. An exact
+  comparison with the queued `ended_at` can therefore miss an existing import.
+- Check source and distance where the phone exposes them. The current Log
+  Workout action does not store `session_id` as Health metadata, so dates and
+  activity type alone cannot establish the queued entry's identity when
+  unrelated sources have the same window. Treat an ambiguous match as a
+  reconciliation case and preserve the batch.
+- Handle the workout and step sample separately. An existing workout must not
+  cause a missing step sample to be silently skipped, or an existing step sample
+  to be written again. The step window uses `started_at` and `ended_at`.
+- Keep deletion after every entry has been imported or positively reconciled.
+  Any failed or ambiguous entry leaves the immutable batch in place. Run one
+  importer at a time because separate query and write actions are not atomic.
+
+An empty Health query is not sufficient proof of absence. Apple's
+[Health authorization documentation](https://developer.apple.com/documentation/healthkit/authorizing-access-to-health-data)
+says read authorization is private and denied read access returns only samples
+saved by the requesting app. Limited access can also hide older records.
+Phone testing must establish that the query sees the relevant previously
+imported records and any other sources used for reconciliation.
+
+Before retrying an interrupted v3.1 import, compare the queued entries with
+Health on the iPhone. The previously reported five queued walks from 23 and
+24 August need this reconciliation; do not discard or backfill them merely
+because they are old. Their current phone state has not been verified.
+
+To unblock implementation, export a minimal Shortcut authored on the iPhone
+that finds Walking workouts and exposes their start, end, source and distance,
+and a corresponding Steps query. This export supplies the real serialized
+actions without running an import or changing existing Health records. Then
+verify a new test batch, an already-imported entry, a failure partway through,
+a workout-only partial import, and a same-start unrelated workout. Confirm
+one workout and one step sample per queued entry, queue retention on failure,
+and deletion only after complete reconciliation. These phone checks are still
+pending. Mac XML validation cannot establish Health query behavior.
+
+The Mac app's queue path and thresholds are fixed in code. The Swift writer
+rejects implausible workouts, including over 24 hours or over 7 km/h average.
 
 ## One real-world check
 
@@ -122,19 +213,23 @@ After the first walk, open WHOOP. Confirm exactly one Walking workout appears in
 Apple Health and WHOOP. This physical iPhone/WHOOP check cannot be completed by
 the Mac test suite.
 
-Duplicate avoidance is deliberately conservative. The Mac remembers every
-exported session ID and never recreates its queue file. The Shortcut consumes
-that file before logging the workout, so it cannot retry the same walk. This is
-at-most-once delivery: an iPhone crash in the tiny gap between consuming the
-file and writing Health could miss a workout, but it will not create a duplicate.
+The queue writer uses each session's stable ID and local receipts to avoid
+queueing it twice. The Shortcut deletes the whole file after a successful import.
+Without a phone-side receipt, the Mac cannot prove that a deleted queue entry
+was imported; check Apple Health and WHOOP before backfilling old sessions.
 
 Keep WHOOP's Apple Health read access for Workouts and Distance. To avoid WHOOP
 writing the same workout back, disable its Workouts write permission when this
 WalkingPad route is the workout source.
 
+There is no WHOOP code in this repository: WHOOP only sees a walk through Apple
+Health. The WHOOP sign-in helper (and its callback page, which can report
+success before the token is saved) belongs to Superapp and is tracked there.
+
 ## Rebuilding the Shortcut
 
-The signed install file is committed. Developers can rebuild it on macOS with:
+The XML source is committed. The signed install file is generated locally and
+is not committed. Developers can rebuild it on macOS with:
 
 ```bash
 ./scripts/build_health_shortcut.sh

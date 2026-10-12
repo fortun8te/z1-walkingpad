@@ -156,65 +156,16 @@ public func unitsTests(_ t: TestRunner) {
     }
 }
 
-/// Stride-curve estimator tests.
-public func strideTests(_ t: TestRunner) {
-    t.suite("stride") { t in
-        func calibrate(_ learner: inout StrideLearner, speed: Double = 3.5, stride: Double = 0.75) {
-            for _ in 0 ..< 3 {
-                learner.learn(distanceM: 40, steps: 40 / stride, speedKmh: speed)
-            }
-        }
-
-        // Truncated telemetry: flags promise steps but the bytes end early —
-        // the whole frame must drop (all nil), never decode as zeros.
-        do {
-            let truncated = Data([0x04, 0x24, 0xfa, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00])
-            let parsed = Z1Protocol.parseTreadmillData(truncated)
-            t.check(parsed.steps == nil, "truncated frame drops steps")
-            t.check(parsed.distanceM == nil, "truncated frame drops distance")
-            t.check(parsed.speedKmh == nil, "truncated frame drops speed")
-        }
-
-        let key = "z1.strideLearner.test"
-        defer { UserDefaults.standard.removeObject(forKey: key) }
-
-        var fresh = StrideLearner(userDefaultsKey: key)
-        t.check(!fresh.calibrated, "starts uncalibrated")
-        t.expectNil(fresh.stride(for: 2.0), "no stride when uncalibrated")
-
-        fresh.learn(distanceM: 100, steps: 150, speedKmh: 2.0) // below trust speed
-        fresh.learn(distanceM: 0, steps: 100, speedKmh: 4.0)
-        fresh.learn(distanceM: 100, steps: 0, speedKmh: 4.0)
-        t.check(!fresh.calibrated, "invalid segments ignored")
-
-        calibrate(&fresh)
-        t.check(fresh.calibrated, "calibrated after valid segment")
-        t.expectEqual(fresh.stride(for: 3.5)!, 0.75, accuracy: 1e-9, "bucket readback")
-
-        var two = StrideLearner(userDefaultsKey: key + ".two")
-        defer { UserDefaults.standard.removeObject(forKey: key + ".two") }
-        calibrate(&two, speed: 3.0, stride: 0.70)
-        calibrate(&two, speed: 4.0, stride: 0.80)
-        t.expectEqual(two.stride(for: 3.5)!, 0.75, accuracy: 1e-9, "interpolation")
-        t.expectEqual(two.stride(for: 1.6)!, 0.70, accuracy: 1e-9, "extrapolate low -> nearest")
-        t.expectEqual(two.stride(for: 6.4)!, 0.80, accuracy: 1e-9, "extrapolate high -> nearest")
-
-        var threshold = StrideLearner(userDefaultsKey: key + ".min")
-        defer { UserDefaults.standard.removeObject(forKey: key + ".min") }
-        threshold.learn(distanceM: 50, steps: 50 / 0.75, speedKmh: 3.5)
-        t.expectNil(threshold.stride(for: 3.5), "one window not calibrated")
-        threshold.learn(distanceM: 50, steps: 50 / 0.75, speedKmh: 3.5)
-        t.expectNil(threshold.stride(for: 3.5), "two windows not calibrated")
-        threshold.learn(distanceM: 10, steps: 10 / 0.75, speedKmh: 3.5)
-        t.expectEqual(threshold.stride(for: 3.5)!, 0.75, accuracy: 1e-9, "cumulative crosses threshold")
-
-        var outlier = StrideLearner(userDefaultsKey: key + ".outlier")
-        defer { UserDefaults.standard.removeObject(forKey: key + ".outlier") }
-        outlier.learn(distanceM: 100, steps: 1, speedKmh: 4.0)
-        t.check(outlier.buckets.isEmpty, "impossible stride rejected")
-
-        let reloaded = StrideLearner(userDefaultsKey: key)
-        t.expectEqual(reloaded.stride(for: 3.5)!, 0.75, accuracy: 1e-9, "persistence roundtrip")
+/// A frame the flags promise more bytes for than it carries is dropped whole.
+public func truncatedTelemetryTests(_ t: TestRunner) {
+    t.suite("truncated telemetry") { t in
+        // Flags promise steps but the bytes end early: the whole frame must
+        // drop (all nil), never decode as zeros that read as a counter reset.
+        let truncated = Data([0x04, 0x24, 0xfa, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00])
+        let parsed = Z1Protocol.parseTreadmillData(truncated)
+        t.check(parsed.steps == nil, "truncated frame drops steps")
+        t.check(parsed.distanceM == nil, "truncated frame drops distance")
+        t.check(parsed.speedKmh == nil, "truncated frame drops speed")
     }
 }
 
@@ -252,6 +203,10 @@ public func stepSmootherTests(_ t: TestRunner) {
         let afterMetre = monotonic.displaySteps
         monotonic.ingest(reportedSteps: 4_317, distanceM: 2_901)
         t.check(monotonic.displaySteps >= afterMetre, "duplicate packets do not snap interpolated steps backwards")
+        monotonic.interpolate(secondsSincePacket: 0.1)
+        t.check(monotonic.displaySteps >= afterMetre, "interpolation after a fresh packet preserves the in-run floor")
+        monotonic.ingest(reportedSteps: 10, distanceM: 6)
+        t.expectEqual(monotonic.displaySteps, 10, accuracy: 0.001, "counter reset drops the previous run's display floor")
     }
 }
 
@@ -305,7 +260,7 @@ public func automaticHealthExportTests(_ t: TestRunner) {
         // More zero-speed frames do not move the deadline.
         let repeatedZero = tracker.observe(
             status(running: false, elapsed: 700, distance: 550, steps: 900),
-            at: stoppedAt.addingTimeInterval(300)
+            at: stoppedAt.addingTimeInterval(60)
         )
         t.expectEqual(
             repeatedZero.finalizationDeadline,
@@ -421,9 +376,32 @@ public func automaticHealthExportTests(_ t: TestRunner) {
             at: base.addingTimeInterval(100)
         )
         t.check(drop.finalizationDeadline != nil, "stop starts grace")
-        drop.markConnectionDrop()
-        t.expectNil(drop.finalizationDeadline, "BLE drop is not a stop")
+        let droppedAt = base.addingTimeInterval(100)
+        drop.markConnectionDrop(at: droppedAt)
+        t.expectEqual(
+            drop.finalizationDeadline,
+            droppedAt.addingTimeInterval(grace),
+            "BLE drop starts a bounded segment deadline"
+        )
         t.check(drop.openWalkTotals != nil, "walk stays open across a drop")
+        t.expectEqual(
+            drop.finalizeIfDue(at: droppedAt.addingTimeInterval(grace)).completed.first?.id,
+            "drop-walk",
+            "unrecovered drop eventually logs the walk"
+        )
+
+        var movingDrop = RemoteSessionTracker()
+        _ = movingDrop.observe(
+            status(running: true, elapsed: 180, distance: 140, steps: 220),
+            at: base,
+            newSessionID: { "moving-drop" }
+        )
+        movingDrop.markConnectionDrop(at: base.addingTimeInterval(1))
+        t.expectEqual(
+            movingDrop.finalizeIfDue(at: base.addingTimeInterval(1 + grace)).completed.first?.id,
+            "moving-drop",
+            "lost link while belt was moving also finalizes"
+        )
 
         // A pending stopped session survives relaunch and keeps the original
         // deadline and ID.
@@ -561,10 +539,7 @@ func sessionStoreTests(_ t: TestRunner) {
         t.expectEqual(today.walks, 2, "today counts both of today's walks")
         t.expectEqual(today.activeDurationS, 45 * 60, "today sums active time")
         t.expectEqual(today.distanceM, 3_000, "today sums distance")
-        let expectedTodaySteps =
-            GaitModel.steps(distanceM: 2_000, durationS: 30 * 60)
-            + GaitModel.steps(distanceM: 1_000, durationS: 15 * 60)
-        t.expectEqual(today.steps, expectedTodaySteps, "today steps from gait model")
+        t.expectEqual(today.steps, 4_500, "today preserves recorded step counts")
 
         let span = store.days(
             from: calendar.date(byAdding: .day, value: -1, to: noon)!,
@@ -574,7 +549,11 @@ func sessionStoreTests(_ t: TestRunner) {
         t.expectEqual(span.count, 2, "inclusive day range")
         t.expectEqual(span.last?.walks, 2, "range end is today")
 
-        let week = store.recentDays(7, endingOn: noon, calendar: calendar)
+        let week = store.days(
+            from: calendar.date(byAdding: .day, value: -6, to: noon)!,
+            through: noon,
+            calendar: calendar
+        )
         t.expectEqual(week.count, 7, "the week chart always has seven days")
         t.expectEqual(week.last?.walks, 2, "the last bar is today")
         t.check(week.first?.isEmpty == true, "days with no walks are empty, not missing")
@@ -583,7 +562,7 @@ func sessionStoreTests(_ t: TestRunner) {
         // Reload from disk: the history must survive a relaunch.
         let reopened = SessionStore(url: temp)
         t.expectEqual(reopened.sessions.count, 3, "history is reloaded from disk")
-        t.expectEqual(reopened.mostRecent(2).first?.id, "b", "most recent is newest first")
+        t.expectEqual(reopened.sessions.last?.id, "b", "history is ordered oldest first")
         t.expectEqual(
             reopened.totals(on: noon, calendar: calendar).distanceM,
             3_000,
@@ -596,8 +575,8 @@ func sessionStoreTests(_ t: TestRunner) {
         )
         t.expectEqual(
             store.sessions.first { $0.id == "hot" }?.steps,
-            GaitModel.steps(distanceM: 1_180, durationS: 27 * 60),
-            "leftover pad steps rewritten from distance and speed"
+            30_118,
+            "loading and appending never rewrite recorded steps"
         )
     }
 }
@@ -617,6 +596,13 @@ public func healthWeightTests(_ t: TestRunner) {
         t.expectEqual(HealthWeight.parse(data: lb)?.kg ?? 0, 82.0, accuracy: 0.2, "lb converts")
 
         t.check(HealthWeight.parse(data: Data("{\"kg\":3}".utf8)) == nil, "reject nonsense kg")
+
+        // A Shortcut on a Dutch phone writes 74,3, which is not JSON.
+        let comma = Data("{\"kg\": 74,3, \"measuredAt\": \"2026-08-31T07:00:00Z\", \"source\": \"apple-health\"}".utf8)
+        t.expectEqual(HealthWeight.parse(data: comma)?.kg ?? 0, 74.3, accuracy: 0.001, "decimal comma from a Shortcut is read")
+        t.check(HealthWeight.parse(data: comma)?.measuredAt != nil, "and the date beside it survives")
+        t.expectEqual(HealthWeight.parse(data: Data("{\"lb\": 163,8}".utf8))?.kg ?? 0, 74.3, accuracy: 0.05, "decimal comma in pounds")
+        t.check(HealthWeight.parse(data: Data("{\"kg\": 74,3,".utf8)) == nil, "still rejects real garbage")
 
         let xml = """
         <?xml version="1.0"?>
@@ -651,82 +637,30 @@ public func stepSanityTests(_ t: TestRunner) {
             "no duration uses 3 km/h"
         )
         t.expectEqual(GaitModel.steps(distanceM: 0, speedKmh: 3.2), 0, "no distance, no steps")
-
-        var session = StepSession()
-        t.expectEqual(
-            session.ingest(pad: 4_679, previousPad: 4_678, elapsedReset: true, distanceReset: true),
-            0,
-            "new pad session with leftover register starts at 0"
-        )
-        t.expectEqual(
-            session.ingest(pad: 4_680, previousPad: 4_679, elapsedReset: false, distanceReset: false),
-            1,
-            "next packet ticks one"
-        )
-        t.expectEqual(
-            session.ingest(pad: 4_681, previousPad: 4_680, elapsedReset: false, distanceReset: false),
-            2,
-            "ticks stay monotonic"
-        )
-        var dumped = StepSession()
-        t.expectEqual(
-            dumped.ingest(pad: 0, previousPad: 2_000, elapsedReset: true, distanceReset: true),
-            0,
-            "omitted-then-zero after reset"
-        )
-        t.expectEqual(
-            dumped.ingest(pad: 4_679, previousPad: 0, elapsedReset: false, distanceReset: false),
-            0,
-            "dumped leftover total is not a 4,679-step jump"
-        )
-        t.expectEqual(
-            dumped.ingest(pad: 4_680, previousPad: 4_679, elapsedReset: false, distanceReset: false),
-            1,
-            "after the dump, ticks are 1, 2, 3"
-        )
-        var leftover = StepSession()
-        t.expectEqual(
-            leftover.ingest(
-                pad: 6_043,
-                previousPad: 6_042,
-                elapsedReset: false,
-                distanceReset: false,
-                distanceM: 760
-            ),
-            6_043,
-            "without a counter reset, pad steps are the live count"
-        )
-        var reconnect = StepSession()
-        t.expectEqual(
-            reconnect.ingest(
-                pad: 7_528,
-                previousPad: nil,
-                elapsedReset: false,
-                distanceReset: false,
-                distanceM: 630
-            ),
-            0,
-            "first packet after connect with leftover register starts at 0"
-        )
     }
 }
 
 public func treadmillMatchTests(_ t: TestRunner) {
     t.suite("treadmill-match") { t in
         t.check(TreadmillMatch.accepts(name: "KS-HD-Z1E", serviceUUIDs: []), "Z1 by name")
-        t.check(TreadmillMatch.accepts(name: "UREVO URTM025", serviceUUIDs: []), "Urevo by name")
+        t.check(!TreadmillMatch.accepts(name: "UREVO URTM025", serviceUUIDs: []), "generic brand needs FTMS")
+        t.check(TreadmillMatch.accepts(name: "UREVO URTM025", serviceUUIDs: [Z1Constants.fitnessMachineService]), "Urevo with FTMS")
         t.check(TreadmillMatch.accepts(name: "WalkingPad C2", serviceUUIDs: []), "WalkingPad C2")
         t.check(
-            TreadmillMatch.accepts(name: "Desk Treadmill", serviceUUIDs: []),
-            "generic desk treadmill name"
+            !TreadmillMatch.accepts(name: "Desk Treadmill", serviceUUIDs: []),
+            "generic desk treadmill name alone is insufficient"
+        )
+        t.check(
+            !TreadmillMatch.accepts(name: "DESKTOP-5A7GPB1", serviceUUIDs: [Z1Constants.fitnessMachineService]),
+            "Windows PC is never selected, even with FTMS"
         )
         t.check(
             !TreadmillMatch.accepts(name: "KICKR BIKE", serviceUUIDs: [Z1Constants.fitnessMachineService]),
             "indoor bike rejected"
         )
         t.check(
-            TreadmillMatch.accepts(name: nil, serviceUUIDs: [Z1Constants.fitnessMachineService]),
-            "unnamed FTMS accepted"
+            !TreadmillMatch.accepts(name: nil, serviceUUIDs: [Z1Constants.fitnessMachineService]),
+            "unnamed FTMS rejected"
         )
     }
 }
@@ -736,7 +670,6 @@ public func counterRestoreTests(_ t: TestRunner) {
         // Real failure shape from 2026-09-04: persistence was disabled, but
         // 7.10 km of stale offsets turned a 2.45 km walk into 9.55 km.
         let freshWalk = CounterRestorePlan.make(
-            persistStats: false,
             savedElapsed: 2_645,
             savedDistance: 2_450,
             savedOffsetElapsed: 6_126,
@@ -745,12 +678,9 @@ public func counterRestoreTests(_ t: TestRunner) {
             currentElapsed: 2_645,
             currentDistance: 2_450
         )
-        t.expectEqual(freshWalk.offsetElapsed, 0, "non-persistent reconnect drops stale elapsed offset")
-        t.expectEqual(freshWalk.offsetDistance, 0, "non-persistent reconnect drops stale distance offset")
         t.expectEqual(freshWalk.totalKcal, 0, accuracy: 0.001, "stale cross-session calories are dropped with stale offsets")
 
         let continuingWalk = CounterRestorePlan.make(
-            persistStats: false,
             savedElapsed: 600,
             savedDistance: 500,
             savedOffsetElapsed: 0,
@@ -765,64 +695,14 @@ public func counterRestoreTests(_ t: TestRunner) {
     }
 }
 
-public func releaseDistTests(_ t: TestRunner) {
-    t.suite("release-dist") { t in
-        let tmp = FileManager.default.temporaryDirectory
-            .appendingPathComponent("z1-release-\(UUID().uuidString)", isDirectory: true)
-        let oldDir = tmp.appendingPathComponent("old", isDirectory: true)
-        let newDir = tmp.appendingPathComponent("new", isDirectory: true)
-        let emptyDir = tmp.appendingPathComponent("empty", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: tmp) }
-        try? FileManager.default.createDirectory(at: oldDir, withIntermediateDirectories: true)
-        try? FileManager.default.createDirectory(at: newDir, withIntermediateDirectories: true)
-        try? FileManager.default.createDirectory(at: emptyDir, withIntermediateDirectories: true)
-        let oldFeed = """
-        {"version":"202608310100","shortVersion":"1.0","url":"http://127.0.0.1:8741/a.zip","sha256":"aa"}
-        """
-        let newFeed = """
-        {"version":"202608312900","shortVersion":"1.0","url":"http://127.0.0.1:8741/b.zip","sha256":"bb"}
-        """
-        try? oldFeed.write(to: oldDir.appendingPathComponent("latest.json"), atomically: true, encoding: .utf8)
-        try? newFeed.write(to: newDir.appendingPathComponent("latest.json"), atomically: true, encoding: .utf8)
-        t.expectEqual(
-            ReleaseDist.bestRoot(among: [oldDir, newDir, emptyDir])?.lastPathComponent,
-            "new",
-            "serves the folder with the newest feed"
-        )
-        t.expectEqual(
-            ReleaseDist.feed(in: newDir)?.version,
-            "202608312900",
-            "feed decode"
-        )
-        t.check(ReleaseDist.bestRoot(among: []) == nil, "no candidates")
-    }
-}
-
-public func updateFeedTests(_ t: TestRunner) {
-    t.suite("update-feed") { t in
-        let json = """
-        {"version":"202609011200","shortVersion":"1.0","url":"http://127.0.0.1:8741/Z1WalkingPad-202609011200.zip","sha256":"abc","notes":"steps"}
-        """.data(using: .utf8)!
-        do {
-            let feed = try JSONDecoder().decode(UpdateFeed.self, from: json)
-            t.check(feed.isNewer(than: "202608311500"), "later timestamp is an update")
-            t.check(!feed.isNewer(than: "202609011200"), "same build is not an update")
-            t.check(!feed.isNewer(than: "202609011201"), "older feed is not an update")
-            t.expectEqual(feed.packageURL?.host, "127.0.0.1", "package host")
-        } catch {
-            t.check(false, "feed JSON decodes: \(error)")
-        }
-    }
-}
-
 /// Runs every suite. Returns the process exit code (0 = all passed).
 @discardableResult
-public func runAllZ1CoreTests() -> Int32 {
+public func runAllZ1CoreTests() async -> Int32 {
     let runner = TestRunner()
     protocolTests(runner)
     metricsTests(runner)
     unitsTests(runner)
-    strideTests(runner)
+    truncatedTelemetryTests(runner)
     stepSmootherTests(runner)
     automaticHealthExportTests(runner)
     historyAndCompatibilityTests(runner)
@@ -832,79 +712,28 @@ public func runAllZ1CoreTests() -> Int32 {
     stepSanityTests(runner)
     treadmillMatchTests(runner)
     counterRestoreTests(runner)
-    releaseDistTests(runner)
-    updateFeedTests(runner)
-    openMeteoTests(runner)
+    beltSegmentRegressionTests(runner)
+    sessionMigrationRegressionTests(runner)
+    realHistoryCopyRegressionTests(runner)
+    healthQueueRegressionTests(runner)
+    await pendingWalkDisplayTests(runner)
+    adversarialPersistenceTests(runner)
+    await liveExportRegressionTests(runner)
+    await fakeTransportRegressionTests(runner)
+    await auditMatchAndTimerTests(runner)
+    await auditDriverLinkTests(runner)
+    await auditDriverTelemetryTests(runner)
+    await auditDriverPacingTests(runner)
+    auditStoreWiringTests(runner)
+    auditRobustnessTests(runner)
+    await auditDriverFuzzTests(runner)
+    auditHistoryTests(runner)
+    await auditLiveExportTests(runner)
+    auditCalendarTests(runner)
     if runner.failures == 0 {
         print("PASS: \(runner.checks) checks, 0 failures")
         return 0
     }
     print("FAILED: \(runner.checks) checks, \(runner.failures) failures")
     return 1
-}
-
-/// Moon phase math and weather-snapshot flag/JSON tests.
-func openMeteoTests(_ t: TestRunner) {
-    t.suite("open-meteo") { t in
-        // New moon anchor: 2000-01-06 18:14 UTC.
-        let epoch = Date(timeIntervalSince1970: 947_182_440)
-        let synodic = 29.530588853 * 86_400
-        t.expectEqual(MoonPhase.fraction(at: epoch), 0.0, accuracy: 0.01, "new moon at anchor epoch")
-        t.expectEqual(
-            MoonPhase.fraction(at: epoch.addingTimeInterval(14.765294 * 86_400)),
-            0.5,
-            accuracy: 0.01,
-            "full moon half a cycle later"
-        )
-        t.expectEqual(
-            MoonPhase.fraction(at: epoch.addingTimeInterval(synodic)),
-            0.0,
-            accuracy: 0.01,
-            "phase wraps to new moon after one synodic month"
-        )
-
-        // A 1990s date (before the anchor) must still land in [0, 1).
-        let ninetiesFraction = MoonPhase.fraction(at: Date(timeIntervalSince1970: 788_918_400))
-        t.check(ninetiesFraction >= 0 && ninetiesFraction < 1, "pre-epoch date stays in [0,1)")
-
-        t.expectEqual(MoonPhase.illumination(at: epoch), 0.0, accuracy: 0.01, "no light at new moon")
-        t.expectEqual(
-            MoonPhase.illumination(at: epoch.addingTimeInterval(14.765294 * 86_400)),
-            1.0,
-            accuracy: 0.01,
-            "full disc at full moon"
-        )
-
-        // The memberwise initializer stays internal, so snapshots are built
-        // through the same Codable path the app already relies on.
-        func snapshot(code: Int = 0, precipitation: Double = 0, cloudCover: Double = 0) -> WeatherSnapshot {
-            let json = "{\"cloudCover\":\(cloudCover),\"precipitation\":\(precipitation),\"weatherCode\":\(code),\"fetchedAt\":0}"
-            do {
-                return try JSONDecoder().decode(WeatherSnapshot.self, from: Data(json.utf8))
-            } catch {
-                fatalError("test snapshot fixture failed to decode: \(error)")
-            }
-        }
-        t.check(snapshot(code: 71).isSnow, "code 71 is snow")
-        t.check(snapshot(code: 85).isSnow, "code 85 is snow")
-        t.check(!snapshot(code: 61).isSnow, "code 61 is not snow")
-
-        let rain = snapshot(code: 61, precipitation: 0.2)
-        t.check(rain.isRaining && !rain.isSnowing, "rainy code with water is rain only")
-        let snowfall = snapshot(code: 71, precipitation: 0.2)
-        t.check(snowfall.isSnowing, "snow code with precipitation snows")
-        t.check(
-            snapshot(cloudCover: 0.3).isClear && !snapshot(cloudCover: 0.5).isClear,
-            "clear threshold sits below 45% cloud"
-        )
-
-        do {
-            let original = snapshot(code: 71, precipitation: 0.2, cloudCover: 0.6)
-            let data = try JSONEncoder().encode(original)
-            let restored = try JSONDecoder().decode(WeatherSnapshot.self, from: data)
-            t.expectEqual(restored, original, "weather JSON roundtrip unchanged")
-        } catch {
-            t.check(false, "weather JSON roundtrip: \(error)")
-        }
-    }
 }

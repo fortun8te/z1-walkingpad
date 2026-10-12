@@ -1,24 +1,27 @@
 import AppKit
 import SwiftUI
 
-/// A ruled speed control: every 0.1 the pad accepts is a tick, the ticks you
-/// have dialled past are lit, whole numbers are longer and labelled, and the
-/// one you are on is a bright line.
+/// A ruled speed control: every 0.1 the pad accepts is a tick, whole numbers
+/// are longer and labelled, and the speed you asked for is a bright line.
+///
+/// While the belt moves, the ticks up to the belt's own speed are lit in the
+/// one blue, so a change reads as the blue filling up to the line as the belt
+/// ramps. At a standstill the ticks up to the line are lit in ink.
 ///
 /// The whole ruler is the hit target: press anywhere to jump there, drag to
-/// fine-tune. Reading it is reading a ruler, so the full range is legible at
-/// a glance. Each detent clicks under the finger on a Force Touch trackpad.
+/// fine-tune. Each detent clicks under the finger on a Force Touch trackpad.
 struct SpeedDial: View {
     let range: ClosedRange<Double>
     @Binding var value: Double
+    /// The belt's measured speed while it moves; nil at a standstill.
+    var belt: Double?
     var enabled: Bool
+    var format: (Double) -> String
     var onEditingChanged: (Bool) -> Void
     var onCommit: () -> Void
 
     /// Height of the tick area; the numerals sit under it.
     var height: CGFloat = 36
-    /// Belt moving: lit ticks turn the one blue.
-    var live = false
 
     @State private var dragging = false
     @State private var lastDetent: Double?
@@ -26,6 +29,7 @@ struct SpeedDial: View {
     private static let step = 0.1
     private static let labelHeight: CGFloat = 13
     private static let tickWidth: CGFloat = 1.5
+    private static let lineWidth: CGFloat = 2.5
 
     private var span: Double { max(0.0001, range.upperBound - range.lowerBound) }
 
@@ -44,9 +48,13 @@ struct SpeedDial: View {
 
     private func speed(atX x: CGFloat, width: CGFloat) -> Double {
         let raw = range.lowerBound + Double(min(max(x / max(width, 1), 0), 1)) * span
-        let snapped = (raw / Self.step).rounded() * Self.step
-        // Clamp after the snap, or 6.4000001 lands past the top.
-        return min(max(snapped, range.lowerBound), range.upperBound)
+        return snapped(raw)
+    }
+
+    /// Onto the 0.1 grid, then into range (or 6.4000001 lands past the top).
+    private func snapped(_ raw: Double) -> Double {
+        let onGrid = (raw / Self.step).rounded() * Self.step
+        return min(max(onGrid, range.lowerBound), range.upperBound)
     }
 
     var body: some View {
@@ -54,14 +62,14 @@ struct SpeedDial: View {
             let width = geometry.size.width
             Canvas { context, size in
                 let usable = size.width - Self.tickWidth
-                let lit = fraction(value)
-                let on = GraphicsContext.Shading.color(live ? Theme.accent : Theme.ink)
+                let litTo = fraction(belt ?? value)
+                let on = GraphicsContext.Shading.color(belt != nil ? Theme.accent : Theme.ink)
                 let off = GraphicsContext.Shading.color(Theme.track)
                 for v in tickValues {
                     let f = fraction(v)
                     let major = abs(v.rounded() - v) < 0.001
                     let half = !major && abs((v * 2).rounded() - v * 2) < 0.001
-                    let isLit = f <= lit + 0.0001
+                    let isLit = f <= litTo + 0.0001
                     let h = height * (major ? 0.78 : half ? 0.56 : (isLit ? 0.46 : 0.36))
                     let x = f * usable
                     context.fill(
@@ -72,7 +80,7 @@ struct SpeedDial: View {
                         let label = context.resolve(
                             Text("\(Int(v.rounded()))")
                                 .font(.system(size: 10, weight: .medium).monospacedDigit())
-                                .foregroundStyle(Theme.faint)
+                                .foregroundStyle(Theme.dim)
                         )
                         // Kept inside the ruler, so a 6 at the top end is not clipped.
                         let w = label.measure(in: CGSize(width: 40, height: 20)).width
@@ -80,10 +88,13 @@ struct SpeedDial: View {
                         context.draw(label, at: CGPoint(x: lx, y: height + Self.labelHeight / 2 + 1))
                     }
                 }
-                // The value you are on: a plain ink line, full height.
-                let x = lit * (size.width - 2.5)
+                // The speed asked for: a plain ink line, full height, centred
+                // on its tick.
+                let centre = fraction(value) * usable + Self.tickWidth / 2
+                let lineX = min(max(centre - Self.lineWidth / 2, 0), size.width - Self.lineWidth)
                 context.fill(
-                    Path(roundedRect: CGRect(x: x, y: 0, width: 2.5, height: height), cornerRadius: 1.25),
+                    Path(roundedRect: CGRect(x: lineX, y: 0, width: Self.lineWidth, height: height),
+                         cornerRadius: Self.lineWidth / 2),
                     with: .color(Theme.ink)
                 )
             }
@@ -103,7 +114,7 @@ struct SpeedDial: View {
                         }
                     }
                     .onEnded { _ in
-                        guard enabled else { return }
+                        guard enabled, dragging else { return }
                         dragging = false
                         lastDetent = nil
                         onEditingChanged(false)
@@ -115,11 +126,20 @@ struct SpeedDial: View {
         .opacity(enabled ? 1 : 0.4)
         .accessibilityElement()
         .accessibilityLabel("Speed")
-        .accessibilityValue(String(format: "%.1f", value))
+        .accessibilityValue(format(value))
+        .accessibilityAdjustableAction { direction in
+            guard enabled else { return }
+            switch direction {
+            case .increment: value = snapped(value + Self.step)
+            case .decrement: value = snapped(value - Self.step)
+            @unknown default: return
+            }
+            onCommit()
+        }
     }
 
     /// One click per stop. `.alignment` is the detent feedback macOS uses for
-    /// snapping, which is exactly what this is.
+    /// snapping, which is exactly what this is. Haptic only; never a sound.
     private func tickHaptic(_ detent: Double) {
         guard lastDetent != detent else { return }
         lastDetent = detent

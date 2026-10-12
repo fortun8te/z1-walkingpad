@@ -13,6 +13,7 @@ final class LiveState {
     private(set) var phase: Z1Treadmill.Phase = .disconnected
     private(set) var deviceName: String?
     private(set) var beltRunning = false
+    private(set) var stopRequested = false
     private(set) var hasTelemetry = false
     private(set) var speedKmh = 0.0
     private(set) var elapsedS = 0
@@ -33,6 +34,7 @@ final class LiveState {
         update(\.phase, status.phase)
         update(\.deviceName, status.deviceName)
         update(\.beltRunning, status.beltRunning)
+        update(\.stopRequested, status.stopRequested)
         update(\.hasTelemetry, status.hasTelemetry)
         update(\.speedKmh, status.speedKmh)
         update(\.elapsedS, status.elapsedS)

@@ -1,0 +1,32 @@
+name: Verify
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build native app and test harness
+        working-directory: macos
+        run: swift build
+      - name: Run native tests with fake transports
+        working-directory: macos
+        run: swift run z1tests
+      - name: Install Python test dependencies
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install '.[dev]'
+      - name: Run read-only MCP and protocol tests
+        run: .venv/bin/python -m pytest -q

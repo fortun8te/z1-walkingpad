@@ -5,6 +5,9 @@
 #   bash macos/build-app.sh            release build -> macos/dist/Z1WalkingPad.app
 #   bash macos/build-app.sh --debug    debug build, faster, for UI work
 #   bash macos/build-app.sh --quiet    less chatter
+#   Z1_BUILD_SCRATCH=/private/tmp/z1-build bash macos/build-app.sh
+#   Z1_DISABLE_SWIFT_SANDBOX=1         for an already sandboxed build host
+#   Z1_BUILD_DIST=/private/tmp/z1-dist optional bundle output directory
 #
 # The bundle id stays dev.z1walkingpad.menubar on purpose: settings, the
 # remembered pad, the open-walk tracker and the Bluetooth permission all hang
@@ -15,9 +18,9 @@ set -euo pipefail
 cd "$(dirname "$0")"
 APP_NAME="Z1WalkingPad"
 BUNDLE_ID="dev.z1walkingpad.menubar"
-DIST="dist"
+DIST="${Z1_BUILD_DIST:-dist}"
 APP="$DIST/$APP_NAME.app"
-SCRATCH=".build-frontend"
+SCRATCH="${Z1_BUILD_SCRATCH:-.build-frontend}"
 ENTITLEMENTS="Sources/Z1App/Z1WalkingPad.entitlements"
 CONFIG="release"
 QUIET=0
@@ -45,6 +48,9 @@ if ! xcodebuild -version >/dev/null 2>&1 || ! swift --version >/dev/null 2>&1; t
 fi
 
 BUILD=(swift build -c "$CONFIG" --arch arm64 --product Z1App --scratch-path "$SCRATCH")
+if [[ "${Z1_DISABLE_SWIFT_SANDBOX:-0}" == "1" ]]; then
+  BUILD+=(--disable-sandbox)
+fi
 say "==> ${BUILD[*]}"
 LOG=$(mktemp -t z1build.XXXXXX)
 if ! "${BUILD[@]}" >"$LOG" 2>&1; then
@@ -102,13 +108,15 @@ PLIST
 
 # Ad-hoc signature with the Bluetooth entitlement; no timestamp, no network.
 say "==> ad-hoc codesign"
-codesign --force --sign - --entitlements "$ENTITLEMENTS" --timestamp=none --options runtime "$APP" >/dev/null 2>&1
-xattr -cr "$APP" 2>/dev/null || true
-codesign --verify --strict "$APP"
+# Finder/iCloud metadata on generated files can make codesign reject an
+# otherwise valid bundle. Remove it before signing, never after verification.
+xattr -cr "$APP"
+codesign --force --sign - --entitlements "$ENTITLEMENTS" --timestamp=none --options runtime "$APP"
+codesign --verify --deep --strict "$APP"
 
 IDENT="$(codesign -d --verbose=2 "$APP" 2>&1 | sed -n 's/^Identifier=//p')"
 if [[ "$IDENT" != "$BUNDLE_ID" ]]; then
   echo "error: expected identifier $BUNDLE_ID, got: $IDENT" >&2
   exit 1
 fi
-say "==> built $(pwd)/$APP"
+say "==> built $(cd "$DIST" && pwd)/$APP_NAME.app"

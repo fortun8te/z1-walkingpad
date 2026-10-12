@@ -10,9 +10,10 @@ import Z1Core
 /// - `Z1_PREVIEW_PHASE` ready | scanning | disconnected
 /// - `Z1_PREVIEW_SPEED` belt speed in km/h; above 0 means walking
 /// - `Z1_PREVIEW_QUEUED` a speed (km/h) queued for Start at a standstill
-/// - `Z1_PREVIEW_PAGE` now | history | records | settings
-/// - `Z1_PREVIEW_LENS` day | week | month
+/// - `Z1_PREVIEW_PAGE` now | history | settings
 /// - `Z1_PREVIEW_DEMO=1` five weeks of plausible walks (otherwise empty)
+/// - `Z1_PREVIEW_ERROR` speed | stop injects a visible simulated command failure
+/// - `Z1_PREVIEW_TYPED` digits already typed into the speed panel (e.g. `3`)
 /// - `Z1_PREVIEW_TICK=1` fake telemetry once a second, for CPU measurement
 /// - `Z1_PREVIEW_APPEARANCE` light | dark (otherwise the system's)
 ///
@@ -27,9 +28,10 @@ enum PreviewHarness {
         return Page(rawValue: env["Z1_PREVIEW_PAGE"] ?? "")
     }
 
-    static var lens: TreadmillViewModel.AlmanacLens? {
+    /// Opens the Now page with the speed panel in typing mode.
+    static var typedSpeed: String? {
         guard TreadmillViewModel.isPreview else { return nil }
-        return TreadmillViewModel.AlmanacLens(rawValue: env["Z1_PREVIEW_LENS"] ?? "")
+        return env["Z1_PREVIEW_TYPED"]
     }
 
     static var appearance: NSAppearance? {
@@ -56,7 +58,7 @@ enum PreviewHarness {
         var sessions: [WalkSession] = []
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: Date())
-        let minutes = [74, 0, 131, 96, 0, 58, 122, 0, 88, 140, 45, 0, 102, 67, 118, 0, 0, 93, 127, 81,
+        let minutes = [180, 120, 131, 96, 0, 58, 122, 0, 88, 140, 45, 0, 102, 67, 118, 0, 0, 93, 127, 81,
                        0, 110, 64, 99, 0, 135, 72, 0, 105, 90, 0, 41, 0, 116, 0]
         for (offset, min) in minutes.enumerated() where min > 0 {
             guard let day = calendar.date(byAdding: .day, value: -(offset + 1), to: today),
@@ -103,6 +105,11 @@ enum PreviewHarness {
             }
         }
         model.setStatus(s)
+        switch env["Z1_PREVIEW_ERROR"] {
+        case "speed": model.previewSetCommandError("Speed change failed. The last confirmed speed is shown.")
+        case "stop": model.previewSetCommandError("Stop failed. The belt may still be moving. Try Stop again.")
+        default: break
+        }
         if let queued = Double(env["Z1_PREVIEW_QUEUED"] ?? "") { model.previewQueueSpeed(queued) }
         guard env["Z1_PREVIEW_TICK"] == "1", s.beltRunning else { return }
         var distance = Double(s.distanceM)

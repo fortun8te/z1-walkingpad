@@ -1,3 +1,3 @@
-from .cli import run
+from .server import run
 
 run()

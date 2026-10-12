@@ -8,6 +8,7 @@ public struct CompletedWalk: Equatable, Sendable {
     public let activeDurationS: Int
     public let distanceM: Int
     public let steps: Int
+    public let rawPadSteps: Int?
     /// Kept for Codable compatibility of WalkSession; always false.
     public let offeredToHealth: Bool
 
@@ -18,7 +19,8 @@ public struct CompletedWalk: Equatable, Sendable {
         activeDurationS: Int,
         distanceM: Int,
         steps: Int,
-        offeredToHealth: Bool
+        offeredToHealth: Bool,
+        rawPadSteps: Int? = nil
     ) {
         self.id = id
         self.startedAt = startedAt
@@ -26,6 +28,7 @@ public struct CompletedWalk: Equatable, Sendable {
         self.activeDurationS = activeDurationS
         self.distanceM = distanceM
         self.steps = steps
+        self.rawPadSteps = rawPadSteps
         self.offeredToHealth = offeredToHealth
     }
 
@@ -35,10 +38,10 @@ public struct CompletedWalk: Equatable, Sendable {
     }
 }
 
-/// Turns belt telemetry into one pause-aware workout. A real Stop starts a
-/// long grace period so BLE drops and app rebuilds do not split one walk.
+/// Turns belt telemetry into individual belt-run segments. A brief pause or
+/// connection drop can resume the same segment; a longer gap starts a new ID.
 public struct RemoteSessionTracker: Codable, Sendable {
-    public static let stopGraceSeconds: TimeInterval = 3 * 60 * 60
+    public static let stopGraceSeconds: TimeInterval = 2 * 60
 
     public struct Observation: Sendable {
         /// Finished walks awaiting a history entry (all of them, short ones
@@ -56,17 +59,20 @@ public struct RemoteSessionTracker: Codable, Sendable {
         var elapsedS: Int
         var distanceM: Int
         var steps: Int
+        var padSteps: Int?
 
         init(_ status: Z1Treadmill.Status) {
             elapsedS = max(0, status.elapsedS)
             distanceM = max(0, status.distanceM)
             steps = max(0, status.steps)
+            padSteps = status.padSteps.map { max(0, $0) }
         }
 
-        init(elapsedS: Int, distanceM: Int, steps: Int) {
+        init(elapsedS: Int, distanceM: Int, steps: Int, padSteps: Int? = nil) {
             self.elapsedS = elapsedS
             self.distanceM = distanceM
             self.steps = steps
+            self.padSteps = padSteps
         }
     }
 
@@ -76,9 +82,12 @@ public struct RemoteSessionTracker: Codable, Sendable {
         var activeDurationS: Int
         var distanceM: Int
         var steps: Int
+        var rawPadSteps: Int?
         var lastCounters: Counters
         var wasRunning: Bool
         var stoppedAt: Date?
+        /// Persisted recovery timestamp; older records decode this as nil.
+        var lastObservedAt: Date?
     }
 
     private var session: Session?
@@ -94,11 +103,23 @@ public struct RemoteSessionTracker: Codable, Sendable {
     /// Hand-written so that state saved by an older build — which had no
     /// `pendingLogs` — still decodes instead of resetting the tracker and
     /// dropping a walk that is mid-flight.
+    ///
+    /// A tracker is only ever decoded by a new process, and that process has
+    /// no link to the pad yet. A walk that was still "running" when the old
+    /// process died or quit (a crash, an update, Quit mid-walk, "Stop pad and
+    /// quit" before the pad's Stop reached the tracker) is therefore treated
+    /// as dropped at the last moment it was seen. Left open, nothing would
+    /// ever close it while the pad stays idle, it would sit in "Today" and the
+    /// Health queue's hold-back for good, and the next walk — possibly days
+    /// later — would be folded into it.
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         session = try values.decodeIfPresent(Session.self, forKey: .session)
         idleCounters = try values.decodeIfPresent(Counters.self, forKey: .idleCounters)
         pendingLogs = try values.decodeIfPresent([Session].self, forKey: .pendingLogs) ?? []
+        if session?.stoppedAt == nil {
+            markConnectionDrop(at: .distantFuture)
+        }
     }
 
     public var finalizationDeadline: Date? {
@@ -106,6 +127,10 @@ public struct RemoteSessionTracker: Codable, Sendable {
     }
 
     public var hasPendingLogs: Bool { !pendingLogs.isEmpty }
+
+    /// Finished walks retained until their history save succeeds. Reading this
+    /// never finalizes or acknowledges a session.
+    public var pendingCompletedWalks: [CompletedWalk] { pendingCompleted }
 
     /// Totals of the walk currently being tracked (running or inside its
     /// stop-grace window), nil when no walk is open. This — not the pad's
@@ -159,6 +184,18 @@ public struct RemoteSessionTracker: Codable, Sendable {
                     current: counters.steps,
                     allowReset: padReset
                 )
+                if let prior = current.lastCounters.padSteps,
+                   let latest = counters.padSteps,
+                   let accumulated = current.rawPadSteps
+                {
+                    current.rawPadSteps = accumulated + Self.counterDelta(
+                        previous: prior,
+                        current: latest,
+                        allowReset: padReset
+                    )
+                } else {
+                    current.rawPadSteps = nil
+                }
                 // Interpolator can sit 1–3 steps ahead of the packet. When
                 // the display snaps back, drop those ticks instead of
                 // treating the dip as a new pad session.
@@ -181,6 +218,7 @@ public struct RemoteSessionTracker: Codable, Sendable {
                 current.steps = counters.steps
             }
             current.lastCounters = counters
+            current.lastObservedAt = now
             if running {
                 current.wasRunning = true
                 current.stoppedAt = nil
@@ -197,9 +235,11 @@ public struct RemoteSessionTracker: Codable, Sendable {
                 activeDurationS: seed.elapsedS,
                 distanceM: seed.distanceM,
                 steps: seed.steps,
+                rawPadSteps: seed.padSteps,
                 lastCounters: counters,
                 wasRunning: true,
-                stoppedAt: nil
+                stoppedAt: nil,
+                lastObservedAt: now
             )
             idleCounters = nil
         } else {
@@ -212,11 +252,17 @@ public struct RemoteSessionTracker: Codable, Sendable {
         )
     }
 
-    /// BLE drop is not Stop. Keep the open walk; do not start the grace clock.
-    public mutating func markConnectionDrop() {
+    /// A lost link might hide a Stop. Close at the last known moving time if
+    /// telemetry has not resumed within the short segment grace period.
+    public mutating func markConnectionDrop(at now: Date = Date()) {
         guard session != nil else { return }
-        session?.stoppedAt = nil
-        session?.wasRunning = true
+        if let current = session, current.stoppedAt == nil {
+            // An app reopening must not move yesterday's last activity to now.
+            let lastSeen = current.lastObservedAt
+                ?? current.startedAt.addingTimeInterval(Double(current.activeDurationS))
+            session?.stoppedAt = min(now, lastSeen)
+        }
+        session?.wasRunning = false
     }
 
     /// Called by the menu app's deadline task and again on launch. Repeated
@@ -254,15 +300,33 @@ public struct RemoteSessionTracker: Codable, Sendable {
     }
 
     private static func completedWalk(from current: Session) -> CompletedWalk {
-        CompletedWalk(
+        // The pad's own step register is only trusted when it agrees with the
+        // belt: a register that did not reset with the walk (or one that
+        // wrapped) turns up as an absurd stride and is left out in favour of
+        // the modelled count.
+        let raw = plausibleRawSteps(current.rawPadSteps, distanceM: current.distanceM)
+        return CompletedWalk(
             id: current.id,
             startedAt: current.startedAt,
-            endedAt: current.stoppedAt ?? current.startedAt,
+            endedAt: current.stoppedAt ?? current.lastObservedAt
+                ?? current.startedAt.addingTimeInterval(Double(current.activeDurationS)),
             activeDurationS: current.activeDurationS,
             distanceM: current.distanceM,
-            steps: current.steps,
-            offeredToHealth: false
+            steps: raw ?? current.steps,
+            offeredToHealth: false,
+            rawPadSteps: raw
         )
+    }
+
+    /// Stride bounds for a believable pad step count, in metres per step.
+    static let plausibleStrideM: ClosedRange<Double> = 0.30...1.50
+
+    static func plausibleRawSteps(_ raw: Int?, distanceM: Int) -> Int? {
+        guard let raw else { return nil }
+        // Too short a walk to judge a stride from.
+        guard distanceM >= 20 else { return raw }
+        guard raw > 0, plausibleStrideM.contains(Double(distanceM) / Double(raw)) else { return nil }
+        return raw
     }
 
     private static func counterDelta(previous: Int, current: Int, allowReset: Bool) -> Int {
@@ -275,7 +339,11 @@ public struct RemoteSessionTracker: Codable, Sendable {
         return Counters(
             elapsedS: counterDelta(previous: idle.elapsedS, current: current.elapsedS, allowReset: true),
             distanceM: counterDelta(previous: idle.distanceM, current: current.distanceM, allowReset: true),
-            steps: counterDelta(previous: idle.steps, current: current.steps, allowReset: true)
+            steps: counterDelta(previous: idle.steps, current: current.steps, allowReset: true),
+            padSteps: {
+                guard let previous = idle.padSteps, let latest = current.padSteps else { return nil }
+                return counterDelta(previous: previous, current: latest, allowReset: true)
+            }()
         )
     }
 }

@@ -13,6 +13,7 @@ public enum BLETransportError: Error, Equatable, LocalizedError {
     case timeout
     case notConnected
     case missingCharacteristics
+    case operationInProgress
 
     public var errorDescription: String? {
         switch self {
@@ -20,6 +21,7 @@ public enum BLETransportError: Error, Equatable, LocalizedError {
         case .timeout: "BLE operation timed out"
         case .notConnected: "not connected to a peripheral"
         case .missingCharacteristics: "required GATT characteristics not found"
+        case .operationInProgress: "BLE operation already in progress"
         }
     }
 }
@@ -29,9 +31,10 @@ public enum BLETransportError: Error, Equatable, LocalizedError {
 /// All delegate work runs on a private serial queue; continuations are guarded
 /// by a lock; notifications are fanned out as `(uuidString, data)` pairs on an
 /// AsyncStream so ordering is preserved for the consumer.
-final class BLETransport: NSObject, @unchecked Sendable {
+final class BLETransport: NSObject, Z1PadTransport, @unchecked Sendable {
 
-    private let queue = DispatchQueue(label: "z1walkingpad.ble")
+    private let queue: DispatchQueue
+    private let timeouts: OperationTimeouts
     private let lock = NSLock()
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
@@ -39,7 +42,7 @@ final class BLETransport: NSObject, @unchecked Sendable {
     private var scanByMatch = false
 
     // Pending one-shot operations (all guarded by `lock`).
-    private var poweredOnConts: [CheckedContinuation<Void, Error>] = []
+    private var poweredOnConts: [UUID: CheckedContinuation<Void, Error>] = [:]
     private var scanCont: CheckedContinuation<String, Error>?
     private var connectCont: CheckedContinuation<Void, Error>?
     private var disconnectCont: CheckedContinuation<Void, Never>?
@@ -49,15 +52,23 @@ final class BLETransport: NSObject, @unchecked Sendable {
     private var writeConts: [CBUUID: CheckedContinuation<Void, Error>] = [:]
     private var notifyConts: [CBUUID: CheckedContinuation<Void, Error>] = [:]
     private var characteristics: [CBUUID: CBCharacteristic] = [:]
+    private var expectedDisconnectIDs: Set<UUID> = []
 
     let notifications: AsyncStream<(String, Data)>
     private let notifyYield: AsyncStream<(String, Data)>.Continuation
 
     /// Called (on the BLE queue) whenever the peripheral disconnects,
     /// whether expected or not.
-    var onDisconnect: (@Sendable () -> Void)?
+    private var disconnectHandler: (@Sendable () -> Void)?
+    var onDisconnect: (@Sendable () -> Void)? {
+        get { lock.withLock { disconnectHandler } }
+        set { lock.withLock { disconnectHandler = newValue } }
+    }
 
     override init() {
+        let queue = DispatchQueue(label: "z1walkingpad.ble")
+        self.queue = queue
+        timeouts = OperationTimeouts(queue: queue)
         var cont: AsyncStream<(String, Data)>.Continuation!
         notifications = AsyncStream { cont = $0 }
         notifyYield = cont
@@ -67,18 +78,30 @@ final class BLETransport: NSObject, @unchecked Sendable {
 
     // MARK: - helpers
 
-    private func scheduleTimeout(_ seconds: TimeInterval, _ fire: @escaping @Sendable () -> Void) {
-        queue.asyncAfter(deadline: .now() + seconds, execute: fire)
+    /// Every pending operation races a token-checked timer; see `OperationTimeouts`
+    /// for why a bare `asyncAfter` is not enough.
+    private func scheduleTimeout(_ seconds: TimeInterval, key: String, _ fire: @escaping @Sendable () -> Void) {
+        timeouts.schedule(after: seconds, key: key, fire)
+    }
+
+    private func clearTimeout(_ key: String) {
+        timeouts.cancel(key)
+    }
+
+    private func opKey(_ kind: String, _ uuid: CBUUID) -> String {
+        "\(kind):\(uuid.uuidString)"
     }
 
     /// Take and clear an optional continuation under the lock.
-    private func take<T>(_ keyPath: ReferenceWritableKeyPath<BLETransport, CheckedContinuation<T, Error>?>)
+    private func take<T>(_ keyPath: ReferenceWritableKeyPath<BLETransport, CheckedContinuation<T, Error>?>, timeoutKey: String)
         -> CheckedContinuation<T, Error>?
     {
-        lock.withLock {
+        let result = lock.withLock {
             defer { self[keyPath: keyPath] = nil }
             return self[keyPath: keyPath]
         }
+        if result != nil { clearTimeout(timeoutKey) }
+        return result
     }
 
     private func lookup(_ uuid: CBUUID) throws -> (CBPeripheral, CBCharacteristic) {
@@ -110,8 +133,9 @@ final class BLETransport: NSObject, @unchecked Sendable {
                 writeConts.removeAll()
                 notifyConts.removeAll()
             }
-            return (poweredOnConts, scanCont, connectCont, servicesCont, charsConts, readConts, writeConts, notifyConts)
+            return (Array(poweredOnConts.values), scanCont, connectCont, servicesCont, charsConts, readConts, writeConts, notifyConts)
         }
+        timeouts.cancelAll()
         powered.forEach { $0.resume(throwing: error) }
         scan?.resume(throwing: error)
         connect?.resume(throwing: error)
@@ -136,16 +160,22 @@ final class BLETransport: NSObject, @unchecked Sendable {
 
     func waitPoweredOn() async throws {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            let id = UUID()
             let state = lock.withLock { () -> CBManagerState in
                 let s = central.state
                 if s == .unknown || s == .resetting {
-                    poweredOnConts.append(cont)
+                    poweredOnConts[id] = cont
                 }
                 return s
             }
             switch state {
             case .poweredOn: cont.resume()
-            case .unknown, .resetting: break // queued above
+            case .unknown, .resetting:
+                scheduleTimeout(10, key: "power:\(id)") { [weak self] in
+                    guard let self else { return }
+                    let pending = self.lock.withLock { self.poweredOnConts.removeValue(forKey: id) }
+                    pending?.resume(throwing: BLETransportError.timeout)
+                }
             default: cont.resume(throwing: BLETransportError.bluetoothUnavailable(Self.describeState(state)))
             }
         }
@@ -168,10 +198,14 @@ final class BLETransport: NSObject, @unchecked Sendable {
             return nil
         }
         let name = found.name ?? ""
-        let ok = name.hasPrefix(namePrefix) || TreadmillMatch.accepts(name: found.name, serviceUUIDs: [])
-        guard ok else { return nil }
+        // The identifier was saved after this device passed the scan filter
+        // and answered as a treadmill, so trust it, unless it is one of the
+        // devices that can never be the pad. (Re-running `accepts` here
+        // without the advertisement would reject every non-KingSmith pad,
+        // which only passes the filter on its FTMS service.)
+        guard !name.isEmpty, name.hasPrefix(namePrefix) || !TreadmillMatch.excludes(name: name) else { return nil }
         lock.withLock { peripheral = found }
-        return name.isEmpty ? "Treadmill" : name
+        return name
     }
 
     /// Scan for the first peripheral whose name starts with `namePrefix`.
@@ -179,18 +213,21 @@ final class BLETransport: NSObject, @unchecked Sendable {
     func scan(namePrefix: String, timeout: TimeInterval) async throws -> String {
         try await waitPoweredOn()
         return try await withCheckedThrowingContinuation { cont in
-            lock.withLock {
+            let busy = lock.withLock { () -> Bool in
+                if scanCont != nil { return true }
                 scanPrefix = namePrefix
                 scanByMatch = false
                 scanCont = cont
+                return false
+            }
+            if busy { cont.resume(throwing: BLETransportError.operationInProgress); return }
+            scheduleTimeout(timeout, key: "scan") { [weak self] in
+                guard let self, let cont = self.take(\.scanCont, timeoutKey: "scan") else { return }
+                self.central.stopScan()
+                cont.resume(throwing: BLETransportError.timeout)
             }
             queue.async {
                 self.central.scanForPeripherals(withServices: nil, options: nil)
-            }
-            scheduleTimeout(timeout) { [weak self] in
-                guard let self, let cont = self.take(\.scanCont) else { return }
-                self.central.stopScan()
-                cont.resume(throwing: BLETransportError.timeout)
             }
         }
     }
@@ -199,19 +236,22 @@ final class BLETransport: NSObject, @unchecked Sendable {
     func scanForTreadmill(timeout: TimeInterval) async throws -> String {
         try await waitPoweredOn()
         return try await withCheckedThrowingContinuation { cont in
-            lock.withLock {
+            let busy = lock.withLock { () -> Bool in
+                if scanCont != nil { return true }
                 scanPrefix = ""
                 scanByMatch = true
                 scanCont = cont
+                return false
+            }
+            if busy { cont.resume(throwing: BLETransportError.operationInProgress); return }
+            scheduleTimeout(timeout, key: "scan") { [weak self] in
+                guard let self, let cont = self.take(\.scanCont, timeoutKey: "scan") else { return }
+                self.central.stopScan()
+                cont.resume(throwing: BLETransportError.timeout)
             }
             queue.async {
                 // Nil services: KingSmith often omits 0x1826 from the advert.
                 self.central.scanForPeripherals(withServices: nil, options: nil)
-            }
-            scheduleTimeout(timeout) { [weak self] in
-                guard let self, let cont = self.take(\.scanCont) else { return }
-                self.central.stopScan()
-                cont.resume(throwing: BLETransportError.timeout)
             }
         }
     }
@@ -222,11 +262,13 @@ final class BLETransport: NSObject, @unchecked Sendable {
 
     func connect(timeout: TimeInterval) async throws {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            let target = lock.withLock { () -> CBPeripheral? in
-                guard let peripheral else { return nil }
+            let (target, busy) = lock.withLock { () -> (CBPeripheral?, Bool) in
+                guard let peripheral else { return (nil, false) }
+                if connectCont != nil { return (peripheral, true) }
                 connectCont = cont
-                return peripheral
+                return (peripheral, false)
             }
+            if busy { cont.resume(throwing: BLETransportError.operationInProgress); return }
             guard let target else {
                 cont.resume(throwing: BLETransportError.notConnected)
                 return
@@ -235,22 +277,14 @@ final class BLETransport: NSObject, @unchecked Sendable {
             // while we were not waiting) — CoreBluetooth would not call the
             // delegate again, so resolve immediately.
             if target.state == .connected {
-                if let cont = take(\.connectCont) {
+                if let cont = take(\.connectCont, timeoutKey: "connect") {
                     queue.async { target.delegate = self }
                     cont.resume()
                 }
                 return
             }
-            queue.async {
-                target.delegate = self
-                self.central.connect(target, options: nil)
-            }
-            // Deliberately does NOT cancel the underlying connect request on
-            // timeout: CoreBluetooth keeps it pending and links the moment the
-            // pad advertises again, so the next retry finds it already
-            // connected instead of starting over.
-            scheduleTimeout(timeout) { [weak self] in
-                guard let self, let cont = self.take(\.connectCont) else { return }
+            scheduleTimeout(timeout, key: "connect") { [weak self] in
+                guard let self, let cont = self.take(\.connectCont, timeoutKey: "connect") else { return }
                 // CoreBluetooth's connect() never times out on its own: the
                 // request stays queued forever. Abandoning it without
                 // cancelling leaves a pending connect for a peripheral that
@@ -260,25 +294,32 @@ final class BLETransport: NSObject, @unchecked Sendable {
                 self.central.cancelPeripheralConnection(target)
                 cont.resume(throwing: BLETransportError.timeout)
             }
+            queue.async {
+                _ = self.lock.withLock { self.expectedDisconnectIDs.remove(target.identifier) }
+                target.delegate = self
+                self.central.connect(target, options: nil)
+            }
         }
     }
 
     func discoverProfile(services: [CBUUID], characteristics chars: [CBUUID]) async throws {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            let target = lock.withLock { () -> CBPeripheral? in
-                guard let peripheral else { return nil }
+            let (target, busy) = lock.withLock { () -> (CBPeripheral?, Bool) in
+                guard let peripheral else { return (nil, false) }
+                if servicesCont != nil { return (peripheral, true) }
                 servicesCont = cont
-                return peripheral
+                return (peripheral, false)
             }
+            if busy { cont.resume(throwing: BLETransportError.operationInProgress); return }
             guard let target else {
                 cont.resume(throwing: BLETransportError.notConnected)
                 return
             }
-            queue.async { target.discoverServices(services) }
-            scheduleTimeout(Z1Constants.gattOpTimeout) { [weak self] in
-                guard let self, let cont = self.take(\.servicesCont) else { return }
+            scheduleTimeout(Z1Constants.gattOpTimeout, key: "services") { [weak self] in
+                guard let self, let cont = self.take(\.servicesCont, timeoutKey: "services") else { return }
                 cont.resume(throwing: BLETransportError.timeout)
             }
+            queue.async { target.discoverServices(services) }
         }
         for serviceUUID in services {
             let found = lock.withLock { () -> (CBPeripheral, CBService)? in
@@ -289,9 +330,14 @@ final class BLETransport: NSObject, @unchecked Sendable {
             }
             guard let (target, service) = found else { continue }
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-                lock.withLock { charsConts[serviceUUID] = cont }
-                queue.async { target.discoverCharacteristics(chars, for: service) }
-                scheduleTimeout(Z1Constants.gattOpTimeout) { [weak self] in
+                let busy = lock.withLock { () -> Bool in
+                    if charsConts[serviceUUID] != nil { return true }
+                    charsConts[serviceUUID] = cont
+                    return false
+                }
+                if busy { cont.resume(throwing: BLETransportError.operationInProgress); return }
+                let key = opKey("chars", serviceUUID)
+                scheduleTimeout(Z1Constants.gattOpTimeout, key: key) { [weak self] in
                     guard let self else { return }
                     let cont = self.lock.withLock { () -> CheckedContinuation<Void, Error>? in
                         defer { self.charsConts[serviceUUID] = nil }
@@ -299,6 +345,7 @@ final class BLETransport: NSObject, @unchecked Sendable {
                     }
                     cont?.resume(throwing: BLETransportError.timeout)
                 }
+                queue.async { target.discoverCharacteristics(chars, for: service) }
             }
         }
         try lock.withLock {
@@ -315,9 +362,14 @@ final class BLETransport: NSObject, @unchecked Sendable {
     func setNotify(_ uuid: CBUUID, enable: Bool) async throws {
         let (target, char) = try lookup(uuid)
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            lock.withLock { notifyConts[uuid] = cont }
-            queue.async { target.setNotifyValue(enable, for: char) }
-            scheduleTimeout(Z1Constants.gattOpTimeout) { [weak self] in
+            let busy = lock.withLock { () -> Bool in
+                if notifyConts[uuid] != nil { return true }
+                notifyConts[uuid] = cont
+                return false
+            }
+            if busy { cont.resume(throwing: BLETransportError.operationInProgress); return }
+            let key = opKey("notify", uuid)
+            scheduleTimeout(Z1Constants.gattOpTimeout, key: key) { [weak self] in
                 guard let self else { return }
                 let cont = self.lock.withLock { () -> CheckedContinuation<Void, Error>? in
                     defer { self.notifyConts[uuid] = nil }
@@ -325,15 +377,21 @@ final class BLETransport: NSObject, @unchecked Sendable {
                 }
                 cont?.resume(throwing: BLETransportError.timeout)
             }
+            queue.async { target.setNotifyValue(enable, for: char) }
         }
     }
 
     func read(_ uuid: CBUUID) async throws -> Data {
         let (target, char) = try lookup(uuid)
         return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data, Error>) in
-            lock.withLock { readConts[uuid] = cont }
-            queue.async { target.readValue(for: char) }
-            scheduleTimeout(Z1Constants.gattOpTimeout) { [weak self] in
+            let busy = lock.withLock { () -> Bool in
+                if readConts[uuid] != nil { return true }
+                readConts[uuid] = cont
+                return false
+            }
+            if busy { cont.resume(throwing: BLETransportError.operationInProgress); return }
+            let key = opKey("read", uuid)
+            scheduleTimeout(Z1Constants.gattOpTimeout, key: key) { [weak self] in
                 guard let self else { return }
                 let cont = self.lock.withLock { () -> CheckedContinuation<Data, Error>? in
                     defer { self.readConts[uuid] = nil }
@@ -341,6 +399,7 @@ final class BLETransport: NSObject, @unchecked Sendable {
                 }
                 cont?.resume(throwing: BLETransportError.timeout)
             }
+            queue.async { target.readValue(for: char) }
         }
     }
 
@@ -348,9 +407,14 @@ final class BLETransport: NSObject, @unchecked Sendable {
         let (target, char) = try lookup(uuid)
         if withResponse {
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-                lock.withLock { writeConts[uuid] = cont }
-                queue.async { target.writeValue(data, for: char, type: .withResponse) }
-                scheduleTimeout(Z1Constants.gattOpTimeout) { [weak self] in
+                let busy = lock.withLock { () -> Bool in
+                    if writeConts[uuid] != nil { return true }
+                    writeConts[uuid] = cont
+                    return false
+                }
+                if busy { cont.resume(throwing: BLETransportError.operationInProgress); return }
+                let key = opKey("write", uuid)
+                scheduleTimeout(Z1Constants.gattOpTimeout, key: key) { [weak self] in
                     guard let self else { return }
                     let cont = self.lock.withLock { () -> CheckedContinuation<Void, Error>? in
                         defer { self.writeConts[uuid] = nil }
@@ -358,6 +422,7 @@ final class BLETransport: NSObject, @unchecked Sendable {
                     }
                     cont?.resume(throwing: BLETransportError.timeout)
                 }
+                queue.async { target.writeValue(data, for: char, type: .withResponse) }
             }
         } else {
             queue.async { target.writeValue(data, for: char, type: .withoutResponse) }
@@ -377,9 +442,14 @@ final class BLETransport: NSObject, @unchecked Sendable {
         let target = lock.withLock { () -> CBPeripheral? in peripheral }
         guard let target else { return }
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            lock.withLock { disconnectCont = cont }
-            queue.async { self.central.cancelPeripheralConnection(target) }
-            scheduleTimeout(5) { [weak self] in
+            let busy = lock.withLock { () -> Bool in
+                if disconnectCont != nil { return true }
+                disconnectCont = cont
+                return false
+            }
+            if busy { cont.resume(); return }
+            _ = lock.withLock { expectedDisconnectIDs.insert(target.identifier) }
+            scheduleTimeout(5, key: "disconnect") { [weak self] in
                 guard let self else { return }
                 let cont = self.lock.withLock { () -> CheckedContinuation<Void, Never>? in
                     defer { self.disconnectCont = nil }
@@ -387,6 +457,7 @@ final class BLETransport: NSObject, @unchecked Sendable {
                 }
                 cont?.resume()
             }
+            queue.async { self.central.cancelPeripheralConnection(target) }
         }
     }
 }
@@ -399,8 +470,9 @@ extension BLETransport: CBCentralManagerDelegate {
         case .poweredOn:
             let conts = lock.withLock { () -> [CheckedContinuation<Void, Error>] in
                 defer { poweredOnConts.removeAll() }
-                return poweredOnConts
+                return Array(poweredOnConts.values)
             }
+            timeouts.cancel(keysWithPrefix: "power:")
             conts.forEach { $0.resume() }
         case .unknown:
             break
@@ -408,10 +480,36 @@ extension BLETransport: CBCentralManagerDelegate {
             let error = BLETransportError.bluetoothUnavailable(Self.describeState(central.state))
             let conts = lock.withLock { () -> [CheckedContinuation<Void, Error>] in
                 defer { poweredOnConts.removeAll() }
-                return poweredOnConts
+                return Array(poweredOnConts.values)
             }
+            timeouts.cancel(keysWithPrefix: "power:")
             conts.forEach { $0.resume(throwing: error) }
+            dropLinkAfterRadioLoss()
         }
+    }
+
+    /// Bluetooth went off, reset or lost permission while we held a
+    /// peripheral (the adapter was switched off, the Mac went to sleep, the
+    /// stack restarted). CoreBluetooth invalidates every peripheral then and is
+    /// not guaranteed to follow with `didDisconnectPeripheral`, so without this
+    /// the driver would keep showing a ready pad on a dead link.
+    private func dropLinkAfterRadioLoss() {
+        let (held, requested) = lock.withLock { () -> (Bool, CheckedContinuation<Void, Never>?) in
+            guard peripheral != nil else { return (false, nil) }
+            defer {
+                peripheral = nil
+                characteristics.removeAll()
+                disconnectCont = nil
+                expectedDisconnectIDs.removeAll()
+            }
+            return (true, disconnectCont)
+        }
+        guard held else { return }
+        clearTimeout("disconnect")
+        failAllPending(BLETransportError.notConnected)
+        requested?.resume()
+        // A pending disconnect() asked for this; anything else is a loss.
+        if requested == nil { onDisconnect?() }
     }
 
     func centralManager(
@@ -431,37 +529,49 @@ extension BLETransport: CBCentralManagerDelegate {
             ok = name?.hasPrefix(prefix) == true
         }
         guard ok else { return }
-        central.stopScan()
-        lock.withLock { self.peripheral = peripheral }
-        if let cont = take(\.scanCont) {
-            cont.resume(returning: name ?? "Treadmill")
+        if let cont = take(\.scanCont, timeoutKey: "scan") {
+            central.stopScan()
+            lock.withLock { self.peripheral = peripheral }
+            cont.resume(returning: name!)
         }
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-        if let cont = take(\.connectCont) {
+        guard lock.withLock({ self.peripheral?.identifier == peripheral.identifier }) else {
+            central.cancelPeripheralConnection(peripheral)
+            return
+        }
+        if let cont = take(\.connectCont, timeoutKey: "connect") {
             cont.resume()
+        } else {
+            // A connect that completed after its waiter timed out is an
+            // abandoned request, not a usable link.
+            central.cancelPeripheralConnection(peripheral)
         }
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
-        if let cont = take(\.connectCont) {
+        guard lock.withLock({ self.peripheral?.identifier == peripheral.identifier }) else { return }
+        if let cont = take(\.connectCont, timeoutKey: "connect") {
             cont.resume(throwing: error ?? BLETransportError.notConnected)
         }
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
-        let requested = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+        guard lock.withLock({ self.peripheral?.identifier == peripheral.identifier }) else { return }
+        let (requested, expected) = lock.withLock { () -> (CheckedContinuation<Void, Never>?, Bool) in
+            let expected = expectedDisconnectIDs.remove(peripheral.identifier) != nil
             defer {
                 self.peripheral = nil
                 characteristics.removeAll()
                 disconnectCont = nil
             }
-            return disconnectCont
+            return (disconnectCont, expected)
         }
+        clearTimeout("disconnect")
         failAllPending(BLETransportError.notConnected)
         requested?.resume()
-        onDisconnect?()
+        if !expected { onDisconnect?() }
     }
 }
 
@@ -469,7 +579,7 @@ extension BLETransport: CBCentralManagerDelegate {
 
 extension BLETransport: CBPeripheralDelegate {
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
-        if let cont = take(\.servicesCont) {
+        if let cont = take(\.servicesCont, timeoutKey: "services") {
             if let error {
                 cont.resume(throwing: error)
             } else {
@@ -488,6 +598,7 @@ extension BLETransport: CBPeripheralDelegate {
             defer { charsConts[service.uuid] = nil }
             return charsConts[service.uuid]
         }
+        if cont != nil { clearTimeout(opKey("chars", service.uuid)) }
         if let cont {
             if let error {
                 cont.resume(throwing: error)
@@ -504,6 +615,7 @@ extension BLETransport: CBPeripheralDelegate {
             return readConts[uuid]
         }
         if let readCont {
+            clearTimeout(opKey("read", uuid))
             if let error {
                 readCont.resume(throwing: error)
             } else {
@@ -521,6 +633,7 @@ extension BLETransport: CBPeripheralDelegate {
             return writeConts[characteristic.uuid]
         }
         if let cont {
+            clearTimeout(opKey("write", characteristic.uuid))
             if let error {
                 cont.resume(throwing: error)
             } else {
@@ -535,6 +648,7 @@ extension BLETransport: CBPeripheralDelegate {
             return notifyConts[characteristic.uuid]
         }
         if let cont {
+            clearTimeout(opKey("notify", characteristic.uuid))
             if let error {
                 cont.resume(throwing: error)
             } else {

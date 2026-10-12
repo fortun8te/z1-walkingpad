@@ -24,7 +24,9 @@ struct DotMatrixText: View {
     /// 5×7 for digits, 2×7 for separators. Hand-set: a real 5×7 cell is the
     /// smallest grid where a 4 and a 1 cannot be confused at a glance.
     private static let glyphs: [Character: [String]] = [
-        "0": ["01110", "10001", "10011", "10101", "11001", "10001", "01110"],
+        // No slash: the panel only ever shows digits, so there is no O to
+        // tell it from, and 0,0 should read as a quiet zero, not Ø,Ø.
+        "0": ["01110", "10001", "10001", "10001", "10001", "10001", "01110"],
         "1": ["00100", "01100", "00100", "00100", "00100", "00100", "01110"],
         "2": ["01110", "10001", "00001", "00010", "00100", "01000", "11111"],
         "3": ["11111", "00010", "00100", "00010", "00001", "10001", "01110"],
@@ -39,6 +41,8 @@ struct DotMatrixText: View {
         ":": ["00", "00", "11", "00", "00", "11", "00"],
         "-": ["00000", "00000", "00000", "11111", "00000", "00000", "00000"],
         " ": ["00", "00", "00", "00", "00", "00", "00"],
+        // A digit cell left dark: the slot a typed digit has yet to fill.
+        "_": ["00000", "00000", "00000", "00000", "00000", "00000", "00000"],
     ]
 
     private var pitch: CGFloat { dot + gap }

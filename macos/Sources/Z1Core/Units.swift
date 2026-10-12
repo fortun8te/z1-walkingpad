@@ -4,14 +4,20 @@ import Foundation
 /// the user-facing display units (mph, miles/feet, lb). All BLE internals stay
 /// metric; convert only at the UI/view-model boundary.
 public enum Z1Units {
-    public static func kmhToMph(_ kmh: Double) -> Double { kmh * 0.621371 }
-    public static func mphToKmh(_ mph: Double) -> Double { mph / 0.621371 }
+    // Exact international definitions, so a round trip and a stack of
+    // conversions (km/h to mph to a 0.1 step and back) never drift.
+    public static let metersPerMile = 1609.344
+    public static let feetPerMeter = 1 / 0.3048
+    public static let poundsPerKg = 1 / 0.45359237
 
-    public static func metersToMiles(_ m: Double) -> Double { m / 1609.34 }
-    public static func metersToFeet(_ m: Double) -> Double { m * 3.28084 }
+    public static func kmhToMph(_ kmh: Double) -> Double { kmh * 1000 / metersPerMile }
+    public static func mphToKmh(_ mph: Double) -> Double { mph * metersPerMile / 1000 }
 
-    public static func kgToLb(_ kg: Double) -> Double { kg * 2.20462 }
-    public static func lbToKg(_ lb: Double) -> Double { lb / 2.20462 }
+    public static func metersToMiles(_ m: Double) -> Double { m / metersPerMile }
+    public static func metersToFeet(_ m: Double) -> Double { m * feetPerMeter }
+
+    public static func kgToLb(_ kg: Double) -> Double { kg * poundsPerKg }
+    public static func lbToKg(_ lb: Double) -> Double { lb / poundsPerKg }
 
     /// Pad-side display units, per the docs/protocol.md property table:
     /// property 1 is "units / screen language"; bit 1 (0x0002) set = miles,

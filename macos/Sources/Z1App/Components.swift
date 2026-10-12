@@ -1,9 +1,9 @@
 import SwiftUI
 
-// The small component set: Card, PrimaryButton, SecondaryButtonStyle,
-// IconButton, StatusDot, StatCell, TickLine, ChipPicker, PillToggleStyle,
-// SettingRow, RowDivider, GroupLabel, FieldPlate. Each is drawn from `Theme`
-// and nothing else: flat fills and one hairline. No gradients, no glow.
+// The small component set: glass, Card, PrimaryButton, IconButton,
+// StatusDot, StatCell, TickLine, ChipPicker, PillToggleStyle, SettingRow,
+// RowDivider, FieldPlate. Each is drawn from `Theme` and nothing else:
+// flat fills, one hairline, glass on controls. No gradients, no glow.
 
 // MARK: - Card
 
@@ -23,9 +23,29 @@ struct Card<Content: View>: View {
     }
 }
 
+// MARK: - Glass
+
+extension View {
+    /// Liquid Glass for chrome and controls (the tab bar, Start/Stop, − / +),
+    /// never for content. `interactive` makes it answer the pointer the way a
+    /// system glass button does. Before macOS 26, a flat surface with a
+    /// hairline in the same shape.
+    @ViewBuilder
+    func glass<S: Shape>(in shape: S, interactive: Bool = false) -> some View {
+        if #available(macOS 26.0, *) {
+            glassEffect(interactive ? .regular.interactive() : .regular, in: shape)
+        } else {
+            background(shape.fill(Theme.surface))
+                .overlay(shape.stroke(Theme.hairline, lineWidth: Theme.edgeWidth))
+        }
+    }
+
+    func chromeCapsule() -> some View { glass(in: Capsule()) }
+}
+
 // MARK: - Buttons
 
-/// Full-width, 40 pt, a surface pill with a hairline. One per page.
+/// Full width, fixed height, a glass capsule. One per page.
 struct PrimaryButton: View {
     var title: String
     var height: CGFloat = 40
@@ -56,33 +76,10 @@ struct PrimaryButtonStyle: ButtonStyle {
         var body: some View {
             configuration.label
                 .foregroundStyle(Theme.ink)
-                .background(Capsule().fill(Theme.surface))
                 .background(Capsule().fill(hovering && enabled ? Theme.wash : .clear))
-                .overlay(Capsule().strokeBorder(Theme.hairline, lineWidth: Theme.edgeWidth))
+                .glass(in: Capsule(), interactive: enabled)
                 .opacity(enabled ? (configuration.isPressed ? 0.7 : 1) : 0.45)
                 .animation(Theme.press, value: configuration.isPressed)
-                .onHover { hovering = $0 }
-        }
-    }
-}
-
-/// Text only: dim, full ink on hover.
-struct SecondaryButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        StyledBody(configuration: configuration)
-    }
-
-    private struct StyledBody: View {
-        let configuration: ButtonStyleConfiguration
-        @Environment(\.isEnabled) private var enabled
-        @State private var hovering = false
-
-        var body: some View {
-            configuration.label
-                .font(Theme.caption)
-                .foregroundStyle(hovering && enabled ? Theme.ink : Theme.dim)
-                .opacity(enabled ? (configuration.isPressed ? 0.6 : 1) : 0.4)
-                .contentShape(.rect)
                 .onHover { hovering = $0 }
         }
     }
@@ -109,7 +106,8 @@ struct IconButton: View {
         }
         .buttonStyle(.plain)
         .foregroundStyle(enabled ? Theme.ink : Theme.faint)
-        .background(Circle().fill(hovering && enabled ? Theme.controlHover : Theme.control))
+        .background(Circle().fill(hovering && enabled ? Theme.wash : .clear))
+        .glass(in: Circle(), interactive: enabled)
         .keyboardShortcut(key.map { KeyboardShortcut($0, modifiers: []) })
         .disabled(!enabled)
         .onHover { hovering = $0 }
@@ -143,9 +141,10 @@ struct StatusDot: View {
 struct StatCell: View {
     var value: String
     var label: String
+    var alignment: HorizontalAlignment = .leading
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: alignment, spacing: 2) {
             valueText
                 .lineLimit(1)
             Text(label)
@@ -153,7 +152,7 @@ struct StatCell: View {
                 .foregroundStyle(Theme.faint)
                 .lineLimit(1)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: alignment == .trailing ? .trailing : .leading)
     }
 
     /// "2.36 km" sets the unit smaller, so the number carries the weight.
@@ -208,8 +207,10 @@ struct ChipPicker<Value: Hashable>: View {
                 Button {
                     selection = option.0
                 } label: {
+                    // One weight either way: a bolder chosen chip would
+                    // nudge its neighbours on every click.
                     Text(option.1)
-                        .font(chosen ? Theme.captionMedium : Theme.caption)
+                        .font(Theme.captionMedium)
                         .foregroundStyle(chosen ? Theme.ink : Theme.dim)
                         .padding(.horizontal, compact ? 6 : 9)
                         .frame(height: 22)
@@ -219,6 +220,7 @@ struct ChipPicker<Value: Hashable>: View {
                         .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
+                .accessibilityAddTraits(chosen ? .isSelected : [])
             }
         }
     }
@@ -245,7 +247,7 @@ struct PillToggleStyle: ToggleStyle {
                         Capsule()
                             .fill(configuration.isOn ? Theme.ink : Theme.track)
                         Circle()
-                            .fill(configuration.isOn ? Theme.surface : Theme.dim)
+                            .fill(configuration.isOn ? Theme.onInk : Theme.dim)
                             .padding(2)
                     }
                     .frame(width: 28, height: 16)
@@ -254,13 +256,15 @@ struct PillToggleStyle: ToggleStyle {
             }
             .buttonStyle(.plain)
             .opacity(enabled ? 1 : 0.4)
+            .accessibilityAddTraits(.isToggle)
+            .accessibilityValue(configuration.isOn ? "On" : "Off")
         }
     }
 }
 
 // MARK: - Layout pieces
 
-/// One line in a settings or records card: label left, control or value right.
+/// One line in a settings card: label left, control or value right.
 struct SettingRow<Content: View>: View {
     var title: String
     var detail: String?
@@ -290,18 +294,6 @@ struct SettingRow<Content: View>: View {
 struct RowDivider: View {
     var body: some View {
         Rectangle().fill(Theme.hairline).frame(height: 0.5)
-    }
-}
-
-/// Small caption above a card.
-struct GroupLabel: View {
-    var text: String
-    var body: some View {
-        Text(text)
-            .font(Theme.caption)
-            .foregroundStyle(Theme.faint)
-            .padding(.leading, 4)
-            .padding(.top, 4)
     }
 }
 
