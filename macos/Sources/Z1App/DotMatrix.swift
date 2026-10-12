@@ -9,15 +9,15 @@ struct DotMatrixText: View {
     var text: String
     var dot: CGFloat = 3
     var gap: CGFloat = 1.6
-    var color: Color = Theme.paper
+    var color: Color = Theme.ink
     /// When false the panel keeps its exact shape but nothing lights up — the
     /// app has no value to show, and says so by staying dark rather than by
     /// displaying a confident 0,0 it did not measure.
     var lit: Bool = true
-    /// Kept very low on purpose. The unlit grid has to be *just* perceptible —
+    /// Kept very low on purpose. The unlit grid has to be *just* perceptible:
     /// present enough that a dark panel reads as "no value", faint enough that
     /// the lit digits are a number and not a texture.
-    var unlit: Color = Color.white.opacity(0.045)
+    var unlit: Color = Theme.unlitDot
 
     private static let rows = 7
 

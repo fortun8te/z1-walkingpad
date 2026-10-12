@@ -38,11 +38,11 @@ struct SpeedDial: View {
     private func speed(atX x: CGFloat, width: CGFloat) -> Double {
         let raw = range.lowerBound + Double(min(max(x / max(width, 1), 0), 1)) * span
         let snapped = (raw / step).rounded() * step
-        // clamp after snap to avoid 6.4000001 > max
+        // Clamp after the snap, or 6.4000001 lands past the top.
         return min(max(snapped, range.lowerBound), range.upperBound)
     }
 
-    // Cache tick layout — only recompute when range/step changes, not on every value change
+    /// Tick positions and which ones are whole numbers.
     private var ticks: [(f: CGFloat, major: Bool)] {
         (0..<tickCount).map { idx in
             let v = value(at: idx)
@@ -56,8 +56,8 @@ struct SpeedDial: View {
             ZStack(alignment: .leading) {
                 Canvas { context, size in
                     let lit = fraction(value)
-                    let on = GraphicsContext.Shading.color(live ? Theme.accent : Theme.paper)
-                    let off = GraphicsContext.Shading.color(Theme.paper12)
+                    let on = GraphicsContext.Shading.color(live ? Theme.accent : Theme.ink)
+                    let off = GraphicsContext.Shading.color(Theme.track)
                     for tick in ticks {
                         let x = tick.f * (size.width - 1.25)
                         let isLit = tick.f <= lit + 0.0001
@@ -102,11 +102,11 @@ struct SpeedDial: View {
         .accessibilityValue(String(format: "%.1f", value))
     }
 
-    /// The value you are on: a plain paper line, no halo. It snaps with the
+    /// The value you are on: a plain ink line, no halo. It snaps with the
     /// telemetry; only a drag is allowed to feel physical.
     private func indicator(width: CGFloat) -> some View {
         RoundedRectangle(cornerRadius: 1, style: .continuous)
-            .fill(Theme.paper)
+            .fill(Theme.ink)
             .frame(width: 2, height: height)
             .offset(x: fraction(value) * max(width - 2, 0))
     }

@@ -1,39 +1,34 @@
 import SwiftUI
 import Z1Core
 
-/// Day / week / month in one card that never changes size.
+/// Day, week and month in one card that never changes size.
 ///
 /// The chart box is fixed; its contents follow the lens: the day's hours, the
 /// last seven days, or the month as a calendar. Under it, the focused day's
-/// four numbers and one line of equivalence. Every open lands on today.
-@MainActor
+/// four numbers. Every new window lands on today.
+///
+/// The parts redraw on their own clocks: the goal line and the numbers with
+/// every telemetry frame (they are today's live totals), the chart only when
+/// a bar would visibly move, the title only when you click.
 struct AlmanacCard: View {
-    @ObservedObject var viewModel: TreadmillViewModel
+    let model: TreadmillViewModel
 
-    @State private var lens: TreadmillViewModel.AlmanacLens = TreadmillViewModel.isPreview
-        ? TreadmillViewModel.AlmanacLens(rawValue: ProcessInfo.processInfo.environment["Z1_PREVIEW_LENS"] ?? "") ?? .week
-        : .week
+    @State private var lens: TreadmillViewModel.AlmanacLens = PreviewHarness.lens ?? .week
     @State private var anchor = Date()
     @State private var selectedDay: Date?
 
-    private static let chartHeight: CGFloat = 104
-    private static let labelHeight: CGFloat = 12
+    static let chartHeight: CGFloat = 116
+    static let labelHeight: CGFloat = 12
 
     var body: some View {
         let focused = focusedDay
-        let totals = viewModel.totals(for: focused)
-        return Card {
+        Card {
             VStack(alignment: .leading, spacing: 12) {
                 titleRow
-                goalRow(totals)
-                chart(focused: focused)
+                AlmanacGoalLine(model: model, day: focused)
+                AlmanacChart(model: model, lens: lens, anchor: anchor, focused: focused, selectedDay: $selectedDay)
                     .frame(height: Self.chartHeight, alignment: .top)
-                HStack(spacing: 0) {
-                    StatCell(value: viewModel.formatDistance(totals.distanceM), label: "Distance")
-                    StatCell(value: viewModel.formatDuration(totals.activeDurationS), label: "Time")
-                    StatCell(value: totals.steps.formatted(.number), label: "Steps est.")
-                    StatCell(value: "\(Int(totals.caloriesKcal.rounded()))", label: "kcal est.")
-                }
+                AlmanacNumbers(model: model, day: focused)
             }
         }
     }
@@ -44,7 +39,7 @@ struct AlmanacCard: View {
         HStack(spacing: 4) {
             Text(periodTitle)
                 .font(Theme.emphasis)
-                .foregroundStyle(Theme.paper)
+                .foregroundStyle(Theme.ink)
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer(minLength: 2)
@@ -64,7 +59,7 @@ struct AlmanacCard: View {
             chevron("chevron.left", enabled: true, help: "Earlier") { step(-1) }
             chevron(
                 "chevron.right",
-                enabled: viewModel.canGoForward(lens: lens, anchor: anchor),
+                enabled: model.canGoForward(lens: lens, anchor: anchor),
                 help: "Later"
             ) { step(1) }
         }
@@ -79,39 +74,107 @@ struct AlmanacCard: View {
                 .contentShape(.rect)
         }
         .buttonStyle(.plain)
-        .foregroundStyle(enabled ? Theme.paper62 : Theme.paper12)
+        .foregroundStyle(enabled ? Theme.dim : Theme.track)
         .disabled(!enabled)
         .help(help)
     }
 
-    private func goalRow(_ totals: DayTotals) -> some View {
+    // MARK: state
+
+    private var focusedDay: Date {
+        let calendar = Calendar.current
+        if let selectedDay { return calendar.startOfDay(for: selectedDay) }
+        if lens == .day { return calendar.startOfDay(for: anchor) }
+        let today = calendar.startOfDay(for: Date())
+        let start = model.periodStart(lens: lens, anchor: anchor)
+        let end = model.periodEnd(lens: lens, anchor: anchor)
+        if today >= start, today <= end { return today }
+        return end
+    }
+
+    private var periodTitle: String {
+        if lens == .month, selectedDay == nil {
+            return Calendar.current.isDate(anchor, equalTo: Date(), toGranularity: .year)
+                ? anchor.formatted(.dateTime.month(.wide))
+                : anchor.formatted(.dateTime.month(.abbreviated).year())
+        }
+        let day = focusedDay
+        if Calendar.current.isDateInToday(day) { return "Today" }
+        if Calendar.current.isDateInYesterday(day) { return "Yesterday" }
+        return day.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated))
+    }
+
+    private func step(_ delta: Int) {
+        if delta > 0, !model.canGoForward(lens: lens, anchor: anchor) { return }
+        anchor = model.shiftedAnchor(lens: lens, anchor: anchor, by: delta)
+        selectedDay = nil
+    }
+}
+
+// MARK: - Goal line
+
+/// The focused day against the daily goal, as ticks. Progress is the second
+/// thing blue means.
+private struct AlmanacGoalLine: View {
+    let model: TreadmillViewModel
+    let day: Date
+
+    var body: some View {
+        let totals = model.totals(for: day)
         HStack(spacing: 10) {
-            TickLine(progress: viewModel.goalProgress(for: totals))
+            TickLine(progress: model.goalProgress(for: totals), tint: Theme.accent)
                 .frame(height: 9)
-            Text(viewModel.goalText(for: totals))
+            Text(model.goalText(for: totals))
                 .font(Theme.caption.monospacedDigit())
-                .foregroundStyle(Theme.paper62)
+                .foregroundStyle(Theme.dim)
                 .fixedSize()
         }
         .frame(height: 12)
     }
+}
 
-    // MARK: chart
+// MARK: - Numbers
 
-    @ViewBuilder
-    private func chart(focused: Date) -> some View {
+private struct AlmanacNumbers: View {
+    let model: TreadmillViewModel
+    let day: Date
+
+    var body: some View {
+        let totals = model.totals(for: day)
+        HStack(spacing: 0) {
+            StatCell(value: model.formatDistance(totals.distanceM), label: "Distance")
+            StatCell(value: model.formatDuration(totals.activeDurationS), label: "Time")
+            StatCell(value: totals.steps.formatted(.number), label: "Steps est.")
+            StatCell(value: "\(Int(totals.caloriesKcal.rounded()))", label: "kcal est.")
+        }
+    }
+}
+
+// MARK: - Chart
+
+private struct AlmanacChart: View {
+    let model: TreadmillViewModel
+    let lens: TreadmillViewModel.AlmanacLens
+    let anchor: Date
+    let focused: Date
+    @Binding var selectedDay: Date?
+
+    private var chartHeight: CGFloat { AlmanacCard.chartHeight }
+    private var labelHeight: CGFloat { AlmanacCard.labelHeight }
+
+    var body: some View {
         switch lens {
-        case .day: hourBars(focused: focused)
-        case .week: weekBars(focused: focused)
-        case .month: monthGrid(focused: focused)
+        case .day: hourBars
+        case .week: weekBars
+        case .month: monthGrid
         }
     }
 
-    /// The day's kcal by hour; every hour a thin bar, the axis labelled at 0/6/12/18.
-    private func hourBars(focused: Date) -> some View {
-        let bins = viewModel.hourlyKcal(for: focused)
+    /// The day's kcal by hour; every hour a thin bar, the axis marked at 0/6/12/18.
+    private var hourBars: some View {
+        let bins = model.hourlyKcal(for: focused)
         let peak = max(bins.max() ?? 0, 1)
-        let barArea = Self.chartHeight - Self.labelHeight - 4
+        let barArea = chartHeight - labelHeight - 4
         return VStack(spacing: 4) {
             Canvas { context, size in
                 let pitch = size.width / 24
@@ -122,7 +185,7 @@ struct AlmanacCard: View {
                     let rect = CGRect(x: CGFloat(hour) * pitch + (pitch - width) / 2, y: size.height - h, width: width, height: h)
                     context.fill(
                         Path(roundedRect: rect, cornerRadius: 1.5),
-                        with: .color(value > 0 ? Theme.paper.opacity(0.85) : Theme.paper06)
+                        with: .color(value > 0 ? Theme.ink.opacity(0.8) : Theme.wash)
                     )
                 }
             }
@@ -131,39 +194,39 @@ struct AlmanacCard: View {
                 ForEach([0, 6, 12, 18], id: \.self) { hour in
                     Text("\(hour)")
                         .font(.system(size: 9).monospacedDigit())
-                        .foregroundStyle(Theme.paper38)
+                        .foregroundStyle(Theme.faint)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
-            .frame(height: Self.labelHeight)
+            .frame(height: labelHeight)
         }
     }
 
     /// Seven days ending on the anchor; each bar is that day's goal progress.
-    private func weekBars(focused: Date) -> some View {
-        let days = viewModel.almanacDays(lens: .week, anchor: anchor)
+    private var weekBars: some View {
+        let days = model.almanacDays(lens: .week, anchor: anchor)
         let calendar = Calendar.current
-        let barArea = Self.chartHeight - Self.labelHeight - 4
+        let barArea = chartHeight - labelHeight - 4
         return HStack(alignment: .bottom, spacing: 6) {
             ForEach(days) { day in
-                let progress = min(1, max(0, viewModel.goalProgress(for: day)))
+                let progress = min(1, max(0, model.goalProgress(for: day)))
                 let isFocused = calendar.isDate(day.day, inSameDayAs: focused)
                 let isToday = calendar.isDateInToday(day.day)
                 VStack(spacing: 4) {
                     ZStack(alignment: .bottom) {
                         RoundedRectangle(cornerRadius: 4, style: .continuous)
-                            .fill(isFocused ? Theme.paper.opacity(0.08) : Theme.paper06.opacity(0.7))
+                            .fill(Theme.wash)
                         if !day.isEmpty {
                             RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                .fill(Theme.paper.opacity(isFocused ? 0.92 : 0.38))
+                                .fill(Theme.ink.opacity(isFocused ? 0.88 : 0.30))
                                 .frame(height: max(4, barArea * CGFloat(progress)))
                         }
                     }
                     .frame(height: barArea)
                     Text(day.day, format: .dateTime.weekday(.narrow))
                         .font(.system(size: 9, weight: isToday ? .semibold : .regular))
-                        .foregroundStyle(isFocused ? Theme.paper : Theme.paper38)
-                        .frame(height: Self.labelHeight)
+                        .foregroundStyle(isFocused ? Theme.ink : Theme.faint)
+                        .frame(height: labelHeight)
                 }
                 .contentShape(.rect)
                 .onTapGesture { selectedDay = calendar.startOfDay(for: day.day) }
@@ -174,15 +237,15 @@ struct AlmanacCard: View {
 
     /// The month as a calendar: always six rows, so every month uses the
     /// same cells and crossing months never changes a cell's height.
-    private func monthGrid(focused: Date) -> some View {
-        let days = viewModel.almanacDays(lens: .month, anchor: anchor)
+    private var monthGrid: some View {
+        let days = model.almanacDays(lens: .month, anchor: anchor)
         let calendar = Calendar.current
         let firstWeekday = days.first.map { calendar.component(.weekday, from: $0.day) } ?? calendar.firstWeekday
         let pad = (firstWeekday - calendar.firstWeekday + 7) % 7
         let cells: [DayTotals?] = Array(repeating: nil, count: pad) + days.map { Optional($0) }
         let rows = 6
         let spacing: CGFloat = 3
-        let cellHeight = (Self.chartHeight - Self.labelHeight - 2 - CGFloat(rows - 1) * spacing) / CGFloat(rows)
+        let cellHeight = (chartHeight - labelHeight - 2 - CGFloat(rows - 1) * spacing) / CGFloat(rows)
         let symbols = calendar.veryShortWeekdaySymbols
         let start = calendar.firstWeekday - 1
         let weekdays = Array(symbols[start...] + symbols[..<start])
@@ -191,17 +254,17 @@ struct AlmanacCard: View {
                 ForEach(Array(weekdays.enumerated()), id: \.offset) { _, symbol in
                     Text(symbol)
                         .font(.system(size: 9))
-                        .foregroundStyle(Theme.paper38)
+                        .foregroundStyle(Theme.faint)
                         .frame(maxWidth: .infinity)
                 }
             }
-            .frame(height: Self.labelHeight - 1)
+            .frame(height: labelHeight - 1)
             ForEach(0..<rows, id: \.self) { row in
                 HStack(spacing: spacing) {
                     ForEach(0..<7, id: \.self) { column in
                         let index = row * 7 + column
                         if index < cells.count, let day = cells[index] {
-                            monthCell(day, focused: focused, height: cellHeight)
+                            monthCell(day, height: cellHeight)
                         } else {
                             Color.clear.frame(maxWidth: .infinity).frame(height: cellHeight)
                         }
@@ -211,20 +274,20 @@ struct AlmanacCard: View {
         }
     }
 
-    private func monthCell(_ day: DayTotals, focused: Date, height: CGFloat) -> some View {
+    private func monthCell(_ day: DayTotals, height: CGFloat) -> some View {
         let calendar = Calendar.current
-        let progress = min(1, max(0, viewModel.goalProgress(for: day)))
+        let progress = min(1, max(0, model.goalProgress(for: day)))
         let isFocused = calendar.isDate(day.day, inSameDayAs: focused)
         let isFuture = day.day > Date()
         let fill: Color = isFuture
             ? .clear
-            : (day.isEmpty ? Theme.paper06 : Theme.paper.opacity(0.22 + 0.66 * progress))
+            : (day.isEmpty ? Theme.wash : Theme.ink.opacity(0.16 + 0.66 * progress))
         return RoundedRectangle(cornerRadius: 2.5, style: .continuous)
             .fill(fill)
             .overlay(
                 RoundedRectangle(cornerRadius: 2.5, style: .continuous)
                     .strokeBorder(
-                        isFocused ? Theme.paper : (isFuture ? Theme.paper06 : .clear),
+                        isFocused ? Theme.ink : (isFuture ? Theme.wash : .clear),
                         lineWidth: isFocused ? 1 : 0.5
                     )
                     .padding(isFocused ? -1.5 : 0)
@@ -239,44 +302,9 @@ struct AlmanacCard: View {
             .help(isFuture ? "" : "\(day.day.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated))) · \(help(for: day))")
     }
 
-    // MARK: state
-
-    private var focusedDay: Date {
-        let calendar = Calendar.current
-        if let selectedDay { return calendar.startOfDay(for: selectedDay) }
-        if lens == .day { return calendar.startOfDay(for: anchor) }
-        let today = calendar.startOfDay(for: Date())
-        let start = viewModel.periodStart(lens: lens, anchor: anchor)
-        let end = viewModel.periodEnd(lens: lens, anchor: anchor)
-        if today >= start, today <= end { return today }
-        return end
-    }
-
-    private var periodTitle: String {
-        if lens == .month, selectedDay == nil {
-            let calendar = Calendar.current
-            return calendar.isDate(anchor, equalTo: Date(), toGranularity: .year)
-                ? anchor.formatted(.dateTime.month(.wide))
-                : anchor.formatted(.dateTime.month(.abbreviated).year())
-        }
-        return dayTitle(focusedDay)
-    }
-
-    private func dayTitle(_ day: Date) -> String {
-        if Calendar.current.isDateInToday(day) { return "Today" }
-        if Calendar.current.isDateInYesterday(day) { return "Yesterday" }
-        return day.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated))
-    }
-
-    private func step(_ delta: Int) {
-        if delta > 0, !viewModel.canGoForward(lens: lens, anchor: anchor) { return }
-        anchor = viewModel.shiftedAnchor(lens: lens, anchor: anchor, by: delta)
-        selectedDay = nil
-    }
-
     private func help(for day: DayTotals) -> String {
         day.isEmpty
             ? "No walk"
-            : "\(day.activeDurationS / 60) min · \(viewModel.formatDistance(day.distanceM)) · \(day.steps) steps est."
+            : "\(day.activeDurationS / 60) min · \(model.formatDistance(day.distanceM)) · \(day.steps) steps est."
     }
 }

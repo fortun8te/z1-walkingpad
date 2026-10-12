@@ -1,45 +1,32 @@
 import SwiftUI
 
-// The small component set shared by name with DALI: Card, PrimaryButton,
-// SecondaryButtonStyle, IconButton, StatusDot, StatCell, TickLine, ChipPicker,
-// PillToggleStyle, SettingRow. Each is drawn from `Theme` and nothing else.
+// The small component set: Card, PrimaryButton, SecondaryButtonStyle,
+// IconButton, StatusDot, StatCell, TickLine, ChipPicker, PillToggleStyle,
+// SettingRow, RowDivider, GroupLabel, FieldPlate. Each is drawn from `Theme`
+// and nothing else: flat fills, one hairline, no glass, no glow.
 
 // MARK: - Card
 
-/// A surface one step up from the ground: opaque-ish fill, one hairline.
-/// `live` adds the blue underline glow that means "the belt is moving".
+/// A surface one step off the ground, with one hairline.
 struct Card<Content: View>: View {
     var padding: CGFloat = Theme.inner
-    /// Only the two primary surfaces (speed, almanac) are glass. Everything
-    /// else sits directly on the sky.
-    var glass = true
     @ViewBuilder var content: Content
 
     var body: some View {
-        if glass {
-            let shape = RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
-            inner
-                .background(shape.fill(Color.black.opacity(0.42)))
-                .glass(shape)
-        } else {
-            inner
-        }
-    }
-
-    private var inner: some View {
+        let shape = RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
         content
             .padding(padding)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .background(shape.fill(Theme.surface))
+            .overlay(shape.strokeBorder(Theme.hairline, lineWidth: Theme.edgeWidth))
     }
 }
 
 // MARK: - Buttons
 
-/// Full-width, 40 pt, surface fill, hairline edge. Live: the label stays
-/// paper and a blue underline glows at the bottom edge — never a blue fill.
+/// Full-width, 40 pt, a surface pill with a hairline. One per page.
 struct PrimaryButton: View {
     var title: String
-    var live = false
     var action: () -> Void
 
     var body: some View {
@@ -50,34 +37,34 @@ struct PrimaryButton: View {
                 .frame(height: 40)
                 .contentShape(.rect)
         }
-        .buttonStyle(PrimaryButtonStyle(live: live))
+        .buttonStyle(PrimaryButtonStyle())
     }
 }
 
 struct PrimaryButtonStyle: ButtonStyle {
-    var live = false
-
     func makeBody(configuration: Configuration) -> some View {
-        StyledBody(configuration: configuration, live: live)
+        StyledBody(configuration: configuration)
     }
 
     private struct StyledBody: View {
         let configuration: ButtonStyleConfiguration
-        let live: Bool
         @Environment(\.isEnabled) private var enabled
+        @State private var hovering = false
+
         var body: some View {
             configuration.label
-                .foregroundStyle(Theme.paper)
-                // System glass only. Live = the one blue, as the system's own tint.
-                .glass(Capsule(), interactive: enabled, tint: live ? Theme.accent.opacity(0.55) : nil)
-                .opacity(enabled ? 1 : 0.45)
-                .scaleEffect(configuration.isPressed ? 0.97 : 1)
+                .foregroundStyle(Theme.ink)
+                .background(Capsule().fill(Theme.surface))
+                .background(Capsule().fill(hovering && enabled ? Theme.wash : .clear))
+                .overlay(Capsule().strokeBorder(Theme.hairline, lineWidth: Theme.edgeWidth))
+                .opacity(enabled ? (configuration.isPressed ? 0.7 : 1) : 0.45)
                 .animation(Theme.press, value: configuration.isPressed)
+                .onHover { hovering = $0 }
         }
     }
 }
 
-/// Text only: paper62, paper on hover.
+/// Text only: dim, full ink on hover.
 struct SecondaryButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         StyledBody(configuration: configuration)
@@ -91,7 +78,7 @@ struct SecondaryButtonStyle: ButtonStyle {
         var body: some View {
             configuration.label
                 .font(Theme.caption)
-                .foregroundStyle(hovering && enabled ? Theme.paper : Theme.paper62)
+                .foregroundStyle(hovering && enabled ? Theme.ink : Theme.dim)
                 .opacity(enabled ? (configuration.isPressed ? 0.6 : 1) : 0.4)
                 .contentShape(.rect)
                 .onHover { hovering = $0 }
@@ -104,7 +91,7 @@ struct IconButton: View {
     var symbol: String
     var enabled = true
     var help: String = ""
-    /// Bare key (no modifiers) that presses it while the panel has focus.
+    /// Bare key (no modifiers) that presses it while the window is key.
     var key: KeyEquivalent?
     var action: () -> Void
 
@@ -118,8 +105,8 @@ struct IconButton: View {
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .foregroundStyle(enabled ? Theme.paper : Theme.paper38)
-        .background(Circle().fill(Color.white.opacity(hovering && enabled ? 0.16 : 0.10)))
+        .foregroundStyle(enabled ? Theme.ink : Theme.faint)
+        .background(Circle().fill(hovering && enabled ? Theme.controlHover : Theme.control))
         .keyboardShortcut(key.map { KeyboardShortcut($0, modifiers: []) })
         .disabled(!enabled)
         .onHover { hovering = $0 }
@@ -129,38 +116,22 @@ struct IconButton: View {
 
 // MARK: - Status
 
+/// Six points of state. Blue only while the belt moves. Connecting is a ring,
+/// not a pulse: nothing on screen animates on its own.
 struct StatusDot: View {
     enum Kind { case live, idle, trouble, connecting }
     var state: Kind
 
-    @State private var dim = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
     var body: some View {
-        Circle()
-            .fill(colour)
-            .frame(width: 6, height: 6)
-            // Pulse only while connecting: it is the one state where motion
-            // carries information ("still trying").
-            .opacity(state == .connecting && dim ? 0.4 : 1)
-            .onAppear { restartPulse() }
-            .onChange(of: state) { _, _ in restartPulse() }
-    }
-
-    private var colour: Color {
-        switch state {
-        case .live: Theme.accent
-        case .idle, .connecting: Theme.paper38
-        case .trouble: Theme.trouble
+        Group {
+            switch state {
+            case .live: Circle().fill(Theme.accent)
+            case .idle: Circle().fill(Theme.faint)
+            case .trouble: Circle().fill(Theme.trouble)
+            case .connecting: Circle().strokeBorder(Theme.faint, lineWidth: 1.25)
+            }
         }
-    }
-
-    private func restartPulse() {
-        var off = Transaction()
-        off.animation = nil
-        withTransaction(off) { dim = false }
-        guard state == .connecting, !reduceMotion else { return }
-        withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true)) { dim = true }
+        .frame(width: 6, height: 6)
     }
 }
 
@@ -169,28 +140,27 @@ struct StatusDot: View {
 struct StatCell: View {
     var value: String
     var label: String
-    var alignment: HorizontalAlignment = .leading
 
     var body: some View {
-        VStack(alignment: alignment, spacing: 2) {
+        VStack(alignment: .leading, spacing: 2) {
             valueText
                 .lineLimit(1)
             Text(label)
                 .font(Theme.caption)
-                .foregroundStyle(Theme.paper38)
+                .foregroundStyle(Theme.faint)
                 .lineLimit(1)
         }
-        .frame(maxWidth: .infinity, alignment: Alignment(horizontal: alignment, vertical: .center))
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// "2.36 km" sets the unit smaller, so the number carries the weight.
     private var valueText: Text {
         let parts = value.split(separator: " ", maxSplits: 1).map(String.init)
         if parts.count == 2, parts[1].allSatisfy(\.isLetter) {
-            return Text(parts[0]).font(Theme.number).foregroundStyle(Theme.paper)
-                + Text(" " + parts[1]).font(Theme.caption).foregroundStyle(Theme.paper62)
+            return Text(parts[0]).font(Theme.number).foregroundStyle(Theme.ink)
+                + Text(" " + parts[1]).font(Theme.caption).foregroundStyle(Theme.dim)
         }
-        return Text(value).font(Theme.number).foregroundStyle(Theme.paper)
+        return Text(value).font(Theme.number).foregroundStyle(Theme.ink)
     }
 }
 
@@ -198,14 +168,16 @@ struct StatCell: View {
 struct TickLine: View {
     var progress: Double
     var count = 48
-    var live = false
+    /// Lit-tick colour. Today's goal is progress, so it is blue; everything
+    /// else stays ink.
+    var tint: Color = Theme.ink
 
     var body: some View {
         Canvas { context, size in
             let pitch = size.width / CGFloat(count)
             let lit = Int((min(max(progress, 0), 1) * Double(count)).rounded(.down))
-            let on = GraphicsContext.Shading.color(live ? Theme.accent : Theme.paper)
-            let off = GraphicsContext.Shading.color(Theme.paper12)
+            let on = GraphicsContext.Shading.color(tint)
+            let off = GraphicsContext.Shading.color(Theme.track)
             for i in 0..<count {
                 let isOn = i < lit
                 let h = isOn ? size.height : size.height * 0.5
@@ -220,7 +192,7 @@ struct TickLine: View {
 
 // MARK: - Choosers
 
-/// A row of text chips; the chosen one sits on a raised pill.
+/// A row of text chips; the chosen one sits on a pill.
 struct ChipPicker<Value: Hashable>: View {
     var options: [(Value, String)]
     @Binding var selection: Value
@@ -235,11 +207,11 @@ struct ChipPicker<Value: Hashable>: View {
                 } label: {
                     Text(option.1)
                         .font(chosen ? Theme.captionMedium : Theme.caption)
-                        .foregroundStyle(chosen ? Theme.paper : Theme.paper62)
+                        .foregroundStyle(chosen ? Theme.ink : Theme.dim)
                         .padding(.horizontal, compact ? 6 : 9)
                         .frame(height: 22)
                         .background {
-                            if chosen { Capsule().fill(Color.white.opacity(0.16)) }
+                            if chosen { Capsule().fill(Theme.selection) }
                         }
                         .contentShape(Capsule())
                 }
@@ -268,13 +240,12 @@ struct PillToggleStyle: ToggleStyle {
                     Spacer(minLength: 4)
                     ZStack(alignment: configuration.isOn ? .trailing : .leading) {
                         Capsule()
-                            .fill(configuration.isOn ? Theme.paper : Color.white.opacity(0.18))
+                            .fill(configuration.isOn ? Theme.ink : Theme.track)
                         Circle()
-                            .fill(configuration.isOn ? Theme.ink : Theme.paper62)
+                            .fill(configuration.isOn ? Theme.surface : Theme.dim)
                             .padding(2)
                     }
                     .frame(width: 28, height: 16)
-                    .animation(Theme.spring, value: configuration.isOn)
                 }
                 .contentShape(.rect)
             }
@@ -285,22 +256,6 @@ struct PillToggleStyle: ToggleStyle {
 }
 
 // MARK: - Layout pieces
-
-/// The 24 pt line every page starts with, so switching pages never moves
-/// anything below it.
-struct PageHeader<Leading: View, Trailing: View>: View {
-    @ViewBuilder var leading: Leading
-    @ViewBuilder var trailing: Trailing
-
-    var body: some View {
-        HStack(spacing: Theme.related) {
-            leading
-            Spacer(minLength: Theme.related)
-            trailing
-        }
-        .frame(height: 24)
-    }
-}
 
 /// One line in a settings or records card: label left, control or value right.
 struct SettingRow<Content: View>: View {
@@ -313,11 +268,11 @@ struct SettingRow<Content: View>: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text(title)
                     .font(Theme.body)
-                    .foregroundStyle(Theme.paper)
+                    .foregroundStyle(Theme.ink)
                 if let detail {
                     Text(detail)
                         .font(Theme.caption)
-                        .foregroundStyle(Theme.paper38)
+                        .foregroundStyle(Theme.faint)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -341,13 +296,13 @@ struct GroupLabel: View {
     var body: some View {
         Text(text)
             .font(Theme.caption)
-            .foregroundStyle(Theme.paper38)
+            .foregroundStyle(Theme.faint)
             .padding(.leading, 4)
             .padding(.top, 4)
     }
 }
 
-/// A compact numeric field on a raised plate.
+/// A compact numeric field on a plate.
 struct FieldPlate<Content: View>: View {
     var width: CGFloat
     @ViewBuilder var content: Content
@@ -357,10 +312,10 @@ struct FieldPlate<Content: View>: View {
             .textFieldStyle(.plain)
             .font(Theme.body.monospacedDigit())
             .multilineTextAlignment(.trailing)
-            .foregroundStyle(Theme.paper)
+            .foregroundStyle(Theme.ink)
             .padding(.horizontal, 7)
             .frame(width: width, height: 22)
-            .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Color.white.opacity(0.10)))
+            .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Theme.control))
             .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(Theme.hairline, lineWidth: Theme.edgeWidth))
     }
 }

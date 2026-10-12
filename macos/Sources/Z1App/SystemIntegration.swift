@@ -90,7 +90,7 @@ final class SleepBlocker {
 /// Local notifications, best-effort.
 ///
 /// `UNUserNotificationCenter` traps in a process with no app bundle (which is
-/// what `swift run Z1MenuBar` is), so everything is gated on having one.
+/// what `swift run Z1App` is), so everything is gated on having one.
 @MainActor
 final class Notifier {
     private var authorized = false
@@ -104,7 +104,7 @@ final class Notifier {
         guard isAvailable, !didRequest else { return }
         didRequest = true
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
-            if let error { NSLog("Z1MenuBar: notification authorization failed: \(error.localizedDescription)") }
+            if let error { NSLog("Z1App: notification authorization failed: \(error.localizedDescription)") }
             Task { @MainActor in self.authorized = granted }
         }
     }
@@ -116,34 +116,7 @@ final class Notifier {
         content.body = body
         let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request) { error in
-            if let error { NSLog("Z1MenuBar: could not post notification: \(error.localizedDescription)") }
-        }
-    }
-}
-
-/// What rides in the menu bar next to the icon.
-enum MenuBarReadout: String, CaseIterable, Identifiable, Sendable {
-    case none
-    case speed
-    case elapsed
-    case distance
-    case steps
-    case calories
-    case todayTime
-    case todaySteps
-
-    var id: String { rawValue }
-
-    var label: String {
-        switch self {
-        case .none: "Icon only"
-        case .speed: "Speed"
-        case .elapsed: "Elapsed"
-        case .distance: "Distance"
-        case .steps: "Steps"
-        case .calories: "Calories"
-        case .todayTime: "Today's minutes"
-        case .todaySteps: "Today's steps"
+            if let error { NSLog("Z1App: could not post notification: \(error.localizedDescription)") }
         }
     }
 }
