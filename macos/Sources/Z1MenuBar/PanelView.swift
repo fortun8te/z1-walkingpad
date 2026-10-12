@@ -2,18 +2,14 @@ import AppKit
 import SwiftUI
 import Z1Core
 
-/// The panel that hangs from the menu bar.
+/// Everything that hangs from the menu bar.
 ///
-/// One fixed frame. Nothing inside it grows, shrinks or pushes: the old
-/// popover grew History/Settings underneath itself and resized its own window
-/// under the pointer, which is where most of the "jumping" came from. Now the
-/// three secondary views are pages that swap inside the same rectangle, and
-/// every slot on the main page reserves its height whether or not it has
-/// something to say.
+/// One fixed frame. Pages swap inside it and snap — no crossfades, no
+/// resizing, no slot that appears or disappears. Every row on the Now page
+/// reserves its height whether or not it has something to say.
 @MainActor
 struct PanelView: View {
-    static let size = NSSize(width: 312, height: 548)
-    static let radius: CGFloat = 18
+    static let size = NSSize(width: 320, height: 584)
 
     @ObservedObject var viewModel: TreadmillViewModel
     var close: () -> Void = {}
@@ -27,6 +23,14 @@ struct PanelView: View {
             case .history: "History"
             case .records: "Records"
             case .settings: "Settings"
+            }
+        }
+        var key: KeyEquivalent {
+            switch self {
+            case .now: "1"
+            case .history: "2"
+            case .records: "3"
+            case .settings: "4"
             }
         }
     }
@@ -50,80 +54,77 @@ struct PanelView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                bottomBar
+                tabBar
             }
         }
-        .padding(14)
+        .padding(.horizontal, Theme.outer)
+        .padding(.top, Theme.outer)
+        .padding(.bottom, Theme.inner)
         .frame(width: Self.size.width, height: Self.size.height)
-        .background {
-            SkyField(
-                intensity: viewModel.goalProgress ?? 0,
-                weather: Self.freshWeather,
-                kp: SpaceWeather.cachedKp() ?? 0
-            )
-        }
-        .clipShape(.rect(cornerRadius: Self.radius, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: Self.radius, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.14), lineWidth: 0.7)
-        )
-        // Content swaps snap. No crossfades on state: they read as glitches.
+        .background { PanelBackdrop(goalProgress: viewModel.goalProgress ?? 0) }
+        .background(alignment: .topLeading) { quitShortcut }
+        // Content swaps snap. Crossfades on state read as glitches.
         .transaction { $0.animation = nil }
         .environment(\.colorScheme, .dark)
-        .onAppear { viewModel.checkForUpdate() }
+        .tint(Theme.paper)
     }
 
-    /// Only a snapshot from the last two hours. Nothing fetches weather any
-    /// more, so an old cached rain shower would otherwise rain forever.
-    private static var freshWeather: WeatherSnapshot? {
-        guard let cached = OpenMeteo.cached(),
-              Date().timeIntervalSince(cached.fetchedAt) < 2 * 3_600
-        else { return nil }
-        return cached
+    /// ⌘Q works on every page, not only where a Quit button is visible.
+    private var quitShortcut: some View {
+        Button("Quit") { viewModel.quit() }
+            .keyboardShortcut("q")
+            .opacity(0)
+            .frame(width: 0, height: 0)
+            .accessibilityHidden(true)
     }
 
-    // MARK: - bottom bar
+    // MARK: tab bar
 
-    private var bottomBar: some View {
-        HStack(spacing: 14) {
-            ForEach([Page.history, .records, .settings]) { target in
-                Button {
-                    page = page == target ? .now : target
-                    if page != .now { viewModel.refreshHistoryFromDisk() }
-                } label: {
-                    Text(target.title)
-                        .font(Z1Type.regular(12))
-                        .foregroundStyle(page == target ? Z1.ink : Z1.dim)
-                        .overlay(alignment: .bottom) {
-                            Rectangle()
-                                .fill(page == target ? Z1.ink : .clear)
-                                .frame(height: 1)
-                                .offset(y: 4)
-                        }
-                        .contentShape(.rect)
+    private var tabBar: some View {
+        HStack(spacing: Theme.related) {
+            HStack(spacing: 2) {
+                ForEach(Page.allCases) { target in
+                    let chosen = page == target
+                    Button {
+                        page = target
+                        if target != .now { viewModel.refreshHistoryFromDisk() }
+                    } label: {
+                        Text(target.title)
+                            .font(chosen ? Theme.captionMedium : Theme.caption)
+                            .foregroundStyle(chosen ? Theme.paper : Theme.paper62)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 26)
+                            .background {
+                                if chosen { Capsule().fill(Color.white.opacity(0.16)) }
+                            }
+                            .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .keyboardShortcut(target.key, modifiers: .command)
+                    .help("\(target.title) (⌘\(String(target.key.character)))")
                 }
-                .buttonStyle(.plain)
             }
-            Spacer(minLength: 4)
+            .padding(3)
+            .glass(Capsule())
             if case .available = viewModel.updater.phase {
                 Button("Update") { viewModel.installUpdate() }
-                    .buttonStyle(HairlineButtonStyle())
-                    .font(Z1Type.medium(11))
+                    .buttonStyle(SecondaryButtonStyle())
                     .disabled(viewModel.updater.isBusy)
                     .help("Install the new build and relaunch")
             }
-            Button("Quit") { viewModel.quit() }
-                .buttonStyle(.plain)
-                .font(Z1Type.regular(12))
-                .foregroundStyle(Z1.dim)
-                .keyboardShortcut("q")
-                .help("Quit and leave the belt exactly as it is")
         }
-        .frame(height: 22)
-        .padding(.top, 10)
-        .overlay(alignment: .top) {
-            Rectangle().fill(Z1.hairline).frame(height: 0.7)
-        }
+        .frame(height: 32)
+        .padding(.top, Theme.inner)
+    }
+}
+
+/// The ground under the panel: the sky outside, right now.
+struct PanelBackdrop: View {
+    var goalProgress: Double
+
+    var body: some View {
+        SkyBackdrop(goalProgress: goalProgress)
+            .background(Theme.ink)
     }
 }
 
@@ -140,22 +141,27 @@ struct NowPage: View {
     @State private var isTypingSpeed = false
     @FocusState private var speedFieldFocused: Bool
 
+    private var running: Bool { viewModel.status.beltRunning }
+
     var body: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: Theme.inner) {
             header
-            hero
-            dialRow
-            actionButton
+            GlassGroup(spacing: Theme.inner) {
+                VStack(spacing: Theme.inner) {
+                    hero
+                    primary
+                }
+            }
             liveSlot
+                .padding(.bottom, 4)
             AlmanacCard(viewModel: viewModel)
         }
         .onAppear(perform: syncSpeedDraft)
         .onChange(of: viewModel.displaySpeed) { _, _ in syncSpeedDraft() }
         .onChange(of: viewModel.unitsImperial) { _, _ in syncSpeedDraft() }
         .onChange(of: speedFieldFocused) { _, focused in
-            // Clicking away mid-edit: the field writes its half-typed value
-            // into the draft as it goes, which then sat on the dial as if it
-            // were the speed. Drop it and follow the pad again.
+            // Clicking away mid-edit: drop the half-typed value and follow
+            // the pad again.
             guard !focused, isTypingSpeed else { return }
             isTypingSpeed = false
             resyncSpeedDraftAfterFieldCloses()
@@ -165,76 +171,109 @@ struct NowPage: View {
     // MARK: header
 
     private var header: some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(viewModel.isConnected ? Z1.live : (viewModel.isConnecting ? Z1.dim : Z1.faint))
-                .frame(width: 6, height: 6)
-            Text(viewModel.status.deviceName ?? "Walking pad")
-                .font(Z1Type.medium(13))
-                .foregroundStyle(Z1.ink)
+        PageHeader {
+            StatusDot(state: dotState)
+            Text(running ? "Walking" : viewModel.isConnecting ? "Connecting" : viewModel.isConnected ? "Ready" : "Offline")
+                .font(Theme.bodyMedium)
+                .foregroundStyle(Theme.paper)
                 .lineLimit(1)
-            Spacer(minLength: 6)
-            Button(action: viewModel.connectTapped) {
-                Text(connectLabel)
-                    .font(Z1Type.regular(11))
-                    .frame(minWidth: 64)
-            }
-            .buttonStyle(HairlineButtonStyle())
-            .disabled(viewModel.busy || viewModel.isConnecting)
+        } trailing: {
+            EmptyView()
         }
-        .frame(height: 24)
     }
 
-    private var connectLabel: String {
-        if viewModel.isConnecting { return "Connecting" }
-        return viewModel.isConnected ? "Disconnect" : "Connect"
+    private var dotState: StatusDot.Kind {
+        if running { return .live }
+        if viewModel.isConnecting { return .connecting }
+        if viewModel.status.phase == .error || viewModel.failedAttempts >= 3 || viewModel.commandError != nil {
+            return .trouble
+        }
+        return .idle
     }
 
     // MARK: hero
 
     private var hero: some View {
-        AuraCard(colour: Z1.live, active: viewModel.status.beltRunning, radius: 14) {
-            HStack(alignment: .lastTextBaseline, spacing: 8) {
-                if isTypingSpeed {
-                    TextField("", value: $speedDraft, format: .number.precision(.fractionLength(0...1)))
-                        .textFieldStyle(.plain)
-                        .font(Z1Type.light(32))
-                        .multilineTextAlignment(.center)
-                        .foregroundStyle(Z1.ink)
-                        .frame(width: 92)
-                        .focused($speedFieldFocused)
-                        // Focus must be requested once the field exists;
-                        // set in the same tap that creates it, it was dropped.
-                        .onAppear { speedFieldFocused = true }
-                        .onSubmit {
-                            commitSpeedDraft()
-                            isTypingSpeed = false
-                        }
-                        .onExitCommand {
-                            isTypingSpeed = false
-                            resyncSpeedDraftAfterFieldCloses()
-                        }
-                } else {
-                    DotMatrixText(
-                        text: speedText,
-                        dot: 3.5,
-                        gap: 1.7,
-                        color: Z1.ink,
-                        lit: viewModel.isConnected
+        Card(padding: 14) {
+            VStack(spacing: 14) {
+                speedReadout
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 44)
+                HStack(spacing: 10) {
+                    IconButton(
+                        symbol: "minus",
+                        enabled: nudgeEnabled,
+                        help: nudgeHelp,
+                        key: .leftArrow,
+                        action: viewModel.speedDownTapped
                     )
-                    .contentShape(.rect)
-                    .onTapGesture {
-                        guard viewModel.isConnected else { return }
-                        isTypingSpeed = true
-                    }
-                    .help("Click to type an exact speed")
+                    SpeedDial(
+                        range: viewModel.speedRange,
+                        value: $speedDraft,
+                        enabled: viewModel.isConnected,
+                        onEditingChanged: { isPickingSpeed = $0 },
+                        onCommit: commitSpeedDraft,
+                        height: 28,
+                        live: running
+                    )
+                    IconButton(
+                        symbol: "plus",
+                        enabled: nudgeEnabled,
+                        help: nudgeHelp,
+                        key: .rightArrow,
+                        action: viewModel.speedUpTapped
+                    )
                 }
-                Text(viewModel.speedUnitLabel)
-                    .font(Z1Type.regular(11))
-                    .foregroundStyle(Z1.dim)
+                .frame(height: 28)
             }
-            .frame(maxWidth: .infinity)
-            .frame(height: 66)
+        }
+    }
+
+    private var nudgeEnabled: Bool { running && !viewModel.busy }
+    private var nudgeHelp: String {
+        running ? "Nudge the speed (← →)" : "The pad takes speed changes only while the belt moves"
+    }
+
+    @ViewBuilder
+    private var speedReadout: some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            if isTypingSpeed {
+                TextField("", value: $speedDraft, format: .number.precision(.fractionLength(0...1)))
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 36, weight: .light).monospacedDigit())
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(Theme.paper)
+                    .frame(width: 96, height: 44)
+                    .focused($speedFieldFocused)
+                    // Focus must be requested once the field exists.
+                    .onAppear { speedFieldFocused = true }
+                    .onSubmit {
+                        commitSpeedDraft()
+                        isTypingSpeed = false
+                    }
+                    .onExitCommand {
+                        isTypingSpeed = false
+                        resyncSpeedDraftAfterFieldCloses()
+                    }
+            } else {
+                DotMatrixText(
+                    text: speedText,
+                    dot: 4.4,
+                    gap: 1.9,
+                    color: Theme.paper,
+                    lit: viewModel.isConnected
+                )
+                .contentShape(.rect)
+                .onTapGesture {
+                    guard viewModel.isConnected else { return }
+                    isTypingSpeed = true
+                }
+                .help("Click to type an exact speed")
+            }
+            Text(viewModel.speedUnitLabel)
+                .font(Theme.caption)
+                .foregroundStyle(Theme.paper38)
+                .padding(.bottom, 1)
         }
     }
 
@@ -242,61 +281,41 @@ struct NowPage: View {
         String(format: "%.1f", isPickingSpeed ? speedDraft : viewModel.displaySpeed)
     }
 
-    // MARK: dial
+    // MARK: primary
 
-    private var dialRow: some View {
-        HStack(spacing: 10) {
-            nudge("minus", action: viewModel.speedDownTapped)
-            SpeedDial(
-                range: viewModel.speedRange,
-                value: $speedDraft,
-                enabled: viewModel.isConnected,
-                onEditingChanged: { isPickingSpeed = $0 },
-                onCommit: commitSpeedDraft
-            )
-            nudge("plus", action: viewModel.speedUpTapped)
-        }
-        .frame(height: 26)
+    /// One button, one verb. Disconnected it connects; connected it starts
+    /// and stops. Space presses it.
+    private var primary: some View {
+        PrimaryButton(title: primaryTitle, live: running, action: primaryAction)
+            .keyboardShortcut(.space, modifiers: [])
+            .disabled(viewModel.busy || viewModel.isConnecting)
+            .help(viewModel.isConnected
+                ? "Start or stop the belt. Space here, \(GlobalHotKey.display) anywhere."
+                : "Look for the pad now")
     }
 
-    private func nudge(_ symbol: String, action: @escaping () -> Void) -> some View {
-        let live = viewModel.status.beltRunning && !viewModel.busy
-        return Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 10, weight: .semibold))
-                .frame(width: 24, height: 24)
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(live ? Z1.ink : Z1.faint)
-        .background(Circle().strokeBorder(Z1.hairline, lineWidth: 0.7))
-        .disabled(!live)
-        .help(live ? "Nudge the speed" : "The pad only takes speed changes while the belt moves")
+    private var primaryTitle: String {
+        if let verb = viewModel.pendingVerb { return verb }
+        if viewModel.isConnecting { return "Connecting…" }
+        if !viewModel.isConnected { return "Connect" }
+        return running ? "Stop" : "Start"
     }
 
-    // MARK: start / stop
-
-    private var actionButton: some View {
-        Button(action: viewModel.startStopTapped) {
-            Text(viewModel.status.beltRunning ? "Stop" : "Start")
-                .font(Z1Type.medium(13))
-                .frame(maxWidth: .infinity)
-                .frame(height: 34)
-                .contentShape(.rect)
+    private func primaryAction() {
+        if viewModel.isConnected {
+            viewModel.startStopTapped()
+        } else {
+            viewModel.connectTapped()
         }
-        .buttonStyle(PanelButtonStyle(lit: viewModel.status.beltRunning))
-        .keyboardShortcut(.space, modifiers: [])
-        .disabled(!viewModel.isConnected)
-        .help("Start or stop the belt. Space does the same while this panel is open.")
     }
 
     // MARK: live slot
 
-    /// Always 34 pt tall. While the belt moves it holds this walk's numbers;
-    /// otherwise it holds the connection story. Never both, never empty.
+    /// Always 36 pt. While the belt moves it holds this walk's numbers;
+    /// otherwise one line about the connection. Never both, never empty.
     private var liveSlot: some View {
         Group {
-            if viewModel.status.beltRunning {
+            if running {
                 let st = viewModel.status
                 HStack(spacing: 0) {
                     StatCell(value: viewModel.formatElapsed(st.elapsedS), label: "Walk")
@@ -304,36 +323,34 @@ struct NowPage: View {
                     StatCell(value: st.steps.formatted(.number), label: "Steps est.")
                     StatCell(value: "\(Int(st.caloriesKcal.rounded()))", label: "kcal est.")
                 }
+                .padding(.horizontal, 4)
             } else {
-                HStack(spacing: 8) {
-                    if viewModel.isConnecting {
-                        ProgressView().controlSize(.mini).tint(Z1.dim)
-                    }
-                    Text(statusLine)
-                        .font(Z1Type.regular(11))
-                        .foregroundStyle(Z1.dim)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Spacer(minLength: 0)
-                }
+                Text(statusLine)
+                    .font(Theme.caption)
+                    .foregroundStyle(viewModel.commandError == nil ? Theme.paper62 : Theme.trouble)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 4)
             }
         }
-        .frame(height: 34)
+        .frame(height: 36)
     }
 
+    /// Silent when all is well. Speaks only while connecting or when wrong.
     private var statusLine: String {
         if let error = viewModel.commandError { return error }
         if viewModel.isConnected {
-            return "Ready. Start here, or on the remote."
+            if let pending = viewModel.pendingTargetDisplaySpeed {
+                return String(format: "Starts at %.1f %@", pending, viewModel.speedUnitLabel)
+            }
+            return ""
         }
-        if viewModel.failedAttempts >= 3 {
-            return "Can't find the pad. Is it on, and is the phone app closed?"
-        }
+        if viewModel.failedAttempts >= 3 { return "Pad not found. Is the phone app closed?" }
         switch viewModel.status.phase {
-        case .scanning: return "Looking for the pad…"
-        case .connecting: return "Connecting…"
-        case .error: return viewModel.status.errorMessage ?? "No pad found."
-        default: return "Not connected."
+        case .scanning, .connecting: return "Looking for the pad…"
+        case .error: return viewModel.status.errorMessage ?? "Pad not found."
+        default: return "Not connected"
         }
     }
 
@@ -364,58 +381,10 @@ struct NowPage: View {
     }
 }
 
-/// A number over its label. Measured and modelled values look the same;
-/// the modelled ones say "est." instead of being greyed.
-struct StatCell: View {
-    var value: String
-    var label: String
-
-    var body: some View {
-        VStack(spacing: 2) {
-            Text(value)
-                .font(Z1Type.medium(15))
-                .foregroundStyle(Z1.ink)
-                .lineLimit(1)
-            Text(label)
-                .font(Z1Type.regular(10))
-                .foregroundStyle(Z1.faint)
-                .lineLimit(1)
-        }
-        .frame(maxWidth: .infinity)
-    }
-}
-
-/// The primary button: glass, edge-lit, blue edge while the belt runs.
-struct PanelButtonStyle: ButtonStyle {
-    var lit: Bool
-
-    func makeBody(configuration: Configuration) -> some View {
-        PanelButtonBody(configuration: configuration, lit: lit)
-    }
-
-    private struct PanelButtonBody: View {
-        let configuration: ButtonStyleConfiguration
-        let lit: Bool
-        @Environment(\.isEnabled) private var enabled
-        @State private var hovering = false
-
-        var body: some View {
-            configuration.label
-                .foregroundStyle(Z1.ink)
-                .background(
-                    RoundedRectangle(cornerRadius: 11, style: .continuous)
-                        .fill(Color.white.opacity(hovering ? 0.09 : 0.05))
-                )
-                .z1LiquidGlass(radius: 11)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 11, style: .continuous)
-                        .strokeBorder(
-                            lit ? Z1.live.opacity(0.7) : Color.white.opacity(0.2),
-                            lineWidth: 0.8
-                        )
-                )
-                .opacity(enabled ? (configuration.isPressed ? 0.6 : 1) : 0.3)
-                .onHover { hovering = $0 }
-        }
+extension TreadmillViewModel {
+    /// The panel just opened: look for a new build (local feed, cheap).
+    func panelDidOpen() {
+        guard !Self.isPreview else { return }
+        checkForUpdate()
     }
 }

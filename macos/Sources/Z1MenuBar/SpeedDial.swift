@@ -18,6 +18,8 @@ struct SpeedDial: View {
 
     var step: Double = 0.1
     var height: CGFloat = 26
+    /// Belt moving: lit ticks turn the one blue.
+    var live = false
 
     @State private var dragging = false
     @State private var lastDetent: Double?
@@ -54,23 +56,18 @@ struct SpeedDial: View {
             ZStack(alignment: .leading) {
                 Canvas { context, size in
                     let lit = fraction(value)
+                    let on = GraphicsContext.Shading.color(live ? Theme.accent : Theme.paper)
+                    let off = GraphicsContext.Shading.color(Theme.paper12)
                     for tick in ticks {
-                        let x = tick.f * (size.width - 1)
+                        let x = tick.f * (size.width - 1.25)
                         let isLit = tick.f <= lit + 0.0001
-                        let h = size.height * (tick.major ? 0.80 : (isLit ? 0.62 : 0.44))
-                        let rect = CGRect(
-                            x: x,
-                            y: (size.height - h) / 2,
-                            width: 1.4,
-                            height: h
-                        )
+                        let h = size.height * (tick.major ? 0.72 : (isLit ? 0.52 : 0.36))
                         context.fill(
-                            Path(roundedRect: rect, cornerRadius: 0.7),
-                            with: .color(isLit ? Z1.ink.opacity(0.92) : Color.white.opacity(0.16))
+                            Path(CGRect(x: x, y: (size.height - h) / 2, width: 1.25, height: h)),
+                            with: isLit ? on : off
                         )
                     }
                 }
-                // speed indicator: throttle animation to avoid fighting telemetry 1Hz jitter
                 indicator(width: width)
             }
             .frame(height: height)
@@ -99,18 +96,19 @@ struct SpeedDial: View {
             )
         }
         .frame(height: height)
-        .opacity(enabled ? 1 : 0.35)
+        .opacity(enabled ? 1 : 0.4)
+        .accessibilityElement()
+        .accessibilityLabel("Speed")
+        .accessibilityValue(String(format: "%.1f", value))
     }
 
+    /// The value you are on: a plain paper line, no halo. It snaps with the
+    /// telemetry; only a drag is allowed to feel physical.
     private func indicator(width: CGFloat) -> some View {
-        Rectangle()
-            .fill(Z1.ink)
-            .frame(width: 1.6, height: height)
-            .shadow(color: Color.white.opacity(dragging ? 0.9 : 0.6), radius: dragging ? 5 : 3)
-            .offset(x: fraction(value) * max(width - 1, 0) - 0.8)
-            // don't animate live telemetry bumps — only drag movement feels physical
-            .animation(dragging ? .smooth(duration: 0.08) : .linear(duration: 0.02), value: value)
-            .animation(.smooth(duration: 0.14), value: dragging)
+        RoundedRectangle(cornerRadius: 1, style: .continuous)
+            .fill(Theme.paper)
+            .frame(width: 2, height: height)
+            .offset(x: fraction(value) * max(width - 2, 0))
     }
 
     /// One click per stop. `.alignment` is the detent feedback macOS uses for

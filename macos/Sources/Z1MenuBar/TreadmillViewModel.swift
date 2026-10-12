@@ -12,7 +12,9 @@ import Z1Core
 final class TreadmillViewModel: ObservableObject {
     @Published private(set) var status = Z1Treadmill.Status()
     @Published private(set) var busy = false
-    @Published private(set) var lastSummary: SessionSummary?
+    /// Not published: nothing on screen reads it, and every publish costs a
+    /// render pass while the panel is open.
+    private(set) var lastSummary: SessionSummary?
     /// Last failed command, shown until the next success. Kept separate
     /// from `status` because the status stream replaces it every second.
     @Published private(set) var commandError: String?
@@ -25,8 +27,6 @@ final class TreadmillViewModel: ObservableObject {
     /// Walk history, aggregated for the popover.
     @Published private(set) var todayTotals = DayTotals(day: Date())
     @Published private(set) var recentWalks: [WalkSession] = []
-    @Published private(set) var weekDays: [DayTotals] = []
-    @Published private(set) var monthDays: [DayTotals] = []
     @Published private(set) var highScores = HighScores()
     @Published private(set) var achievements: [Achievement] = []
     /// Why start-at-login did not take, if it did not.
@@ -123,13 +123,9 @@ final class TreadmillViewModel: ObservableObject {
         }
     }
 
-    /// Show a Dock icon as well as the menu-bar item.
-    @Published var showInDock: Bool {
-        didSet {
-            UserDefaults.standard.set(showInDock, forKey: Self.dockKey)
-            NSApp.setActivationPolicy(showInDock ? .regular : .accessory)
-            NotificationCenter.default.post(name: .z1ReassertStatusItem, object: nil)
-        }
+    /// ⌃⌥W starts or stops the belt from anywhere.
+    @Published var globalShortcutEnabled: Bool {
+        didSet { UserDefaults.standard.set(globalShortcutEnabled, forKey: Self.globalShortcutKey) }
     }
 
     @Published var launchAtLogin: Bool {
@@ -173,7 +169,7 @@ final class TreadmillViewModel: ObservableObject {
     private var lastStepPacketAt = Date()
     private var highestDisplayedSteps = 0
     private var healthTracker: RemoteSessionTracker
-    private let sessionStore = SessionStore()
+    private let sessionStore = TreadmillViewModel.makeSessionStore()
     private let sleepBlocker = SleepBlocker()
     private let notifier = Notifier()
     private var housekeepingTask: Task<Void, Never>?
@@ -185,7 +181,7 @@ final class TreadmillViewModel: ObservableObject {
     /// Coalesced speed target for rapid +/- taps — avoids busy dropping taps.
     private var coalescedTargetKmh: Double?
     private var speedTask: Task<Void, Never>?
-    @Published private(set) var speedBusy = false
+    private(set) var speedBusy = false
 
     static let weightKey = "weightKg"
     static let unitsKey = "unitsImperial"
@@ -201,7 +197,7 @@ final class TreadmillViewModel: ObservableObject {
     static let goalStepsKey = "dailyGoalSteps"
     static let notificationsKey = "notificationsEnabled"
     static let strideKey = "z1.calibratedStrideM"
-    static let dockKey = "showInDock"
+    static let globalShortcutKey = "z1.globalShortcut"
     static let autoUpdateKey = "z1.autoUpdate"
     static let loginStatusKey = "loginItemStatus"
     static let connectionLogKey = "z1.connectionLog"
@@ -229,7 +225,7 @@ final class TreadmillViewModel: ObservableObject {
         dailyGoalSteps = defaults.object(forKey: Self.goalStepsKey) as? Int ?? 8_000
         notificationsEnabled = defaults.object(forKey: Self.notificationsKey) as? Bool ?? true
         launchAtLogin = LoginItem.isEnabled
-        showInDock = defaults.object(forKey: Self.dockKey) as? Bool ?? true
+        globalShortcutEnabled = defaults.object(forKey: Self.globalShortcutKey) as? Bool ?? true
         autoUpdate = defaults.object(forKey: Self.autoUpdateKey) as? Bool ?? true
         useHealthWeight = defaults.object(forKey: Self.useHealthWeightKey) as? Bool ?? true
         healthTracker = Self.restoreHealthTracker(from: defaults)
@@ -262,9 +258,9 @@ final class TreadmillViewModel: ObservableObject {
         reminderTimer = Timer.scheduledTimer(withTimeInterval: 15 * 60, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.checkWalkReminder() }
         }
-        liveStepTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.tickLiveSteps() }
-        }
+        reminderTimer?.tolerance = 60
+        // The 0.5 s live-step timer only exists while the belt moves; see
+        // `updateLiveStepTimer()`. An idle app wakes for nothing.
         // The pad accepts one central at a time, so a link left up at exit is
         // what makes the *next* launch fail to connect. Drop it on the way out.
         NotificationCenter.default.addObserver(
@@ -283,11 +279,11 @@ final class TreadmillViewModel: ObservableObject {
         Task { await checkForUpdateAndMaybeInstall() }
         Timer.scheduledTimer(withTimeInterval: 30 * 60, repeats: true) { [weak self] _ in
             Task { @MainActor in await self?.checkForUpdateAndMaybeInstall() }
-        }
+        }.tolerance = 60
         applyHealthWeightIfAvailable()
         Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.applyHealthWeightIfAvailable() }
-        }
+        }.tolerance = 15
     }
 
     /// Fake telemetry for the preview harness, driven by env vars:
@@ -317,20 +313,64 @@ final class TreadmillViewModel: ObservableObject {
         status = s
     }
 
+    /// The real history, except in the harness with `Z1_PREVIEW_DEMO=1`,
+    /// which gets five weeks of plausible walks in a scratch file so the
+    /// almanac can be judged with something in it.
+    private static func makeSessionStore() -> SessionStore {
+        guard isPreview, ProcessInfo.processInfo.environment["Z1_PREVIEW_DEMO"] == "1" else {
+            return SessionStore()
+        }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("z1-preview-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
+            .appendingPathComponent("sessions.json")
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        var sessions: [WalkSession] = []
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        let minutes = [74, 0, 131, 96, 0, 58, 122, 0, 88, 140, 45, 0, 102, 67, 118, 0, 0, 93, 127, 81,
+                       0, 110, 64, 99, 0, 135, 72, 0, 105, 90, 0, 41, 0, 116, 0]
+        for (offset, min) in minutes.enumerated() where min > 0 {
+            guard let day = calendar.date(byAdding: .day, value: -(offset + 1), to: today),
+                  let start = calendar.date(byAdding: .hour, value: 10 + offset % 5, to: day)
+            else { continue }
+            let seconds = min * 60
+            let metres = Int(Double(seconds) * 3.3 / 3.6)
+            sessions.append(WalkSession(
+                id: "demo-\(offset)", startedAt: start, endedAt: start.addingTimeInterval(Double(seconds + 120)),
+                activeDurationS: seconds, distanceM: metres, steps: Int(Double(metres) / 0.62),
+                caloriesKcal: Double(min) * 3.6, exportedToHealth: false
+            ))
+        }
+        if let first = calendar.date(byAdding: .hour, value: 9, to: today) {
+            sessions.append(WalkSession(
+                id: "demo-today", startedAt: first, endedAt: first.addingTimeInterval(2_700),
+                activeDurationS: 2_580, distanceM: 2_360, steps: 3_810, caloriesKcal: 152, exportedToHealth: false
+            ))
+        }
+        sessions.sort { $0.startedAt < $1.startedAt }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try? encoder.encode(sessions).write(to: url)
+        return SessionStore(url: url)
+    }
+
     func applyHealthWeightIfAvailable() {
         guard useHealthWeight, let sample = HealthWeight.load() else { return }
         let rounded = (sample.kg * 10).rounded() / 10
         if abs(weightKg - rounded) >= 0.05 {
             weightKg = rounded
         }
+        let stamp: String
         if let when = sample.measuredAt {
             let fmt = DateFormatter()
             fmt.dateStyle = .medium
             fmt.timeStyle = .none
-            healthWeightStamp = "Health · \(fmt.string(from: when))"
+            stamp = "Health · \(fmt.string(from: when))"
         } else {
-            healthWeightStamp = "Health"
+            stamp = "Health"
         }
+        // Runs every minute; only publish when the line actually changed.
+        if stamp != healthWeightStamp { healthWeightStamp = stamp }
     }
 
     // No deinit: this view model is the app's single long-lived @StateObject
@@ -599,7 +639,6 @@ final class TreadmillViewModel: ObservableObject {
 
     private func receiveStatus(_ newStatus: Z1Treadmill.Status) {
         let previousPhase = status.phase
-        status = newStatus
         stepSmoother.speedKmh = newStatus.speedKmh
         stepSmoother.strideM = newStatus.impliedStrideM
             ?? GaitModel.stepLengthM(speedKmh: max(0.8, newStatus.speedKmh))
@@ -607,7 +646,13 @@ final class TreadmillViewModel: ObservableObject {
         lastStepPacketAt = Date()
         let packetDisplay = Int(stepSmoother.displaySteps.rounded(.down))
         highestDisplayedSteps = max(highestDisplayedSteps, openWalk?.steps ?? 0, packetDisplay)
-        status.steps = highestDisplayedSteps
+        // Build the whole frame, then publish once — and not at all when the
+        // packet changed nothing. Two writes per packet meant two render
+        // passes (and two status-item refreshes) every second.
+        var next = newStatus
+        next.steps = highestDisplayedSteps
+        if next != status { status = next }
+        updateLiveStepTimer()
         if newStatus.phase != previousPhase {
             recordConnectionChange(newStatus)
             if newStatus.phase == .error {
@@ -630,6 +675,24 @@ final class TreadmillViewModel: ObservableObject {
         persistHealthTracker()
         logCompletedWalks(observation.completed)
         scheduleHealthFinalization(deadline: observation.finalizationDeadline)
+    }
+
+    /// The interpolation timer runs only while `tickLiveSteps` could do
+    /// anything: connected, streaming, belt moving.
+    private func updateLiveStepTimer() {
+        let needed = status.phase == .ready && status.hasTelemetry
+            && (status.speedKmh > 0.3 || status.beltRunning)
+        if needed, liveStepTimer == nil {
+            let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+                Task { @MainActor in self?.tickLiveSteps() }
+            }
+            timer.tolerance = 0.05
+            RunLoop.main.add(timer, forMode: .common)
+            liveStepTimer = timer
+        } else if !needed, let timer = liveStepTimer {
+            timer.invalidate()
+            liveStepTimer = nil
+        }
     }
 
     /// The pad's distance counter arrives in visible chunks. Fill the quiet
@@ -892,13 +955,17 @@ final class TreadmillViewModel: ObservableObject {
         return sessionStore.hourlyKcal(on: day, extra: extra)
     }
 
+    /// Runs every two minutes. Each assignment to a published property is a
+    /// render pass, so only write what actually changed.
     private func refreshHistory() {
-        todayTotals = sessionStore.totals()
-        recentWalks = sessionStore.mostRecent(12)
-        weekDays = sessionStore.recentDays(7)
-        monthDays = sessionStore.recentDays(30)
-        highScores = sessionStore.highScores
-        achievements = sessionStore.achievements
+        let today = sessionStore.totals()
+        if today != todayTotals { todayTotals = today }
+        let recent = sessionStore.mostRecent(30)
+        if recent != recentWalks { recentWalks = recent }
+        let scores = sessionStore.highScores
+        if scores != highScores { highScores = scores }
+        let badges = sessionStore.achievements
+        if badges != achievements { achievements = badges }
     }
 
     /// Today's active minutes, including a walk still in progress (which does

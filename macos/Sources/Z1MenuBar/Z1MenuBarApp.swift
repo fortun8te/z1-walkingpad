@@ -25,22 +25,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusBar: StatusBarController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        if TreadmillViewModel.isPreview {
+        if TreadmillViewModel.isPreview, ProcessInfo.processInfo.environment["Z1_PREVIEW_POPOVER"] != "1" {
             showPreviewWindow()
             return
         }
-        // LSUIElement is true, so we start as an agent. The status item has
-        // to be created while we are still an accessory. Switching to a Dock
+        // A menu-bar app, only. LSUIElement starts us as an agent, and the
+        // status item must be created while we are one: switching to a Dock
         // app first parks it on the upper display, which has no menu bar.
         NSApp.setActivationPolicy(.accessory)
         let viewModel = TreadmillViewModel()
         self.viewModel = viewModel
         let bar = StatusBarController(viewModel: viewModel)
         statusBar = bar
-        let wantsDock = UserDefaults.standard.object(forKey: TreadmillViewModel.dockKey) as? Bool ?? true
-        if wantsDock {
-            NSApp.setActivationPolicy(.regular)
-            DispatchQueue.main.async { bar.reassert() }
+        if TreadmillViewModel.isPreview {
+            // Harness: open the real popover so its frame can be captured.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                bar.show()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    let number = NSApp.windows.first { $0.isVisible && $0.className.contains("Popover") }?.windowNumber ?? -1
+                    print("Z1_PREVIEW_WINDOW \(number)")
+                    fflush(stdout)
+                }
+            }
+            return
         }
         LocalReleaseServer.shared.ensureRunning()
     }
@@ -52,7 +59,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         let viewModel = TreadmillViewModel()
         self.viewModel = viewModel
-        let host = NSHostingController(rootView: PanelView(viewModel: viewModel))
+        let host = NSHostingController(rootView: PanelView(viewModel: viewModel).clipShape(.rect(cornerRadius: 12, style: .continuous)))
         let window = NSWindow(contentViewController: host)
         window.styleMask = [.borderless]
         window.backgroundColor = .clear
@@ -61,6 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.setContentSize(PanelView.size)
         window.setFrameOrigin(NSPoint(x: 80, y: 120))
         window.orderFrontRegardless()
+        SkyHook.setVisible(true)
         previewWindow = window
         print("Z1_PREVIEW_WINDOW \(window.windowNumber)")
         fflush(stdout)

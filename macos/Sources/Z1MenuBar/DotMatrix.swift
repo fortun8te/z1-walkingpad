@@ -9,7 +9,7 @@ struct DotMatrixText: View {
     var text: String
     var dot: CGFloat = 3
     var gap: CGFloat = 1.6
-    var color: Color = Z1.ink
+    var color: Color = Theme.paper
     /// When false the panel keeps its exact shape but nothing lights up — the
     /// app has no value to show, and says so by staying dark rather than by
     /// displaying a confident 0,0 it did not measure.
@@ -76,9 +76,10 @@ struct DotMatrixText: View {
             }
         }
         .frame(width: size.width, height: size.height)
-        // reduce contention with 1Hz telemetry: only animate when value actually committed, not every tick
-        .animation(.easeOut(duration: 0.12), value: text)
-        .animation(.smooth(duration: 0.3), value: lit)
-        .drawingGroup(opaque: false) // rasterize dots to single layer, faster
+        // No animation: a Canvas redraws in one pass per value, and a new
+        // speed should snap, not fade. No drawingGroup either — a Canvas is
+        // already one layer; the offscreen Metal pass only added cost.
+        .accessibilityElement()
+        .accessibilityLabel(text)
     }
 }

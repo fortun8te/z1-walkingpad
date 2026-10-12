@@ -114,6 +114,34 @@ public struct SolarClock: Sendable {
         return (elevation, azimuth)
     }
 
+    /// The moment today when the sun crosses `elevation` degrees, rising or
+    /// setting — golden hour (+6°), sunset (−0.833°), blue hour (−4°/−6°).
+    /// Sampled every ten minutes and refined by bisection to the second.
+    public func crossing(elevation target: Double, rising: Bool, on date: Date = Date(), calendar: Calendar = .current) -> Date? {
+        let start = calendar.startOfDay(for: date)
+        let step: TimeInterval = 600
+        var previous = position(at: start, calendar: calendar).elevation - target
+        var t = start
+        while t < start.addingTimeInterval(86_400) {
+            let next = t.addingTimeInterval(step)
+            let value = position(at: next, calendar: calendar).elevation - target
+            let crossesUp = previous < 0 && value >= 0
+            let crossesDown = previous >= 0 && value < 0
+            if (rising && crossesUp) || (!rising && crossesDown) {
+                var lo = t, hi = next
+                for _ in 0..<12 {
+                    let mid = lo.addingTimeInterval(hi.timeIntervalSince(lo) / 2)
+                    let v = position(at: mid, calendar: calendar).elevation - target
+                    if (v >= 0) == rising { hi = mid } else { lo = mid }
+                }
+                return hi
+            }
+            previous = value
+            t = next
+        }
+        return nil
+    }
+
     private func event(dayOfYear: Int, rise: Bool, tzHours: Double) -> Double? {
         let lngHour = longitude / 15
         let t = Double(dayOfYear) + ((rise ? 6 : 18) - lngHour) / 24

@@ -1,45 +1,57 @@
+import AppKit
 import SwiftUI
 import Z1Core
 
-/// A page inside the fixed panel: a title, then content that scrolls if it
-/// has to. The panel itself never changes size.
+/// A secondary page: the same 24 pt header line as Now, then content that
+/// scrolls inside the fixed panel if it has to.
 struct PageScaffold<Content: View>: View {
     var title: String
     var trailing: String?
     @ViewBuilder var content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline) {
+        VStack(alignment: .leading, spacing: Theme.inner) {
+            PageHeader {
                 Text(title)
-                    .font(Z1Type.medium(17))
-                    .foregroundStyle(Z1.ink)
-                Spacer()
+                    .font(Theme.emphasis)
+                    .foregroundStyle(Theme.paper)
+            } trailing: {
                 if let trailing {
                     Text(trailing)
-                        .font(Z1Type.regular(11))
-                        .foregroundStyle(Z1.dim)
+                        .font(Theme.caption.monospacedDigit())
+                        .foregroundStyle(Theme.paper38)
+                        .lineLimit(1)
                 }
             }
-            .frame(height: 24)
             ScrollView(.vertical) {
-                content
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.bottom, 8)
+                VStack(alignment: .leading, spacing: Theme.related) {
+                    content
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.bottom, Theme.related)
             }
             .scrollIndicators(.never)
             .scrollBounceBehavior(.basedOnSize)
+            // Content leaves under a short fade instead of a hard cut.
+            .mask {
+                VStack(spacing: 0) {
+                    Color.black
+                    LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom)
+                        .frame(height: 14)
+                }
+            }
         }
     }
 }
 
-struct SectionLabel: View {
+/// Plain explanatory text in a page.
+struct Note: View {
     var text: String
     var body: some View {
         Text(text)
-            .font(Z1Type.regular(10))
-            .foregroundStyle(Z1.faint)
-            .padding(.top, 4)
+            .font(Theme.caption)
+            .foregroundStyle(Theme.paper38)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -50,35 +62,27 @@ struct IntroPage: View {
     var onContinue: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 20) {
             Spacer(minLength: 0)
             Text("Walk.\nDon't think about it.")
-                .font(Z1Type.light(26))
-                .foregroundStyle(Z1.ink)
+                .font(Theme.section)
+                .foregroundStyle(Theme.paper)
                 .fixedSize(horizontal: false, vertical: true)
-            VStack(alignment: .leading, spacing: 12) {
-                line("Start, stop and set speed from here or the remote. The pad only takes speed while the belt moves.")
-                line("One Bluetooth connection at a time: close the phone app first.")
-                line("Walks stay on this Mac and reach Apple Health through the Shortcut.")
+            VStack(alignment: .leading, spacing: Theme.inner) {
+                line("Close the phone app. The pad takes one connection.")
+                line("\(GlobalHotKey.display) starts and stops from anywhere.")
             }
             Spacer(minLength: 0)
-            Button(action: onContinue) {
-                Text("Continue")
-                    .font(Z1Type.medium(13))
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 34)
-                    .contentShape(.rect)
-            }
-            .buttonStyle(PanelButtonStyle(lit: true))
-            .keyboardShortcut(.defaultAction)
+            PrimaryButton(title: "Continue", action: onContinue)
+                .keyboardShortcut(.defaultAction)
         }
-        .padding(.horizontal, 4)
+        .padding(.bottom, 6)
     }
 
     private func line(_ text: String) -> some View {
         Text(text)
-            .font(Z1Type.regular(12))
-            .foregroundStyle(Z1.dim)
+            .font(Theme.body)
+            .foregroundStyle(Theme.paper62)
             .fixedSize(horizontal: false, vertical: true)
     }
 }
@@ -90,16 +94,20 @@ struct HistoryPage: View {
     @ObservedObject var viewModel: TreadmillViewModel
 
     var body: some View {
-        PageScaffold(title: "History", trailing: "\(viewModel.recentWalks.count) recent") {
-            if viewModel.recentWalks.isEmpty {
-                Text("Nothing recorded yet. Walks of two minutes or more land here.")
-                    .font(Z1Type.regular(12))
-                    .foregroundStyle(Z1.dim)
+        let walks = viewModel.recentWalks
+        PageScaffold(title: "History") {
+            if walks.isEmpty {
+                Note(text: "No walks yet.")
             } else {
-                VStack(spacing: 0) {
-                    ForEach(viewModel.recentWalks) { walk in
-                        row(walk)
-                        Rectangle().fill(Z1.hairline).frame(height: 0.7)
+                ForEach(groups(walks), id: \.day) { group in
+                    GroupLabel(text: dayTitle(group.day))
+                    Card(padding: 0, glass: false) {
+                        VStack(spacing: 0) {
+                            ForEach(Array(group.walks.enumerated()), id: \.element.id) { index, walk in
+                                if index > 0 { RowDivider().padding(.leading, Theme.inner) }
+                                row(walk)
+                            }
+                        }
                     }
                 }
             }
@@ -107,21 +115,44 @@ struct HistoryPage: View {
     }
 
     private func row(_ walk: WalkSession) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(walk.startedAt, format: .dateTime.weekday(.abbreviated).day().month(.abbreviated).hour().minute())
-                    .font(Z1Type.regular(11))
-                    .foregroundStyle(Z1.dim)
-                Spacer()
-                Text(viewModel.formatDuration(walk.activeDurationS))
-                    .font(Z1Type.medium(13))
-                    .foregroundStyle(Z1.ink)
+        HStack(alignment: .firstTextBaseline, spacing: Theme.related) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(walk.startedAt, format: .dateTime.hour().minute())
+                    .font(Theme.bodyMedium.monospacedDigit())
+                    .foregroundStyle(Theme.paper)
+                Text("\(walk.steps.formatted()) steps est. · \(Int(walk.caloriesKcal.rounded())) kcal est.")
+                    .font(Theme.caption.monospacedDigit())
+                    .foregroundStyle(Theme.paper38)
             }
-            Text("\(viewModel.formatDistance(walk.distanceM))  ·  \(walk.steps.formatted()) steps est.  ·  \(Int(walk.caloriesKcal.rounded())) kcal est.")
-                .font(Z1Type.regular(11))
-                .foregroundStyle(Z1.ink.opacity(0.8))
+            Spacer(minLength: Theme.related)
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(viewModel.formatDuration(walk.activeDurationS))
+                    .font(Theme.bodyMedium.monospacedDigit())
+                    .foregroundStyle(Theme.paper)
+                Text(viewModel.formatDistance(walk.distanceM))
+                    .font(Theme.caption.monospacedDigit())
+                    .foregroundStyle(Theme.paper62)
+            }
         }
-        .padding(.vertical, 8)
+        .padding(.horizontal, Theme.inner)
+        .padding(.vertical, 9)
+    }
+
+    private struct DayGroup { let day: Date; let walks: [WalkSession] }
+
+    /// Newest day first, newest walk first inside a day.
+    private func groups(_ walks: [WalkSession]) -> [DayGroup] {
+        let calendar = Calendar.current
+        let byDay = Dictionary(grouping: walks) { calendar.startOfDay(for: $0.startedAt) }
+        return byDay.keys.sorted(by: >).map { day in
+            DayGroup(day: day, walks: byDay[day, default: []].sorted { $0.startedAt > $1.startedAt })
+        }
+    }
+
+    private func dayTitle(_ day: Date) -> String {
+        if Calendar.current.isDateInToday(day) { return "Today" }
+        if Calendar.current.isDateInYesterday(day) { return "Yesterday" }
+        return day.formatted(.dateTime.weekday(.wide).day().month(.wide))
     }
 }
 
@@ -133,81 +164,82 @@ struct RecordsPage: View {
 
     var body: some View {
         let hs = viewModel.highScores
-        return PageScaffold(
+        PageScaffold(
             title: "Records",
             trailing: hs.totalWalks > 0 ? "\(hs.totalWalks) walks · \(viewModel.formatDistance(hs.totalDistanceM))" : nil
         ) {
             if hs.totalWalks == 0 {
-                Text("No records yet. A walk of two minutes or more lands here.")
-                    .font(Z1Type.regular(12))
-                    .foregroundStyle(Z1.dim)
+                Note(text: "No records yet.")
             } else {
-                VStack(alignment: .leading, spacing: 8) {
-                    SectionLabel(text: "Best walk")
-                    if let w = hs.longestWalk {
-                        record("Longest", viewModel.formatDuration(w.activeDurationS), date: w.startedAt)
+                GroupLabel(text: "Best walk")
+                Card(padding: 0, glass: false) {
+                    VStack(spacing: 0) {
+                        rows([
+                            hs.longestWalk.map { ("Longest", viewModel.formatDuration($0.activeDurationS), $0.startedAt) },
+                            hs.farthestWalk.map { ("Farthest", viewModel.formatDistance($0.distanceM), $0.startedAt) },
+                            hs.mostStepsWalk.map { ("Most steps est.", $0.steps.formatted(), $0.startedAt) },
+                        ])
                     }
-                    if let w = hs.farthestWalk {
-                        record("Farthest", viewModel.formatDistance(w.distanceM), date: w.startedAt)
-                    }
-                    if let w = hs.mostStepsWalk {
-                        record("Most steps", w.steps.formatted(), date: w.startedAt)
-                    }
-                    SectionLabel(text: "Best day")
-                    if let d = hs.longestDayTime {
-                        record("Time", viewModel.formatDuration(d.activeDurationS), date: d.day)
-                    }
-                    if let d = hs.mostDistanceDay {
-                        record("Distance", viewModel.formatDistance(d.distanceM), date: d.day)
-                    }
-                    if let d = hs.mostStepsDay {
-                        record("Steps", d.steps.formatted(), date: d.day)
-                    }
-                    if hs.bestStreakDays > 1 {
-                        record("Streak", "\(hs.bestStreakDays) days", date: nil)
-                    }
-                    SectionLabel(text: "Badges  \(viewModel.achievements.filter(\.unlocked).count) of \(viewModel.achievements.count)")
-                    badges
                 }
+                GroupLabel(text: "Best day")
+                Card(padding: 0, glass: false) {
+                    VStack(spacing: 0) {
+                        rows([
+                            hs.longestDayTime.map { ("Time", viewModel.formatDuration($0.activeDurationS), $0.day) },
+                            hs.mostDistanceDay.map { ("Distance", viewModel.formatDistance($0.distanceM), $0.day) },
+                            hs.mostStepsDay.map { ("Steps est.", $0.steps.formatted(), $0.day) },
+                            hs.bestStreakDays > 1 ? ("Streak", "\(hs.bestStreakDays) days", nil) : nil,
+                        ])
+                    }
+                }
+                GroupLabel(text: "Badges")
+                badges
             }
         }
     }
 
-    private func record(_ label: String, _ value: String, date: Date?) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(label)
-                .font(Z1Type.regular(12))
-                .foregroundStyle(Z1.dim)
-            Spacer()
-            if let date {
-                Text(date, format: .dateTime.day().month(.abbreviated))
-                    .font(Z1Type.regular(10))
-                    .foregroundStyle(Z1.faint)
+    @ViewBuilder
+    private func rows(_ items: [(String, String, Date?)?]) -> some View {
+        let present = items.compactMap { $0 }
+        ForEach(Array(present.enumerated()), id: \.offset) { index, item in
+            if index > 0 { RowDivider().padding(.leading, Theme.inner) }
+            HStack(alignment: .firstTextBaseline, spacing: Theme.related) {
+                Text(item.0)
+                    .font(Theme.body)
+                    .foregroundStyle(Theme.paper62)
+                Spacer(minLength: Theme.related)
+                if let date = item.2 {
+                    Text(date, format: .dateTime.day().month(.abbreviated))
+                        .font(Theme.caption)
+                        .foregroundStyle(Theme.paper38)
+                }
+                Text(item.1)
+                    .font(Theme.bodyMedium.monospacedDigit())
+                    .foregroundStyle(Theme.paper)
+                    .frame(minWidth: 70, alignment: .trailing)
             }
-            Text(value)
-                .font(Z1Type.medium(13))
-                .foregroundStyle(Z1.ink)
-                .frame(minWidth: 64, alignment: .trailing)
+            .padding(.horizontal, Theme.inner)
+            .frame(height: 34)
         }
     }
 
     private var badges: some View {
-        LazyVGrid(columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6)], spacing: 6) {
+        LazyVGrid(
+            columns: [GridItem(.flexible(), spacing: Theme.related), GridItem(.flexible(), spacing: Theme.related)],
+            spacing: Theme.related
+        ) {
             ForEach(viewModel.achievements) { ach in
-                VStack(alignment: .leading, spacing: 5) {
+                VStack(alignment: .leading, spacing: 7) {
                     Text(ach.kind.title)
-                        .font(Z1Type.medium(11))
-                        .foregroundStyle(ach.unlocked ? Z1.ink : Z1.dim)
+                        .font(Theme.captionMedium)
+                        .foregroundStyle(ach.unlocked ? Theme.paper : Theme.paper62)
                         .lineLimit(1)
-                    TickLine(progress: ach.progress, count: 24)
-                        .frame(height: 6)
+                    TickLine(progress: ach.progress, count: 26)
+                        .frame(height: 7)
                 }
-                .padding(8)
+                .padding(.vertical, 6)
+                .padding(.horizontal, 4)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .strokeBorder(ach.unlocked ? Z1.hairlineLit : Z1.hairline, lineWidth: 0.7)
-                )
                 .help(ach.kind.description)
             }
         }
@@ -219,197 +251,238 @@ struct RecordsPage: View {
 @MainActor
 struct SettingsPage: View {
     @ObservedObject var viewModel: TreadmillViewModel
+    @ObservedObject private var sky = SkyEngine.shared
     @State private var weightDraft = ""
     @FocusState private var weightFocused: Bool
 
     var body: some View {
-        PageScaffold(
-            title: "Settings",
-            trailing: "Build \(viewModel.updater.currentVersion)"
-        ) {
-            VStack(alignment: .leading, spacing: 10) {
-                SectionLabel(text: "You")
-                you
-                SectionLabel(text: "Goal and menu bar")
-                goal
-                SectionLabel(text: "App")
-                app
-                SectionLabel(text: "Steps")
-                steps
-                SectionLabel(text: "Leaving")
-                HStack {
-                    Text("Stop the belt, sleep the pad, quit")
-                        .font(Z1Type.regular(12))
-                        .foregroundStyle(Z1.dim)
-                    Spacer()
-                    Button("Quit & sleep") { viewModel.stopBeltAndQuit() }
-                        .buttonStyle(HairlineButtonStyle())
-                        .font(Z1Type.regular(11))
+        PageScaffold(title: "Settings") {
+            GroupLabel(text: "Walking")
+            Card(padding: 0, glass: false) {
+                VStack(spacing: 0) {
+                    cell { goalRow }
+                    divider
+                    cell {
+                        SettingRow(title: "Speed per − / +") {
+                            ChipPicker(options: [(0.1, "0.1"), (0.2, "0.2"), (0.5, "0.5")], selection: $viewModel.speedStep, compact: true)
+                        }
+                    }
+                    divider
+                    cell {
+                        SettingRow(title: "Units") {
+                            ChipPicker(options: [(false, "Metric"), (true, "Imperial")], selection: $viewModel.unitsImperial, compact: true)
+                        }
+                    }
+                    divider
+                    cell { weightRow }
+                    divider
+                    cell {
+                        Toggle(isOn: $viewModel.useHealthWeight) { label("Weight from Apple Health") }
+                            .toggleStyle(PillToggleStyle())
+                    }
                 }
             }
+
+            GroupLabel(text: "Menu bar")
+            Card(padding: 0, glass: false) {
+                VStack(spacing: 0) {
+                    cell {
+                        SettingRow(title: "Beside the icon") {
+                            Picker("", selection: $viewModel.menuBarReadout) {
+                                ForEach(MenuBarReadout.allCases) { readout in
+                                    Text(readout.label).tag(readout)
+                                }
+                            }
+                            .labelsHidden()
+                            .controlSize(.small)
+                            .fixedSize()
+                        }
+                    }
+                    divider
+                    cell {
+                        Toggle(isOn: $viewModel.menuBarAlwaysVisible) { label("Show it while the belt is stopped") }
+                            .toggleStyle(PillToggleStyle())
+                            .disabled(viewModel.menuBarReadout == .none)
+                    }
+                    divider
+                    cell {
+                        Toggle(isOn: $viewModel.globalShortcutEnabled) {
+                            label("\(GlobalHotKey.display) starts and stops")
+                        }
+                        .toggleStyle(PillToggleStyle())
+                    }
+                }
+            }
+
+            GroupLabel(text: "Notifications")
+            Card(padding: 0, glass: false) {
+                VStack(spacing: 0) {
+                    cell {
+                        Toggle(isOn: $viewModel.notificationsEnabled) { label("When a walk is recorded") }
+                            .toggleStyle(PillToggleStyle())
+                    }
+                    divider
+                    cell {
+                        Toggle(isOn: $viewModel.remindersEnabled) { label("Remind me on quiet days") }
+                            .toggleStyle(PillToggleStyle())
+                    }
+                    divider
+                    cell {
+                        SettingRow(title: "Quiet for") {
+                            ChipPicker(options: [(2, "2h"), (3, "3h"), (4, "4h")], selection: $viewModel.reminderGapHours, compact: true)
+                                .disabled(!viewModel.remindersEnabled)
+                                .opacity(viewModel.remindersEnabled ? 1 : 0.4)
+                        }
+                    }
+                }
+            }
+
+            GroupLabel(text: "Steps")
+            Card(padding: 0, glass: false) {
+                VStack(spacing: 0) {
+                    cell {
+                        SettingRow(title: "Stride") {
+                            Text(viewModel.strideLabel)
+                                .font(Theme.body.monospacedDigit())
+                                .foregroundStyle(Theme.paper62)
+                        }
+                    }
+                    divider
+                    cell {
+                        HStack(spacing: Theme.related) {
+                            Toggle(isOn: $viewModel.persistStats) { label("Count across pad restarts") }
+                                .toggleStyle(PillToggleStyle())
+                            Button("Clear") { viewModel.clearStatsTapped() }
+                                .buttonStyle(SecondaryButtonStyle())
+                                .disabled(!viewModel.persistStats)
+                        }
+                    }
+                }
+            }
+
+            GroupLabel(text: "Outside")
+            Card(glass: false) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(sky.conditions.summary)
+                        .font(Theme.body)
+                        .foregroundStyle(Theme.paper)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let next = sky.conditions.nextEvent {
+                        Text(next)
+                            .font(Theme.caption)
+                            .foregroundStyle(Theme.paper62)
+                    }
+                }
+            }
+
+            GroupLabel(text: "App")
+            Card(padding: 0, glass: false) {
+                VStack(spacing: 0) {
+                    cell {
+                        Toggle(isOn: $viewModel.launchAtLogin) { label("Start at login", viewModel.loginItemMessage) }
+                            .toggleStyle(PillToggleStyle())
+                    }
+                    divider
+                    cell {
+                        Toggle(isOn: $viewModel.autoUpdate) { label("Install updates automatically") }
+                            .toggleStyle(PillToggleStyle())
+                    }
+                    divider
+                    cell {
+                        SettingRow(title: viewModel.status.deviceName ?? "Pad") {
+                            Button(viewModel.isConnected ? "Disconnect" : "Connect") { viewModel.connectTapped() }
+                                .buttonStyle(SecondaryButtonStyle())
+                                .disabled(viewModel.busy || viewModel.isConnecting)
+                        }
+                    }
+                }
+            }
+
+            HStack(spacing: Theme.related) {
+                Button { viewModel.quit() } label: { wide("Quit") }
+                    .buttonStyle(PrimaryButtonStyle())
+                    .help("Quit and leave the belt exactly as it is (⌘Q)")
+                Button { viewModel.stopBeltAndQuit() } label: { wide("Stop pad and quit") }
+                    .buttonStyle(PrimaryButtonStyle())
+                    .help("Stop the belt, put the pad to sleep, then quit")
+            }
+            .padding(.top, Theme.related)
+        }
+        // The first field would otherwise take focus on open and swallow
+        // Space and the arrow keys.
+        .onAppear {
+            DispatchQueue.main.async { NSApp.keyWindow?.makeFirstResponder(nil) }
         }
     }
 
-    private var you: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            row("Units") {
-                Picker("", selection: $viewModel.unitsImperial) {
-                    Text("Metric").tag(false)
-                    Text("Imperial").tag(true)
+    // MARK: rows
+
+    private var goalRow: some View {
+        SettingRow(title: "Daily goal") {
+            if viewModel.goalIsSteps {
+                FieldPlate(width: 64) {
+                    TextField("", value: $viewModel.dailyGoalSteps, format: .number)
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .controlSize(.small)
-                .frame(width: 140)
+            } else {
+                FieldPlate(width: 44) {
+                    TextField("", value: $viewModel.dailyGoalMinutes, format: .number)
+                }
             }
-            row("Body weight") {
+            ChipPicker(options: [(false, "min"), (true, "steps")], selection: $viewModel.goalIsSteps, compact: true)
+        }
+    }
+
+    private var weightRow: some View {
+        SettingRow(title: "Body weight") {
+            FieldPlate(width: 56) {
                 TextField("", text: $weightDraft)
-                    .textFieldStyle(.roundedBorder)
-                    .controlSize(.small)
-                    .frame(width: 58)
-                    .multilineTextAlignment(.trailing)
                     .focused($weightFocused)
                     .onAppear(perform: syncWeight)
                     .onChange(of: viewModel.weightKg) { _, _ in if !weightFocused { syncWeight() } }
                     .onChange(of: viewModel.unitsImperial) { _, _ in syncWeight() }
                     .onChange(of: weightFocused) { _, focused in if !focused { commitWeight() } }
                     .onSubmit(commitWeight)
-                    // An outside click tears the panel down without a
-                    // focus change; keep what was typed.
+                    // An outside click tears the panel down without a focus
+                    // change; keep what was typed.
                     .onDisappear { if weightFocused { commitWeight() } }
-                Text(viewModel.weightUnitLabel)
-                    .font(Z1Type.regular(11))
-                    .foregroundStyle(Z1.faint)
-                    .frame(width: 16, alignment: .leading)
             }
-            check("Use latest Apple Health weight", $viewModel.useHealthWeight)
-            if let stamp = viewModel.healthWeightStamp {
-                note(stamp)
-            }
-            row("Speed per − / +") {
-                Picker("", selection: $viewModel.speedStep) {
-                    Text("0.1").tag(0.1)
-                    Text("0.2").tag(0.2)
-                    Text("0.5").tag(0.5)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .controlSize(.small)
-                .frame(width: 120)
-            }
+            Text(viewModel.weightUnitLabel)
+                .font(Theme.caption)
+                .foregroundStyle(Theme.paper38)
+                .frame(width: 14, alignment: .leading)
         }
     }
 
-    private var goal: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            row("Daily goal") {
-                if viewModel.goalIsSteps {
-                    TextField("", value: $viewModel.dailyGoalSteps, format: .number)
-                        .textFieldStyle(.roundedBorder)
-                        .controlSize(.small)
-                        .frame(width: 62)
-                        .multilineTextAlignment(.trailing)
-                } else {
-                    TextField("", value: $viewModel.dailyGoalMinutes, format: .number)
-                        .textFieldStyle(.roundedBorder)
-                        .controlSize(.small)
-                        .frame(width: 44)
-                        .multilineTextAlignment(.trailing)
-                }
-                Picker("", selection: $viewModel.goalIsSteps) {
-                    Text("min").tag(false)
-                    Text("steps").tag(true)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .controlSize(.small)
-                .frame(width: 96)
-            }
-            row("Menu bar shows") {
-                Picker("", selection: $viewModel.menuBarReadout) {
-                    ForEach(MenuBarReadout.allCases) { readout in
-                        Text(readout.label).tag(readout)
-                    }
-                }
-                .labelsHidden()
-                .controlSize(.small)
-                .frame(width: 140)
-            }
-            check("Show it when the belt is stopped", $viewModel.menuBarAlwaysVisible)
-                .disabled(viewModel.menuBarReadout == .none)
-        }
+    private func wide(_ title: String) -> some View {
+        Text(title)
+            .font(Theme.bodyMedium)
+            .frame(maxWidth: .infinity)
+            .frame(height: 36)
+            .contentShape(.rect)
     }
 
-    private var app: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            check("Start at login", $viewModel.launchAtLogin)
-            if let message = viewModel.loginItemMessage { note(message) }
-            check("Show in Dock", $viewModel.showInDock)
-            check("Install updates automatically", $viewModel.autoUpdate)
-            check("Notify when a walk is recorded", $viewModel.notificationsEnabled)
-            HStack {
-                check("Remind me on quiet days", $viewModel.remindersEnabled)
-                Spacer()
-                Picker("", selection: $viewModel.reminderGapHours) {
-                    Text("2h").tag(2)
-                    Text("3h").tag(3)
-                    Text("4h").tag(4)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .controlSize(.small)
-                .frame(width: 96)
-                .disabled(!viewModel.remindersEnabled)
-            }
-        }
+    private var divider: some View {
+        RowDivider().padding(.leading, Theme.inner)
     }
 
-    private var steps: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            row("Stride") {
-                Text(viewModel.strideLabel)
-                    .font(Z1Type.regular(12))
-                    .foregroundStyle(Z1.ink)
-            }
-            note("Steps come from belt distance and a speed-dependent stride. Belt distance is the exact number.")
-            HStack {
-                check("Keep counting across pad restarts", $viewModel.persistStats)
-                Spacer()
-                Button("Clear") { viewModel.clearStatsTapped() }
-                    .buttonStyle(HairlineButtonStyle())
-                    .font(Z1Type.regular(11))
-                    .disabled(!viewModel.persistStats)
-            }
-        }
+    private func cell<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        content()
+            .padding(.horizontal, Theme.inner)
+            .padding(.vertical, 7)
     }
 
-    // MARK: pieces
-
-    private func row<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
-        HStack(spacing: 6) {
+    private func label(_ title: String, _ detail: String? = nil) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
             Text(title)
-                .font(Z1Type.regular(12))
-                .foregroundStyle(Z1.dim)
-            Spacer(minLength: 6)
-            content()
+                .font(Theme.body)
+                .foregroundStyle(Theme.paper)
+            if let detail {
+                Text(detail)
+                    .font(Theme.caption)
+                    .foregroundStyle(Theme.paper38)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
-        .frame(minHeight: 22)
-    }
-
-    private func check(_ title: String, _ binding: Binding<Bool>) -> some View {
-        Toggle(isOn: binding) {
-            Text(title)
-                .font(Z1Type.regular(12))
-                .foregroundStyle(Z1.ink.opacity(0.85))
-        }
-        .toggleStyle(.checkbox)
-    }
-
-    private func note(_ text: String) -> some View {
-        Text(text)
-            .font(Z1Type.regular(10))
-            .foregroundStyle(Z1.faint)
-            .fixedSize(horizontal: false, vertical: true)
     }
 
     private func syncWeight() {
