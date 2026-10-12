@@ -89,7 +89,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         mainWindow.show()
         let alert = NSAlert()
         alert.messageText = "The belt is still moving"
-        alert.informativeText = "Stop it before quitting? If you leave it running, this walk stops being recorded when the app quits."
+        alert.informativeText = "Stop it before quitting? If you leave it running, the app stops recording this walk until you open it again."
         alert.addButton(withTitle: "Stop Belt and Quit")
         alert.addButton(withTitle: "Quit, Keep Walking")
         alert.addButton(withTitle: "Cancel")
