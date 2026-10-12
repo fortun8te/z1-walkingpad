@@ -119,4 +119,5 @@ downloads, one blutter run, one curl of a JavaScript bundle, and one
 The full wire spec is in `docs/protocol.md`. The replay that first moved
 the belt is preserved at `scripts/duttke_replay.py`, alongside the failed
 experiments (`unlock_swings.py`, `fuzz_unlock.py`, `instant_connect.py`, …)
-for anyone who wants the full battlefield.
+for anyone who wants the full battlefield. They are a research record, not
+tools: they need `bleak` (`pip install bleak`) and they talk to a real pad.
