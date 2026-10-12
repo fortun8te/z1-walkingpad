@@ -440,12 +440,14 @@ private struct ArrowKeys: View {
 // MARK: - Today
 
 /// Today against the goal: ticks, the number, and the distance. One line
-/// while walking is all the history the Now page needs.
+/// while walking is all the history the Now page needs. It reads the totals
+/// at printed resolution, so it redraws about once a walk-minute rather than
+/// once a second.
 private struct TodayCard: View {
     let model: TreadmillViewModel
 
     var body: some View {
-        let today = model.today
+        let today = model.todayShown
         Card {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(alignment: .firstTextBaseline) {

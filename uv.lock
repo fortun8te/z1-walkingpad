@@ -1045,4 +1045,4 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "ruff", marker = "extra == 'dev'" },
 ]
-provides-extras = ["mcp", "dev"]
+provides-extras = ["dev"]

@@ -48,6 +48,9 @@ final class TreadmillViewModel {
     /// The week bars read this, so they redraw a few times a walk instead of
     /// every second.
     private(set) var todayCoarse = DayTotals(day: Date())
+    /// Today at the resolution the Today card prints (whole minutes, 10 m), so
+    /// the card redraws when its text can change, not on every telemetry frame.
+    private(set) var todayShown = DayTotals(day: Date())
     /// Why start-at-login did not take, if it did not.
     private(set) var loginItemMessage: String?
 
@@ -840,6 +843,11 @@ final class TreadmillViewModel {
         if next != today { today = next }
         let coarse = Self.coarse(next)
         if coarse != todayCoarse { todayCoarse = coarse }
+        var shown = DayTotals(day: next.day)
+        shown.walks = next.walks
+        shown.activeDurationS = next.activeDurationS / 60 * 60
+        shown.distanceM = next.distanceM / 10 * 10
+        if shown != todayShown { todayShown = shown }
         publishLive()
     }
 
