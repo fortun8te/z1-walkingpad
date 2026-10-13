@@ -67,7 +67,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
 
     /// A Dock click with the window closed brings it back.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !mainWindow.isVisible { mainWindow.show() }
+        // A minimized window can still report isVisible. Dock reopen must
+        // restore it as well as a window that was closed.
+        mainWindow.show()
         return true
     }
 
@@ -164,14 +166,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     /// The Walk menu's titles follow the pad when it opens.
     func menuNeedsUpdate(_ menu: NSMenu) {
         guard let model else { return }
-        walkItem?.title = model.live.beltRunning ? "Stop Walk" : "Start Walk"
+        let stopping = model.live.beltRunning || model.live.stopRequested || model.pendingVerb == "Starting…"
+        walkItem?.title = stopping ? "Stop Walk" : "Start Walk"
         connectItem?.title = model.isConnected ? "Disconnect" : "Connect"
     }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         guard let model else { return false }
         switch item.action {
-        case #selector(toggleWalk(_:)): return model.isConnected && (!model.busy || model.live.beltRunning)
+        case #selector(toggleWalk(_:)):
+            let stopping = model.live.beltRunning || model.live.stopRequested || model.pendingVerb == "Starting…"
+            return model.isConnected && (stopping ? model.pendingVerb != "Stopping…" : !model.busy)
         case #selector(toggleConnection(_:)): return !model.busy && !model.isConnecting
         case #selector(showPage(_:)):
             item.state = (item.representedObject as? String) == navigation.page.rawValue ? .on : .off

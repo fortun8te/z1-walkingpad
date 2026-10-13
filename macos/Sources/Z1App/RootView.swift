@@ -206,7 +206,7 @@ struct NowPage: View {
             LiveSlot(model: model)
             TodayCard(model: model)
         }
-        .background { ArrowKeys(model: model) }
+        .background { ArrowKeys(model: model).disabled(isTypingSpeed || !nudgeEnabled) }
         .onAppear {
             syncSpeedDraft()
             if let typed = PreviewHarness.typedSpeed {
@@ -216,6 +216,11 @@ struct NowPage: View {
         }
         .onChange(of: model.targetDisplaySpeed) { _, _ in syncSpeedDraft() }
         .onChange(of: model.speedRange) { _, _ in syncSpeedDraft() }
+        .onChange(of: nudgeEnabled) { _, enabled in
+            guard !enabled else { return }
+            isPickingSpeed = false
+            closeSpeedField(commit: false)
+        }
         .onChange(of: speedFieldFocused) { _, focused in
             // Clicking away mid-edit drops the half-typed value.
             guard !focused, isTypingSpeed else { return }
@@ -239,7 +244,7 @@ struct NowPage: View {
                         size: 40,
                         enabled: nudgeEnabled,
                         help: "Slower (← \(model.formatSpeed(0.1)), ↓ \(model.formatSpeed(0.5)))",
-                        key: .leftArrow,
+                        key: isTypingSpeed ? nil : .leftArrow,
                         action: model.speedDownTapped
                     )
                     .accessibilityLabel("Slower")
@@ -247,7 +252,7 @@ struct NowPage: View {
                         range: model.speedRange,
                         value: $speedDraft,
                         belt: running ? model.displaySpeed : nil,
-                        enabled: model.isConnected,
+                        enabled: nudgeEnabled,
                         format: model.formatSpeed,
                         onEditingChanged: { isPickingSpeed = $0 },
                         onCommit: commitSpeedDraft,
@@ -258,7 +263,7 @@ struct NowPage: View {
                         size: 40,
                         enabled: nudgeEnabled,
                         help: "Faster (→ \(model.formatSpeed(0.1)), ↑ \(model.formatSpeed(0.5)))",
-                        key: .rightArrow,
+                        key: isTypingSpeed ? nil : .rightArrow,
                         action: model.speedUpTapped
                     )
                     .accessibilityLabel("Faster")
@@ -310,6 +315,7 @@ struct NowPage: View {
                 gap: 2.3,
                 lit: panelLit
             )
+            .accessibilityHidden(true)
             if isTypingSpeed {
                 TextField("Speed", text: $typedSpeed)
                     .textFieldStyle(.plain)
@@ -332,15 +338,20 @@ struct NowPage: View {
             }
         }
         .contentShape(.rect)
-        .onTapGesture {
-            guard model.isConnected, !isTypingSpeed else { return }
-            typedSpeed = ""
-            isTypingSpeed = true
-        }
+        .onTapGesture(perform: beginSpeedEntry)
         .help("Click and type a speed: 3 then 5 is \(model.formatSpeed(3.5)). Return sets it, Esc cancels.")
-        .accessibilityElement()
+        .accessibilityElement(children: isTypingSpeed ? .contain : .ignore)
         .accessibilityLabel("Speed")
-        .accessibilityValue("\(model.formatSpeed(readoutValue)) \(model.speedUnitLabel)")
+        .accessibilityValue(isTypingSpeed ? "Editing" : panelLit
+            ? "\(model.formatSpeed(readoutValue)) \(model.speedUnitLabel)" : "Not available")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { beginSpeedEntry() }
+    }
+
+    private func beginSpeedEntry() {
+        guard nudgeEnabled, !isTypingSpeed else { return }
+        typedSpeed = ""
+        isTypingSpeed = true
     }
 
     /// The typed speed on the panel's own template, one digit, the decimal

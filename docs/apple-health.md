@@ -42,8 +42,10 @@ The file on the Mac is:
 
 The Mac queues eligible finished WalkingPad workouts in iCloud Drive. The
 iPhone Shortcut logs each queued walk as a Walking workout in Apple Health,
-then deletes the queue file after logging all walks. WHOOP supplies heart rate,
-calories, and Strain from the band you are already wearing.
+then deletes the queue file after logging all walks. WHOOP supports importing
+Apple Health workouts; delivery from this exact Shortcut still needs an iPhone
+check. Wear the band during walks so WHOOP has its own sensor data. See
+[WHOOP routes and limits](whoop.md) for current integration evidence.
 
 ## Easy setup
 
@@ -56,8 +58,12 @@ calories, and Strain from the band you are already wearing.
 3. In **Shortcuts → Automation → + → App**, choose **WHOOP**, select
    **Is Opened**, run **Z1 Import Health**, and choose **Run Immediately**.
 
-That is all. No Focus, Strava, folder picker, or environment variables are
-needed. Opening WHOOP imports any finished walks waiting in iCloud.
+4. In WHOOP, connect **More → App Settings → Integrations → Apple Health** and
+   allow Workouts and Distance read access in Health.
+
+No Focus, Strava, folder picker, or environment variables are needed. Opening
+WHOOP runs the import automation; iCloud delivery and WHOOP processing can lag.
+Refresh WHOOP after the Shortcut finishes if the activity has not appeared.
 
 If iCloud Shortcuts sync is off, enable it in iPhone Settings → Apple Account →
 iCloud → See All → Shortcuts.
@@ -73,8 +79,11 @@ iCloud → See All → Shortcuts.
 - **Shortcut v3.1 also logs a step sample spanning the walk window.** If your
   iPhone was on you while you walked, it may have counted steps too. WalkingPad
   steps are an estimate from belt distance and speed (see protocol.md).
-- The bridge sends **no calorie sample** — WHOOP computes calories and Strain
-  from the band's own heart rate and ignores anything we send.
+- The bridge sends **no calorie or heart-rate sample**. WHOOP's current
+  [Health integration documentation](https://support.whoop.com/s/article/Apple-Health-Integration?language=en_US)
+  lists both among supported imports, so do not assume it always ignores
+  third-party values. The Shortcut's step sample is for Apple Health; WHOOP
+  does not document importing that sample into its own daily step total.
 - The Mac app connects automatically and watches the Z1 without starting
   or changing it. A physical-remote Start begins tracking a belt run. Two
   numbers matter and they are not the same:

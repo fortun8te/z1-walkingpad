@@ -61,6 +61,7 @@ final class TreadmillViewModel {
     /// (`HealthWeight`), else the stored or default value.
     var weightKg: Double {
         didSet {
+            guard weightKg != oldValue else { return }
             settingsDefaults.set(weightKg, forKey: Self.weightKey)
             if canCommand { Task { await treadmill.setWeight(weightKg) } }
             recomputeToday()
@@ -71,6 +72,7 @@ final class TreadmillViewModel {
     /// display (best-effort).
     var unitsImperial: Bool {
         didSet {
+            guard unitsImperial != oldValue else { return }
             settingsDefaults.set(unitsImperial, forKey: Self.unitsKey)
             if canCommand { Task { try? await treadmill.setDisplayUnits(imperial: unitsImperial) } }
         }
@@ -79,6 +81,7 @@ final class TreadmillViewModel {
     /// Daily walking target in minutes (0 = no goal).
     var dailyGoalMinutes: Int {
         didSet {
+            guard dailyGoalMinutes != oldValue else { return }
             settingsDefaults.set(dailyGoalMinutes, forKey: Self.goalKey)
             publishLive()
         }
@@ -87,6 +90,7 @@ final class TreadmillViewModel {
     /// Quiet-day nudges, capped by `WalkReminderPolicy`.
     var remindersEnabled: Bool {
         didSet {
+            guard remindersEnabled != oldValue else { return }
             settingsDefaults.set(remindersEnabled, forKey: Self.remindersKey)
             guard !Self.isPreview else { return }
             if remindersEnabled { notifier.requestAuthorizationIfNeeded() }
@@ -117,6 +121,7 @@ final class TreadmillViewModel {
     @ObservationIgnored private var reconnectTask: Task<Void, Never>?
     @ObservationIgnored private var automaticConnectionEnabled = true
     @ObservationIgnored private var healthFinalizeTask: Task<Void, Never>?
+    @ObservationIgnored private var healthFinalizeDeadline: Date?
     /// Armed only while reminders are on, for the next moment one could be due.
     @ObservationIgnored private var reminderTimer: Timer?
     @ObservationIgnored private var stepCounter = StepCounter()
@@ -146,6 +151,9 @@ final class TreadmillViewModel {
     @ObservationIgnored private var activeOperations = 0
     /// Today from the store alone, without the open walk.
     @ObservationIgnored var storedToday = DayTotals(day: Date())
+    /// Rebuilt with history, not with each telemetry frame. Walking should
+    /// cost the same whether the history contains ten sessions or ten thousand.
+    @ObservationIgnored private(set) var savedSessionIDs: Set<String> = []
     @ObservationIgnored private var historySignature = HistorySignature()
     @ObservationIgnored private var lastTrackerSave = Date.distantPast
 
@@ -646,10 +654,16 @@ final class TreadmillViewModel {
     }
 
     func observeWalk() {
+        let previousWalkID = healthTracker.openWalkTotals?.id
+        let previousDeadline = healthTracker.finalizationDeadline
         let observation = healthTracker.observe(status)
         sessionStore.setOpenWalkStartedAt(healthTracker.openWalkTotals?.startedAt)
         sessionStore.setPendingHistoryLogs(healthTracker.hasPendingLogs)
-        persistHealthTracker(throttled: true)
+        // Start, Stop and resume are recovery boundaries. Save them at once;
+        // only progress within the same running/stopped state is throttled.
+        let boundaryChanged = previousWalkID != healthTracker.openWalkTotals?.id
+            || previousDeadline != observation.finalizationDeadline
+        persistHealthTracker(throttled: !boundaryChanged)
         logCompletedWalks(observation.completed)
         scheduleHealthFinalization(deadline: observation.finalizationDeadline)
         recomputeToday()
@@ -668,22 +682,22 @@ final class TreadmillViewModel {
     }
 
     private func scheduleHealthFinalization(deadline: Date? = nil) {
+        let target = healthTracker.hasPendingLogs
+            ? (historyRetryAt ?? Date())
+            : (deadline ?? healthTracker.finalizationDeadline)
+        // Idle telemetry repeats the same stop deadline. Keep its sleeper
+        // rather than allocating and cancelling a task for every packet.
+        if target == healthFinalizeDeadline, healthFinalizeTask != nil { return }
         healthFinalizeTask?.cancel()
-        let target = deadline ?? healthTracker.finalizationDeadline
-        if healthTracker.hasPendingLogs {
-            let delay = max(0, historyRetryAt?.timeIntervalSinceNow ?? 0)
-            healthFinalizeTask = Task { [weak self] in
-                if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
-                guard !Task.isCancelled else { return }
-                self?.finalizeHealthIfDue()
-            }
-            return
-        }
+        healthFinalizeTask = nil
+        healthFinalizeDeadline = target
         guard let target else { return }
         let delay = max(0, target.timeIntervalSinceNow)
         healthFinalizeTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled else { return }
+            self?.healthFinalizeTask = nil
+            self?.healthFinalizeDeadline = nil
             self?.finalizeHealthIfDue()
         }
     }
@@ -816,9 +830,8 @@ final class TreadmillViewModel {
         var loaded = false
     }
 
-    /// Runs on launch, after each recorded walk, on wake and at midnight, and
-    /// every two minutes while connected or a walk is open. Each write is a
-    /// redraw for whoever reads it, so only write what changed.
+    /// Runs on launch, after each recorded walk, on wake and at midnight.
+    /// Each write redraws its readers, so only write what changed.
     func refreshHistory() {
         let calendar = Calendar.current
         let signature = HistorySignature(
@@ -828,6 +841,9 @@ final class TreadmillViewModel {
             loaded: true
         )
         guard signature != historySignature else { return }
+        if signature.sessions != historySignature.sessions {
+            savedSessionIDs = Set(signature.sessions.map(\.id))
+        }
         historySignature = signature
         storedToday = sessionStore.totals()
         historyRevision += 1

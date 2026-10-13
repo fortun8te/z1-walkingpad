@@ -114,19 +114,24 @@ struct SpeedDial: View {
                         }
                     }
                     .onEnded { _ in
-                        guard enabled, dragging else { return }
-                        dragging = false
-                        lastDetent = nil
-                        onEditingChanged(false)
-                        onCommit()
+                        guard dragging else { return }
+                        finishEditing()
+                        if enabled { onCommit() }
                     }
             )
         }
         .frame(height: height + Self.labelHeight)
         .opacity(enabled ? 1 : 0.4)
+        // A disconnect may disable the ruler before the pointer is released.
+        // Always clear editing so telemetry can own the draft again.
+        .onChange(of: enabled) { _, enabled in
+            if !enabled { finishEditing() }
+        }
+        .onDisappear { finishEditing() }
         .accessibilityElement()
         .accessibilityLabel("Speed")
         .accessibilityValue(format(value))
+        .disabled(!enabled)
         .accessibilityAdjustableAction { direction in
             guard enabled else { return }
             switch direction {
@@ -136,6 +141,13 @@ struct SpeedDial: View {
             }
             onCommit()
         }
+    }
+
+    private func finishEditing() {
+        guard dragging else { return }
+        dragging = false
+        lastDetent = nil
+        onEditingChanged(false)
     }
 
     /// One click per stop. `.alignment` is the detent feedback macOS uses for

@@ -30,7 +30,11 @@ final class MainWindow: NSObject, NSWindowDelegate {
     var isVisible: Bool { window?.isVisible ?? false }
 
     /// On screen and not covered: what a person can actually see.
-    var isOnScreen: Bool { window?.occlusionState.contains(.visible) ?? false }
+    var isOnScreen: Bool {
+        guard let window else { return false }
+        return window.isVisible && !window.isMiniaturized && !NSApp.isHidden
+            && window.occlusionState.contains(.visible)
+    }
 
     func show() {
         let window = self.window ?? makeWindow()
@@ -43,6 +47,7 @@ final class MainWindow: NSObject, NSWindowDelegate {
             window.orderFrontRegardless()
             return
         }
+        if window.isMiniaturized { window.deminiaturize(nil) }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate()
     }
@@ -118,7 +123,7 @@ final class MainWindow: NSObject, NSWindowDelegate {
 
     /// Builds the tree again if it was dropped and the window can be seen.
     func resumeRendering() {
-        guard let window, window.isVisible, !window.isMiniaturized,
+        guard let window, window.isVisible, !window.isMiniaturized, !NSApp.isHidden,
               window.contentView is NSVisualEffectView == false else { return }
         install(in: window)
     }

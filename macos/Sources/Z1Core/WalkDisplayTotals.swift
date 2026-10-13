@@ -11,11 +11,17 @@ public enum WalkDisplayTotals {
         calendar: Calendar = .current
     ) -> DayTotals {
         var totals = stored
-        var counted = savedSessionIDs
-        for walk in tracker.pendingCompletedWalks where counted.insert(walk.id).inserted {
+        // Track only this small overlay. Mutating a copy of savedSessionIDs
+        // would copy the entire history set on every live telemetry frame.
+        var counted = Set<String>()
+        for walk in tracker.pendingCompletedWalks
+            where !savedSessionIDs.contains(walk.id) && counted.insert(walk.id).inserted
+        {
             totals.add(session(walk, weightKg: weightKg), calendar: calendar)
         }
-        if let open = tracker.openWalkTotals, counted.insert(open.id).inserted {
+        if let open = tracker.openWalkTotals,
+           !savedSessionIDs.contains(open.id), counted.insert(open.id).inserted
+        {
             let before = totals
             totals.add(session(open, weightKg: weightKg), calendar: calendar)
             // Preserve the existing open-walk rule: a zero-duration frame

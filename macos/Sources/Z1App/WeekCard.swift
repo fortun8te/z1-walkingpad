@@ -70,6 +70,7 @@ struct WeekCard: View {
         .foregroundStyle(enabled ? Theme.dim : Theme.track)
         .disabled(!enabled)
         .help(help)
+        .accessibilityLabel(help)
     }
 
     private func step(_ weeks: Int) {
@@ -133,29 +134,33 @@ private struct WeekBars: View {
                 let progress = min(1, max(0, model.goalProgress(for: day)))
                 let isFocused = calendar.isDate(day.day, inSameDayAs: focused)
                 let isToday = calendar.isDateInToday(day.day)
-                VStack(spacing: 4) {
-                    ZStack(alignment: .bottom) {
-                        RoundedRectangle(cornerRadius: 4, style: .continuous)
-                            .fill(Theme.wash)
-                        if !day.isEmpty {
+                Button {
+                    selectedDay = calendar.startOfDay(for: day.day)
+                } label: {
+                    VStack(spacing: 4) {
+                        ZStack(alignment: .bottom) {
                             RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                .fill(isFocused ? Theme.ink : Theme.barRest)
-                                .frame(height: max(4, barArea * CGFloat(progress)))
+                                .fill(Theme.wash)
+                            if !day.isEmpty {
+                                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                    .fill(isFocused ? Theme.ink : Theme.barRest)
+                                    .frame(height: max(4, barArea * CGFloat(progress)))
+                            }
                         }
+                        .frame(height: barArea)
+                        Text(day.day, format: .dateTime.weekday(.narrow))
+                            .font(.system(size: 9, weight: isToday ? .semibold : .regular))
+                            .foregroundStyle(isFocused ? Theme.ink : Theme.faint)
+                            .frame(height: WeekCard.labelHeight)
                     }
-                    .frame(height: barArea)
-                    Text(day.day, format: .dateTime.weekday(.narrow))
-                        .font(.system(size: 9, weight: isToday ? .semibold : .regular))
-                        .foregroundStyle(isFocused ? Theme.ink : Theme.faint)
-                        .frame(height: WeekCard.labelHeight)
+                    .contentShape(.rect)
                 }
-                .contentShape(.rect)
-                .onTapGesture { selectedDay = calendar.startOfDay(for: day.day) }
+                .buttonStyle(.plain)
                 .help(help(for: day))
                 .accessibilityElement()
                 .accessibilityLabel(day.day.formatted(.dateTime.weekday(.wide).day().month(.wide)))
                 .accessibilityValue(help(for: day))
-                .accessibilityAddTraits(.isButton)
+                .accessibilityAddTraits(isFocused ? .isSelected : [])
             }
         }
     }

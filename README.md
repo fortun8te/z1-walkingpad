@@ -74,6 +74,10 @@ queue.
 Belt distance is the one exact figure. Steps and kilocalories are estimates;
 the window does not show them, `live.json` and the history carry them.
 
+For WHOOP, use the existing iPhone Shortcut and enable WHOOP's Apple Health
+workout import. See [WHOOP setup and alternatives](docs/whoop.md) for the
+supported routes and the phone checks still required.
+
 An idle app does no work: no polling, no animation. What it schedules is
 one-shot and event-driven: the paced reconnect look while there is no pad, the
 deadlines that close a walk (two minutes after Stop, ten for the Health

@@ -215,3 +215,31 @@ def test_server_exposes_exactly_one_read_only_tool():
 
     tools = asyncio.run(server.build_server().list_tools())
     assert [tool.name for tool in tools] == ["z1"]
+
+
+def test_explicit_source_never_falls_back_to_default_history(tmp_path, monkeypatch):
+    default = Path.home() / "Library/Application Support/Z1 WalkingPad"
+    default.mkdir(parents=True)
+    write_sessions(default, [walk("2026-07-13T09:00:00Z", "2026-07-13T09:20:00Z")])
+    monkeypatch.setenv("Z1_SESSIONS_DIR", str(tmp_path / "temporarily-unavailable"))
+    assert server._sessions() == []
+    assert server._live() is None
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan"), "Infinity", "NaN"])
+def test_nonfinite_numbers_do_not_crash_or_escape_as_invalid_json(tmp_path, monkeypatch, value):
+    point_at(tmp_path, monkeypatch)
+    write_sessions(tmp_path, [dict(startedAt="2026-07-13T09:00:00Z", distanceM=value,
+                                 activeDurationS=value, steps=value, caloriesKcal=value)])
+    assert server._row(server._sessions()[0]) == dict(d="2026-07-13", m=0, s=0, steps=0, kcal=0.0)
+    freeze_today(monkeypatch, 2026, 7, 13)
+    assert server._today()["s"] == 0
+    snapshot(tmp_path, monkeypatch, todayMinutes=value, todayKcal=value, caloriesKcal=value)
+    json.dumps(server._live(), allow_nan=False)
+    assert server._today()["s"] == 0
+
+
+def test_invalid_utf8_history_degrades_to_no_data(tmp_path, monkeypatch):
+    point_at(tmp_path, monkeypatch)
+    (tmp_path / "sessions.json").write_bytes(b"\xff\xfe")
+    assert server._sessions() == []

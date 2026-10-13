@@ -69,6 +69,22 @@ public func pendingWalkDisplayTests(_ t: TestRunner) async {
             _ = duplicatePending.finalizeIfDue(at: start.addingTimeInterval(121))
             t.expectEqual(displayed(duplicatePending).activeDurationS, 900, "saved and pending stable ID is counted once")
             t.check(!awaiting(duplicatePending), "saved ID suppresses stale pending-save hint")
+            var savedOpen = RemoteSessionTracker()
+            _ = savedOpen.observe(frame(true), at: start, newSessionID: { walk.id })
+            t.expectEqual(displayed(savedOpen).activeDurationS, 900, "saved ID suppresses an overlapping open walk")
+            var duplicateOverlay = RemoteSessionTracker()
+            _ = duplicateOverlay.observe(frame(true), at: start, newSessionID: { "duplicate-overlay" })
+            _ = duplicateOverlay.observe(frame(false), at: start.addingTimeInterval(1))
+            _ = duplicateOverlay.finalizeIfDue(at: start.addingTimeInterval(121))
+            _ = duplicateOverlay.observe(frame(true, elapsed: 120, distance: 100, steps: 160), at: start.addingTimeInterval(130), newSessionID: { "duplicate-overlay" })
+            t.expectEqual(displayed(duplicateOverlay).activeDurationS, 1800, "pending and open duplicate ID contributes once on top of saved history")
+            let largeSavedIDs = Set((0..<20_000).map { "old-session-\($0)" })
+            let largeHistoryOverlay = WalkDisplayTotals.addingTrackedWalks(
+                to: DayTotals(day: day), savedSessionIDs: largeSavedIDs,
+                tracker: duplicateOverlay, weightKg: 75, calendar: calendar
+            )
+            t.expectEqual(largeHistoryOverlay.activeDurationS, 900, "large saved-ID index preserves overlay deduplication")
+            t.expectEqual(largeSavedIDs.count, 20_000, "overlay leaves caller's saved-ID index unchanged")
             t.check(store.record(walk, weightKg: 75, tracker: &tracker), "repeat retry succeeds")
             t.expectEqual(displayed(tracker), saved, "repeat retry preserves all displayed totals")
             // A pending cross-midnight walk uses the same day allocation as saved history.

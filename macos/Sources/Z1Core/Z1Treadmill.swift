@@ -170,6 +170,10 @@ public actor Z1Treadmill {
         let id: UUID
         let cont: CheckedContinuation<T, Error>
         var timeout: Task<Void, Never>?
+        var write: Task<Void, Never>?
+        var sent = false
+        var intentEpoch: Int?
+        var reservedSlot: ContinuousClock.Instant?
     }
 
     private typealias VendorWaiter = (waiter: Waiter<Frame>, pred: @Sendable (Frame) -> Bool)
@@ -209,12 +213,21 @@ public actor Z1Treadmill {
             let stamp = self.linkEpoch.value
             Task { await self.handleTransportDisconnect(epoch: stamp) }
         }
+        let notifications = transport.notifications
         notifyPump = Task { [weak self] in
-            guard let self else { return }
-            for await (uuidString, data) in self.transport.notifications {
+            for await (uuidString, data) in notifications {
+                guard let self else { return }
                 await self.handleNotification(uuidString, data)
             }
         }
+    }
+
+    deinit {
+        // Do not retain the driver while the stream is waiting for its next
+        // packet; releasing a controller must release its observation tasks.
+        notifyPump?.cancel()
+        startHoldExpiry?.cancel()
+        statusYield.finish()
     }
 
     public func setWeight(_ kg: Double) {
@@ -238,6 +251,7 @@ public actor Z1Treadmill {
     private var ownDisconnectsInFlight = 0
 
     private func ensureCurrent(_ epoch: Int) throws {
+        try Task.checkCancellation()
         guard epoch == linkEpoch.value else { throw CancellationError() }
     }
 
@@ -291,7 +305,10 @@ public actor Z1Treadmill {
             )
             try ensureCurrent(epoch)
 
-            try? await transport.setNotify(Z1Constants.charTreadmillData, enable: true)
+            // A ready controller must be able to observe the belt. A failed
+            // telemetry subscription cannot safely be treated as optional.
+            try await transport.setNotify(Z1Constants.charTreadmillData, enable: true)
+            try ensureCurrent(epoch)
             try? await transport.setNotify(Z1Constants.charFitnessMachineStatus, enable: true)
             try ensureCurrent(epoch)
 
@@ -360,6 +377,7 @@ public actor Z1Treadmill {
             // Cleanup may deliver a disconnect callback; it is ours, so the
             // original failure must stay visible.
             await tearDownTransport()
+            guard epoch == linkEpoch.value else { throw CancellationError() }
             resetConnectionState()
             failAllWaiters(error)
             mutate {
@@ -440,9 +458,10 @@ public actor Z1Treadmill {
     // MARK: - public control API
 
     public func start() async throws {
+        try Task.checkCancellation()
         let epoch = controlCommandEpoch
         try requireReady()
-        try await ensureControl()
+        try await ensureControl(intentEpoch: epoch)
         guard epoch == controlCommandEpoch else { throw CancellationError() }
         // Skip only when the pad itself is already moving. Do not use last
         // reported speed: FTMS packets often omit the speed field, and we
@@ -483,6 +502,15 @@ public actor Z1Treadmill {
     public func stop() async throws {
         controlCommandEpoch += 1
         try requireReady()
+        // Stop retires motion requests as well as their reserved write slots.
+        // Otherwise rapid speed changes can leave Stop waiting behind seconds
+        // of abandoned work, until its own acknowledgement timer expires.
+        for id in cpWaiters.filter({ $0.waiter.intentEpoch != nil }).map({ $0.waiter.id }) {
+            failCPWaiter(id, CancellationError())
+        }
+        for id in vendorWaiters.filter({ $0.waiter.intentEpoch != nil }).map({ $0.waiter.id }) {
+            failVendorWaiter(id, CancellationError())
+        }
         try await ensureControl()
         try await controlCommand(
             Data([Z1Constants.opStopOrPause, Z1Constants.stopParamStop]), tunnelOp: 0x08, tunnelParams: Data([0x01])
@@ -500,7 +528,7 @@ public actor Z1Treadmill {
         guard kmh >= status.minSpeedKmh, kmh <= status.maxSpeedKmh else {
             throw Z1Error.speedOutOfRange(kmh)
         }
-        try await ensureControl()
+        try await ensureControl(intentEpoch: epoch)
         let value = UInt16((kmh * 100).rounded())
         let params = Data([UInt8(value & 0xFF), UInt8(value >> 8)])
         guard epoch == controlCommandEpoch else { throw CancellationError() }
@@ -550,22 +578,22 @@ public actor Z1Treadmill {
         case Z1Constants.charSupplementNotify.uuidString:
             guard let parsed = Z1Protocol.parseFrame(data) else { return }
             let frame = Frame(cmd0: parsed.cmd0, cmd1: parsed.cmd1, data: parsed.data)
-            var matched: [Int] = []
-            for (i, w) in vendorWaiters.enumerated() where w.pred(frame) {
-                matched.append(i)
-            }
-            for i in matched.reversed() {
+            // A reply can acknowledge only a command already sent, and only
+            // one instance of it. Queued writes must not consume stale replies.
+            if let i = vendorWaiters.firstIndex(where: { $0.waiter.sent && $0.pred(frame) }) {
                 let w = vendorWaiters.remove(at: i)
                 w.waiter.timeout?.cancel()
+                w.waiter.write?.cancel()
                 w.waiter.cont.resume(returning: frame)
             }
         case Z1Constants.charControlPoint.uuidString:
             // FTMS response = 0x80, request opcode, result. Late replies to
             // timed-out commands must not complete a different command.
             if data.count >= 3, data[data.startIndex] == 0x80,
-               let i = cpWaiters.firstIndex(where: { $0.opcode == data[data.startIndex + 1] }) {
+               let i = cpWaiters.firstIndex(where: { $0.waiter.sent && $0.opcode == data[data.startIndex + 1] }) {
                 let w = cpWaiters.remove(at: i).waiter
                 w.timeout?.cancel()
+                w.write?.cancel()
                 w.cont.resume(returning: data)
             }
         case Z1Constants.charTreadmillData.uuidString:
@@ -772,38 +800,45 @@ public actor Z1Treadmill {
         timeout: TimeInterval = Z1Constants.vendorResponseTimeout,
         intentEpoch: Int? = nil
     ) async throws -> Frame {
+        try Task.checkCancellation()
         if let intentEpoch, intentEpoch != controlCommandEpoch { throw CancellationError() }
         let id = UUID()
-        return try await withCheckedThrowingContinuation { cont in
-            var waiter = Waiter<Frame>(id: id, cont: cont)
-            waiter.timeout = Task { [weak self] in
-                try? await Task.sleep(for: .seconds(timeout))
-                guard !Task.isCancelled, let self else { return }
-                await self.timeoutVendorWaiter(id)
-            }
-            vendorWaiters.append((waiter, pred))
-            Task {
-                do {
-                    await paceVendor()
-                    if let intentEpoch, intentEpoch != controlCommandEpoch { throw CancellationError() }
-                    try await transport.write(Z1Constants.charSupplementWrite, frame, withResponse: false)
-                } catch {
-                    failVendorWaiter(id, error)
+        let link = linkEpoch.value
+        let reply: Frame = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { cont in
+                var waiter = Waiter<Frame>(id: id, cont: cont, intentEpoch: intentEpoch)
+                waiter.timeout = Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(timeout))
+                    guard !Task.isCancelled, let self else { return }
+                    await self.failVendorWaiter(id, Z1Error.vendorTimeout)
                 }
+                waiter.write = Task {
+                    do {
+                        try await paceVendor(id)
+                        try ensureCurrent(link)
+                        if let intentEpoch, intentEpoch != controlCommandEpoch { throw CancellationError() }
+                        guard let i = vendorWaiters.firstIndex(where: { $0.waiter.id == id }) else { return }
+                        vendorWaiters[i].waiter.sent = true
+                        try await transport.write(Z1Constants.charSupplementWrite, frame, withResponse: false)
+                    } catch {
+                        failVendorWaiter(id, error)
+                    }
+                }
+                vendorWaiters.append((waiter, pred))
             }
+        } onCancel: {
+            Task { await self.failVendorWaiter(id, CancellationError()) }
         }
-    }
-
-    private func timeoutVendorWaiter(_ id: UUID) {
-        guard let i = vendorWaiters.firstIndex(where: { $0.waiter.id == id }) else { return }
-        let w = vendorWaiters.remove(at: i)
-        w.waiter.cont.resume(throwing: Z1Error.vendorTimeout)
+        try ensureCurrent(link)
+        return reply
     }
 
     private func failVendorWaiter(_ id: UUID, _ error: Error) {
         guard let i = vendorWaiters.firstIndex(where: { $0.waiter.id == id }) else { return }
         let w = vendorWaiters.remove(at: i)
+        reclaimVendorSlots()
         w.waiter.timeout?.cancel()
+        w.waiter.write?.cancel()
         w.waiter.cont.resume(throwing: error)
     }
 
@@ -813,24 +848,36 @@ public actor Z1Treadmill {
         try Task.checkCancellation()
         if let intentEpoch, intentEpoch != controlCommandEpoch { throw CancellationError() }
         let id = UUID()
-        let resp = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data, Error>) in
-            var waiter = Waiter<Data>(id: id, cont: cont)
-            waiter.timeout = Task { [weak self] in
-                try? await Task.sleep(for: .seconds(Z1Constants.vendorResponseTimeout))
-                guard !Task.isCancelled, let self else { return }
-                await self.timeoutCPWaiter(id)
-            }
-            cpWaiters.append((cmd[cmd.startIndex], waiter))
-            Task {
-                do {
-                    await paceControl()
-                    if let intentEpoch, intentEpoch != controlCommandEpoch { throw CancellationError() }
-                    try await transport.write(Z1Constants.charControlPoint, cmd, withResponse: true)
-                } catch {
-                    failCPWaiter(id, error)
+        let link = linkEpoch.value
+        let resp = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data, Error>) in
+                var waiter = Waiter<Data>(id: id, cont: cont, intentEpoch: intentEpoch)
+                waiter.timeout = Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(Z1Constants.vendorResponseTimeout))
+                    guard !Task.isCancelled, let self else { return }
+                    await self.failCPWaiter(id, Z1Error.controlPointTimeout)
                 }
+                // The pacing task belongs to this waiter. Timeout, cancellation
+                // and disconnect must retire both, or an abandoned command can
+                // otherwise reach a later connection after its caller failed.
+                waiter.write = Task {
+                    do {
+                        try await paceControl(id)
+                        try ensureCurrent(link)
+                        if let intentEpoch, intentEpoch != controlCommandEpoch { throw CancellationError() }
+                        guard let i = cpWaiters.firstIndex(where: { $0.waiter.id == id }) else { return }
+                        cpWaiters[i].waiter.sent = true
+                        try await transport.write(Z1Constants.charControlPoint, cmd, withResponse: true)
+                    } catch {
+                        failCPWaiter(id, error)
+                    }
+                }
+                cpWaiters.append((cmd[cmd.startIndex], waiter))
             }
+        } onCancel: {
+            Task { await self.failCPWaiter(id, CancellationError()) }
         }
+        try ensureCurrent(link)
         // indication: 80 <request-op> <result> [params...]
         if resp.count >= 3, resp[resp.startIndex] == 0x80 {
             let result = resp[resp.startIndex + 2]
@@ -860,13 +907,16 @@ public actor Z1Treadmill {
     /// Send a control command, retrying once after a transient refusal
     /// (result 4), then falling back to the 0x77 vendor tunnel.
     private func controlCommand(_ cpBytes: Data, tunnelOp: UInt8, tunnelParams: Data = Data(), intentEpoch: Int? = nil) async throws {
+        let link = linkEpoch.value
         do {
             _ = try await cpCommand(cpBytes, intentEpoch: intentEpoch)
         } catch Z1Error.controlRefused(_, 4) {
             try await Task.sleep(for: .seconds(3))
+            try ensureCurrent(link)
             do {
                 _ = try await cpCommand(cpBytes, intentEpoch: intentEpoch)
             } catch Z1Error.controlRefused(_, 4) {
+                try ensureCurrent(link)
                 if let intentEpoch, intentEpoch != controlCommandEpoch { throw CancellationError() }
                 if usesVendor {
                     try await vendorControl(tunnelOp, params: tunnelParams, intentEpoch: intentEpoch)
@@ -877,23 +927,18 @@ public actor Z1Treadmill {
         }
     }
 
-    private func timeoutCPWaiter(_ id: UUID) {
-        guard let i = cpWaiters.firstIndex(where: { $0.waiter.id == id }) else { return }
-        let w = cpWaiters.remove(at: i).waiter
-        w.timeout?.cancel()
-        w.cont.resume(throwing: Z1Error.controlPointTimeout)
-    }
-
     private func failCPWaiter(_ id: UUID, _ error: Error) {
         guard let i = cpWaiters.firstIndex(where: { $0.waiter.id == id }) else { return }
         let w = cpWaiters.remove(at: i).waiter
+        reclaimControlSlots()
         w.timeout?.cancel()
+        w.write?.cancel()
         w.cont.resume(throwing: error)
     }
 
-    private func ensureControl() async throws {
+    private func ensureControl(intentEpoch: Int? = nil) async throws {
         if !hasControl {
-            _ = try await cpCommand(Data([Z1Constants.opRequestControl]))
+            _ = try await cpCommand(Data([Z1Constants.opRequestControl]), intentEpoch: intentEpoch)
             hasControl = true
         }
     }
@@ -901,14 +946,18 @@ public actor Z1Treadmill {
     private func failAllWaiters(_ error: Error) {
         let vendors = vendorWaiters
         vendorWaiters.removeAll()
+        reclaimVendorSlots()
         for w in vendors {
             w.waiter.timeout?.cancel()
+            w.waiter.write?.cancel()
             w.waiter.cont.resume(throwing: error)
         }
         let cps = cpWaiters
         cpWaiters.removeAll()
+        reclaimControlSlots()
         for (_, w) in cps {
             w.timeout?.cancel()
+            w.write?.cancel()
             w.cont.resume(throwing: error)
         }
     }
@@ -932,23 +981,36 @@ public actor Z1Treadmill {
         return max(now, slotEnd.map { $0 + interval } ?? now)
     }
 
-    private static func wait(until instant: ContinuousClock.Instant) async {
-        if instant > ContinuousClock.now { try? await Task.sleep(until: instant, clock: .continuous) }
+    private static func wait(until instant: ContinuousClock.Instant) async throws {
+        try Task.checkCancellation()
+        if instant > ContinuousClock.now { try await Task.sleep(until: instant, clock: .continuous) }
     }
 
-    private func paceVendor() async {
+    private func reclaimVendorSlots() {
+        vendorSlotEnd = (vendorWaiters.compactMap { $0.waiter.reservedSlot } + [lastVendorWrite].compactMap { $0 }).max()
+    }
+
+    private func reclaimControlSlots() {
+        controlSlotEnd = (cpWaiters.compactMap { $0.waiter.reservedSlot } + [lastControlWrite].compactMap { $0 }).max()
+    }
+
+    private func paceVendor(_ id: UUID) async throws {
+        guard let i = vendorWaiters.firstIndex(where: { $0.waiter.id == id }) else { throw CancellationError() }
         let slot = Self.claimSlot(after: vendorSlotEnd, interval: Z1Constants.vendorMinInterval)
         vendorSlotEnd = slot
-        await Self.wait(until: slot)
-        if let previous = lastVendorWrite { await Self.wait(until: previous + Z1Constants.vendorMinInterval) }
+        vendorWaiters[i].waiter.reservedSlot = slot
+        try await Self.wait(until: slot)
+        if let previous = lastVendorWrite { try await Self.wait(until: previous + Z1Constants.vendorMinInterval) }
         lastVendorWrite = ContinuousClock.now
     }
 
-    private func paceControl() async {
+    private func paceControl(_ id: UUID) async throws {
+        guard let i = cpWaiters.firstIndex(where: { $0.waiter.id == id }) else { throw CancellationError() }
         let slot = Self.claimSlot(after: controlSlotEnd, interval: Z1Constants.controlMinInterval)
         controlSlotEnd = slot
-        await Self.wait(until: slot)
-        if let previous = lastControlWrite { await Self.wait(until: previous + Z1Constants.controlMinInterval) }
+        cpWaiters[i].waiter.reservedSlot = slot
+        try await Self.wait(until: slot)
+        if let previous = lastControlWrite { try await Self.wait(until: previous + Z1Constants.controlMinInterval) }
         lastControlWrite = ContinuousClock.now
     }
 }

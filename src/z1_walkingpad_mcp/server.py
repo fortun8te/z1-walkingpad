@@ -15,20 +15,17 @@ from pathlib import Path
 
 def _root() -> Path:
     """Resolve on each read so a running MCP sees a newly created app folder."""
-    paths = []
     if env := os.environ.get("Z1_SESSIONS_DIR"):
-        paths.append(Path(env).expanduser())
-    paths.append(Path.home() / "Library/Application Support/Z1 WalkingPad")
-    return next(
-        (path for path in paths if (path / "sessions.json").is_file() or (path / "live.json").is_file()),
-        paths[0],
-    )
+        # An explicit source stays authoritative while temporarily unavailable;
+        # falling back would silently return another user's/default history.
+        return Path(env).expanduser()
+    return Path.home() / "Library/Application Support/Z1 WalkingPad"
 
 
 def _j(name: str) -> dict | list | None:
     try:
         return json.loads((_root() / name).read_text())
-    except (OSError, json.JSONDecodeError, TypeError):
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError):
         return None
 
 
@@ -41,7 +38,7 @@ def _parse(timestamp) -> datetime | None:
     """An app timestamp as an aware datetime, or None. Naive means local."""
     try:
         return datetime.fromisoformat(timestamp.replace("Z", "+00:00")).astimezone()
-    except (AttributeError, ValueError, TypeError):
+    except (AttributeError, ValueError, TypeError, OverflowError):
         return None
 
 
@@ -58,14 +55,15 @@ def _local_day(timestamp) -> str:
 def _int(value) -> int:
     try:
         return int(value or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 
 def _float(value) -> float:
     try:
-        return float(value or 0)
-    except (TypeError, ValueError):
+        result = float(value or 0)
+        return result if math.isfinite(result) else 0.0
+    except (TypeError, ValueError, OverflowError):
         return 0.0
 
 

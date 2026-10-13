@@ -6,7 +6,7 @@ extension TreadmillViewModel {
     /// Saved IDs win over both tracker states during the save/acknowledge handoff.
     func displayTotals(addingTo stored: DayTotals) -> DayTotals {
         WalkDisplayTotals.addingTrackedWalks(
-            to: stored, savedSessionIDs: Set(sessionStore.sessions.map(\.id)),
+            to: stored, savedSessionIDs: savedSessionIDs,
             tracker: healthTracker, weightKg: weightKg
         )
     }
@@ -14,7 +14,7 @@ extension TreadmillViewModel {
     func hasPendingSave(on day: Date) -> Bool {
         _ = historyRevision
         return WalkDisplayTotals.hasPendingSave(
-            on: day, savedSessionIDs: Set(sessionStore.sessions.map(\.id)), tracker: healthTracker
+            on: day, savedSessionIDs: savedSessionIDs, tracker: healthTracker
         )
     }
 
@@ -54,7 +54,16 @@ extension TreadmillViewModel {
         let end = weekEnd(anchor, calendar: calendar)
         let start = calendar.date(byAdding: .day, value: -6, to: end) ?? end
         _ = historyRevision
-        return sessionStore.days(from: start, through: end, calendar: calendar).map { chartTotals(for: $0.day) }
+        _ = todayCoarse
+        // `days` already aggregated the saved history. Reusing those totals
+        // avoids scanning the whole store again for every bar in the week.
+        return sessionStore.days(from: start, through: end, calendar: calendar).map { stored in
+            if calendar.isDateInToday(stored.day) { return todayCoarse }
+            return WalkDisplayTotals.addingTrackedWalks(
+                to: stored, savedSessionIDs: savedSessionIDs,
+                tracker: healthTracker, weightKg: weightKg, calendar: calendar
+            )
+        }
     }
 
     func weekEnd(_ anchor: Date, calendar: Calendar = .current) -> Date {

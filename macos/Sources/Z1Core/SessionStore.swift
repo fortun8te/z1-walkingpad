@@ -258,8 +258,18 @@ public final class SessionStore: @unchecked Sendable {
             guard let next = calendar.date(byAdding: .day, value: 1, to: cursor) else { break }
             cursor = next
         }
-        for day in Array(byDay.keys) {
-            for session in sessions { byDay[day]?.add(session, calendar: calendar) }
+        let through = calendar.date(byAdding: .day, value: 1, to: to) ?? to
+        for session in sessions {
+            // Visit only the days this walk overlaps. History redraws should
+            // not scan every saved walk once for every day in the range.
+            let end = max(session.endedAt, session.startedAt.addingTimeInterval(1))
+            guard end > from, session.startedAt < through else { continue }
+            var day = max(from, calendar.startOfDay(for: session.startedAt))
+            while day <= to, day < end {
+                byDay[day]?.add(session, calendar: calendar)
+                guard let next = calendar.date(byAdding: .day, value: 1, to: day), next > day else { break }
+                day = next
+            }
         }
         return byDay.values.sorted { $0.day < $1.day }
     }
@@ -361,12 +371,16 @@ public final class SessionStore: @unchecked Sendable {
     @discardableResult
     private func load() -> Bool {
         let primary = decodeWalks(from: url)
+        let existed = FileManager.default.fileExists(atPath: url.path)
+        let primaryIsClean = existed && primary.unreadable == 0 && !primary.wholeFileUnreadable
         var loaded = primary.walks
-        if loaded.isEmpty {
+        // A valid empty array is authoritative too. Restoring an old backup
+        // here would resurrect intentionally removed history on every launch.
+        if loaded.isEmpty, !primaryIsClean {
             let bak = url.deletingLastPathComponent().appendingPathComponent("sessions.json.bak")
             loaded = decodeWalks(from: bak).walks
         }
-        if loaded.isEmpty {
+        if loaded.isEmpty, !primaryIsClean {
             loaded = decodeWalksFromAgentExport(
                 url.deletingLastPathComponent().appendingPathComponent("agent-data.json")
             )
@@ -376,8 +390,9 @@ public final class SessionStore: @unchecked Sendable {
         unreadableFileNeedsRescue = primary.unreadable > 0 || primary.wholeFileUnreadable
         // Loading history must never mutate it: old records were already
         // merged and their original pad counts cannot be reconstructed.
-        let existed = FileManager.default.fileExists(atPath: url.path)
-        return !existed || (primary.unreadable == 0 && !primary.wholeFileUnreadable && !primary.walks.isEmpty)
+        // A missing file is not an explicit empty history. During reload,
+        // keep walks already held in memory until a clean replacement exists.
+        return primaryIsClean
     }
 
     /// One bad entry must not hide the rest of the history. Entries that do
@@ -400,8 +415,15 @@ public final class SessionStore: @unchecked Sendable {
             let walks = entries.compactMap(\.walk)
             return Loaded(walks: walks, unreadable: entries.count - walks.count)
         }
-        let exported = decodeWalksFromAgentExport(file)
-        return Loaded(walks: exported, wholeFileUnreadable: exported.isEmpty)
+        // Some older builds stored the export envelope at the history path.
+        // Preserve its unreadable-entry count just as for a plain walk list,
+        // otherwise the next save silently discards records it cannot decode.
+        struct Envelope: Decodable { var sessions: [Lossy] }
+        if let envelope = try? decoder.decode(Envelope.self, from: data) {
+            let walks = envelope.sessions.compactMap(\.walk)
+            return Loaded(walks: walks, unreadable: envelope.sessions.count - walks.count)
+        }
+        return Loaded(wholeFileUnreadable: true)
     }
 
     private func decodeWalksFromAgentExport(_ file: URL) -> [WalkSession] {
@@ -453,7 +475,7 @@ public final class SessionStore: @unchecked Sendable {
                 let stamp = ISO8601DateFormatter().string(from: Date())
                     .replacingOccurrences(of: ":", with: "")
                 let rescue = url.deletingLastPathComponent()
-                    .appendingPathComponent("sessions.unreadable-\(stamp).json")
+                    .appendingPathComponent("sessions.unreadable-\(stamp)-\(UUID().uuidString).json")
                 try FileManager.default.copyItem(at: url, to: rescue)
                 unreadableFileNeedsRescue = false
             }

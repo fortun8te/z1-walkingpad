@@ -110,7 +110,7 @@ public final class HealthQueue {
             guard let first = group.first, let last = group.last,
                   now.timeIntervalSince(last.endedAt) >= SessionStore.mergeGap,
                   !group.contains(where: \.exportedToHealth),
-                  !knownIDs.contains(first.id) else { continue }
+                  !group.contains(where: { knownIDs.contains($0.id) }) else { continue }
             // A resumed belt run may still be active and therefore absent
             // from history. Wait rather than publish a partial grouped walk.
             if let openWalkStartedAt,
@@ -129,7 +129,7 @@ public final class HealthQueue {
                 caloriesKcal: group.reduce(0) { $0 + $1.caloriesKcal },
                 exportedToHealth: false
             )
-            guard let workout = Self.workout(for: combined) else { continue }
+            guard var workout = Self.workout(for: combined) else { continue }
             if batchAlreadyPublished {
                 hasDeferredWork = true
                 continue
@@ -141,9 +141,16 @@ public final class HealthQueue {
                 // a second time after the phone consumes it).
                 try writeReceipts(receipts)
             }
+            // Retain every source ID, not only the group's first segment.
+            // Otherwise a repaired/deleted first segment changes the group ID
+            // and can export the remaining, already queued distance again.
+            // This additive metadata also repairs receipts after a crash;
+            // existing Shortcut readers still use the unchanged workout keys.
+            let sourceIDs = group.map(\.id)
+            workout["source_session_ids"] = sourceIDs
             envelope.workouts.append(workout)
-            knownIDs.insert(first.id)
-            receipts.insert(first.id)
+            knownIDs.formUnion(sourceIDs)
+            receipts.formUnion(sourceIDs)
             added += 1
         }
         if added > 0 {
@@ -216,7 +223,10 @@ public final class HealthQueue {
     }
 
     private static func ids(in workouts: [[String: Any]]) -> Set<String> {
-        Set(workouts.compactMap { $0["session_id"] as? String })
+        Set(workouts.flatMap { workout -> [String] in
+            let primary = (workout["session_id"] as? String).map { [$0] } ?? []
+            return primary + (workout["source_session_ids"] as? [String] ?? [])
+        })
     }
 
     private static func workout(for session: WalkSession) -> [String: Any]? {
