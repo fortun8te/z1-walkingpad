@@ -168,7 +168,11 @@ private struct WeekBars: View {
                 .accessibilityElement()
                 .accessibilityLabel(day.day.formatted(.dateTime.weekday(.wide).day().month(.wide)))
                 .accessibilityValue(help(for: day))
-                .accessibilityAddTraits(isFocused ? .isSelected : [])
+                // `.accessibilityElement()` replaces the Button's own element, which
+                // also drops its press action: VoiceOver could hear a day but not
+                // select it. Say it is a button and give it the action explicitly.
+                .accessibilityAddTraits(isFocused ? [.isButton, .isSelected] : .isButton)
+                .accessibilityAction { selectedDay = calendar.startOfDay(for: day.day) }
             }
         }
     }
