@@ -692,6 +692,7 @@ public func runAllZ1CoreTests() async -> Int32 {
     auditCalendarTests(runner)
     appSupportTests(runner)
     await reconnectPolicyTests(runner)
+    await rememberedPadTests(runner)
     if runner.failures == 0 {
         print("PASS: \(runner.checks) checks, 0 failures")
         return 0

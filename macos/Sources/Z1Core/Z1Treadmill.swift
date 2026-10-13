@@ -266,10 +266,14 @@ public actor Z1Treadmill {
             do {
                 try await transport.connect(timeout: Z1Constants.connectTimeout)
             } catch {
-                // A remembered peripheral that will not answer is stale (pad
-                // re-paired, or a different Mac wrote the identifier) — forget
-                // it so the next attempt falls back to a scan.
-                if adopted, epoch == linkEpoch.value { forgetPeripheral() }
+                // A remembered peripheral that refuses is stale (pad re-paired,
+                // or a different Mac wrote the identifier): forget it so the
+                // next attempt scans. A plain timeout only means the pad is not
+                // there right now (off, or out of range); the identifier is
+                // still right, and keeping it spares the next try a full scan.
+                if adopted, epoch == linkEpoch.value, (error as? BLETransportError) != .timeout {
+                    forgetPeripheral()
+                }
                 throw error
             }
             try ensureCurrent(epoch)

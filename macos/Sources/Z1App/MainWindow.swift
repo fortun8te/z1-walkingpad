@@ -6,14 +6,21 @@ import SwiftUI
 /// a blur, with `Theme.ground` tinting it so dark mode stays deep.
 ///
 /// Closing it only hides it; the app keeps running (and keeps recording a
-/// walk) until Quit. While it is closed the SwiftUI tree is gone, so nothing
-/// observes the model and nothing renders. Reopening builds a fresh tree,
-/// which is also why every reopen lands History on today.
+/// walk) until Quit. While nobody can see it (closed, minimized, the app
+/// hidden, or covered by other windows for half a minute) the SwiftUI tree is
+/// gone, so nothing observes the model and nothing renders. Showing it again
+/// builds a fresh tree, which is also why every reopen lands History on today.
 @MainActor
 final class MainWindow: NSObject, NSWindowDelegate {
     private let model: TreadmillViewModel
     private let navigation: Navigation
     private(set) var window: NSWindow?
+    private var occlusionTask: Task<Void, Never>?
+
+    /// How long a window stays covered before its tree is dropped. Rebuilding
+    /// resets view-local state (the History day), so a glance at another app
+    /// must not cost it.
+    private static let coveredGrace: Duration = .seconds(30)
 
     init(model: TreadmillViewModel, navigation: Navigation) {
         self.model = model
@@ -21,6 +28,9 @@ final class MainWindow: NSObject, NSWindowDelegate {
     }
 
     var isVisible: Bool { window?.isVisible ?? false }
+
+    /// On screen and not covered: what a person can actually see.
+    var isOnScreen: Bool { window?.occlusionState.contains(.visible) ?? false }
 
     func show() {
         let window = self.window ?? makeWindow()
@@ -97,10 +107,52 @@ final class MainWindow: NSObject, NSWindowDelegate {
         window.contentView = backdrop
     }
 
+    // MARK: rendering on and off
+
+    /// Drops the SwiftUI tree: a window nobody sees should cost nothing.
+    func suspendRendering() {
+        occlusionTask?.cancel()
+        occlusionTask = nil
+        window?.contentView = NSView()
+    }
+
+    /// Builds the tree again if it was dropped and the window can be seen.
+    func resumeRendering() {
+        guard let window, window.isVisible, !window.isMiniaturized,
+              window.contentView is NSVisualEffectView == false else { return }
+        install(in: window)
+    }
+
     // MARK: NSWindowDelegate
 
     func windowWillClose(_ notification: Notification) {
-        // Drop the SwiftUI tree: a closed window should cost nothing.
-        window?.contentView = NSView()
+        suspendRendering()
+    }
+
+    func windowDidMiniaturize(_ notification: Notification) {
+        suspendRendering()
+    }
+
+    func windowDidDeminiaturize(_ notification: Notification) {
+        resumeRendering()
+        model.hurryReconnect()
+    }
+
+    /// Covered or uncovered. Covered drops the tree after a grace period;
+    /// uncovered cancels that and brings the tree back.
+    func windowDidChangeOcclusionState(_ notification: Notification) {
+        if isOnScreen {
+            occlusionTask?.cancel()
+            occlusionTask = nil
+            resumeRendering()
+            model.hurryReconnect()
+        } else {
+            occlusionTask?.cancel()
+            occlusionTask = Task { [weak self] in
+                try? await Task.sleep(for: Self.coveredGrace, tolerance: .seconds(5))
+                guard !Task.isCancelled, let self, !self.isOnScreen else { return }
+                self.suspendRendering()
+            }
+        }
     }
 }

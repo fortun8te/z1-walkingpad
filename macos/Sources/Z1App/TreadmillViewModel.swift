@@ -132,8 +132,9 @@ final class TreadmillViewModel {
     @ObservationIgnored private var reconnectGeneration = 0
     /// How hard to scan while there is no pad: see `ReconnectPolicy`.
     @ObservationIgnored private var reconnectPolicy = ReconnectPolicy()
-    /// Whether the app's window is on screen. Set by the window's owner.
-    @ObservationIgnored var windowIsVisible: () -> Bool = { false }
+    /// Whether the app's window can be seen: on screen and not covered. Set by
+    /// the window's owner.
+    @ObservationIgnored var windowIsOnScreen: () -> Bool = { false }
     /// Coalesced speed target for rapid − / + taps, so `busy` drops none.
     /// Observed: until telemetry reaches it, it is what the readout shows, so
     /// a tap reads at once instead of after the belt has ramped.
@@ -877,13 +878,22 @@ final class TreadmillViewModel {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            // Waking is the best moment to retry: the pad is usually right
-            // there and the backoff would otherwise idle for 30 s.
+            Task { @MainActor in
+                self?.refreshHistory()
+                self?.armReminderTimer()
+            }
+        }
+        // A person at the Mac is the moment to retry: the pad is usually right
+        // there. The screens waking tells that apart from a dark wake (Power
+        // Nap and maintenance), which must not start a five-minute fast scan.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.screensDidWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
             Task { @MainActor in
                 self?.reconnectPolicy.lastWake = Date()
-                self?.refreshHistory()
                 self?.applyHealthWeightIfAvailable()
-                self?.armReminderTimer()
                 self?.scheduleReconnect(after: 1, force: true)
             }
         }
@@ -908,12 +918,12 @@ final class TreadmillViewModel {
     }
 
     private var reconnectPace: ReconnectPolicy.Pace {
-        reconnectPolicy.pace(at: Date(), watched: NSApp.isActive || windowIsVisible())
+        reconnectPolicy.pace(at: Date(), watched: NSApp.isActive || windowIsOnScreen())
     }
 
     /// The app has come forward: anyone looking at it is waiting for the pad,
     /// so a slow wait in progress gives way to a fast look now.
-    private func hurryReconnect() {
+    func hurryReconnect() {
         guard automaticConnectionEnabled, !isConnected, !isConnecting, !busy else { return }
         scheduleReconnect(after: 0.5, force: true)
     }
@@ -948,7 +958,7 @@ final class TreadmillViewModel {
                 }
                 attempt += 1
                 let pause = ReconnectPolicy.pause(afterAttempt: attempt, pace: self.reconnectPace)
-                try? await Task.sleep(for: .seconds(pause))
+                try? await Task.sleep(for: .seconds(pause), tolerance: .seconds(pause * 0.2))
             }
         }
     }

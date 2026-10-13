@@ -13,7 +13,9 @@ only in the native app; the Python side in `src/` is a read-only stats server.
 
 One fixed 320 × 414 window with a Dock icon and a normal menu bar. Closing the
 window keeps the app running (the walk keeps being recorded and ⌃⌥W keeps
-working); the Dock icon or ⌘0 brings it back. Three pages swap inside it
+working); the Dock icon or ⌘0 brings it back. A window nobody can see
+(closed, minimized, the app hidden, or covered for half a minute) stops
+rendering altogether. Three pages swap inside it
 (⌘1 to ⌘3) and nothing resizes or animates.
 
 - **Now**: the pad's state beside the traffic lights, a dot-matrix speed

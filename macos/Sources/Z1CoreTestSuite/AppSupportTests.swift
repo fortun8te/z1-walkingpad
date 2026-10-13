@@ -92,3 +92,32 @@ public func reconnectPolicyTests(_ t: TestRunner) async {
         t.expectEqual(pad.scanTimeouts, [10, Z1Constants.scanTimeout], "the caller's scan length is used, the default is the full scan")
     }
 }
+
+/// A remembered pad survives a connect that merely timed out.
+public func rememberedPadTests(_ t: TestRunner) async {
+    await t.suite("remembered-pad") { t in
+        let key = "z1.knownPeripheralID"
+        let id = UUID().uuidString
+        for (error, kept, label) in [
+            (BLETransportError.timeout as Error, true, "a timeout keeps the remembered pad"),
+            (BLETransportError.notConnected as Error, false, "any other failure forgets it"),
+        ] {
+            let pad = ScriptedPad()
+            pad.adoptedName = "KS-HD-Z1D"
+            pad.connectError = error
+            // The driver gets its own handle; the test reads the same domain.
+            let suite = "z1tests.\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defaults.removePersistentDomain(forName: suite)
+            defaults.set(id, forKey: key)
+            let driver = Z1Treadmill(transport: pad, defaults: UserDefaults(suiteName: suite)!)
+            do {
+                try await driver.connect()
+                t.check(false, "\(label): the connect should fail")
+            } catch {}
+            t.expectEqual(defaults.string(forKey: key) == id, kept, label)
+            t.expectEqual(pad.scanTimeouts.count, 0, "\(label): the remembered pad was used, no scan")
+            defaults.removePersistentDomain(forName: suite)
+        }
+    }
+}

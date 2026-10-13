@@ -139,7 +139,9 @@ final class ScriptedPad: Z1PadTransport, @unchecked Sendable {
     // MARK: Z1PadTransport
 
     func waitPoweredOn() async throws {}
-    func adoptKnownPeripheral(identifier: UUID, namePrefix: String) -> String? { nil }
+    /// The name to answer a remembered-peripheral lookup with; nil = not known.
+    var adoptedName: String?
+    func adoptKnownPeripheral(identifier: UUID, namePrefix: String) -> String? { adoptedName }
 
     /// The timeout each scan was asked for.
     var scanTimeouts: [TimeInterval] { lock.withLock { scanTimeoutsSeen } }

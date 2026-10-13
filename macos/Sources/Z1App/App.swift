@@ -40,7 +40,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     func applicationDidFinishLaunching(_ notification: Notification) {
         model = TreadmillViewModel()
         mainWindow = MainWindow(model: model, navigation: navigation)
-        model.windowIsVisible = { [weak self] in self?.mainWindow.isVisible ?? false }
+        model.windowIsOnScreen = { [weak self] in self?.mainWindow.isOnScreen ?? false }
+        // Hiding the app (⌘H) leaves the window "visible" but unseen.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didHideNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.mainWindow.suspendRendering() }
+        }
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didUnhideNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.mainWindow.resumeRendering() }
+        }
         mainWindow.show()
         if TreadmillViewModel.isPreview, let window = mainWindow.window {
             print("Z1_PREVIEW_WINDOW \(window.windowNumber)")
