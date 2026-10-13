@@ -46,7 +46,7 @@ public func auditMatchAndTimerTests(_ t: TestRunner) async {
         // A newer operation under the same key replaces the older timer: the
         // old deadline must not fire against the new operation.
         timeouts.schedule(after: 0.05, key: "write:2AD9") { log.add("old-write") }
-        timeouts.schedule(after: 0.30, key: "write:2AD9") { log.add("new-write") }
+        timeouts.schedule(after: 1.5, key: "write:2AD9") { log.add("new-write") }
 
         // Unrelated keys are independent.
         timeouts.schedule(after: 0.05, key: "read:2AD4") { log.add("read") }
@@ -54,11 +54,13 @@ public func auditMatchAndTimerTests(_ t: TestRunner) async {
         timeouts.schedule(after: 0.05, key: "power:2") { log.add("power-2") }
         timeouts.cancel(keysWithPrefix: "power:")
 
-        try? await Task.sleep(for: .milliseconds(150))
-        t.expectEqual(log.entries.sorted(), ["read"], "only the live timer fired by 150 ms")
+        // Poll (slow CI machines) until the short timers have fired, well before 1.5 s.
+        for _ in 0..<40 where !log.entries.contains("read") { try? await Task.sleep(for: .milliseconds(25)) }
+        try? await Task.sleep(for: .milliseconds(100))
+        t.expectEqual(log.entries.sorted(), ["read"], "only the live timer fired before the newer deadline")
         t.expectEqual(timeouts.pendingKeys, ["write:2AD9"], "one timer left pending")
 
-        try? await Task.sleep(for: .milliseconds(300))
+        for _ in 0..<120 where !log.entries.contains("new-write") { try? await Task.sleep(for: .milliseconds(25)) }
         t.expectEqual(log.entries.sorted(), ["new-write", "read"], "the newer timer fired once, the older never")
         t.expectEqual(timeouts.pendingKeys, [], "a fired timer retires its key")
 
