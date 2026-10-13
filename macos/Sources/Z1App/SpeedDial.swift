@@ -19,6 +19,8 @@ struct SpeedDial: View {
     var format: (Double) -> String
     var onEditingChanged: (Bool) -> Void
     var onCommit: () -> Void
+    /// Spoken after the value, so VoiceOver says "3,4 km/h" and not "3,4".
+    var unit: String = ""
 
     /// Height of the tick area; the numerals sit under it.
     var height: CGFloat = 36
@@ -134,7 +136,7 @@ struct SpeedDial: View {
         .onDisappear { finishEditing() }
         .accessibilityElement()
         .accessibilityLabel("Speed")
-        .accessibilityValue(format(value))
+        .accessibilityValue(unit.isEmpty ? format(value) : "\(format(value)) \(unit)")
         .disabled(!enabled)
         .accessibilityAdjustableAction { direction in
             guard enabled else { return }

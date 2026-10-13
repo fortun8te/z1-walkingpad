@@ -107,6 +107,9 @@ struct SettingsPage: View {
                             FieldPlate(width: 52) {
                                 TextField("Daily goal", value: $model.dailyGoalMinutes, format: .number)
                                     .labelsHidden()
+                                    // The visible title is a sibling, not a label; say what
+                                    // the number is and its unit.
+                                    .accessibilityLabel("Daily goal in minutes")
                             }
                             Text("min")
                                 .font(Theme.caption)

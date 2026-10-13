@@ -198,12 +198,12 @@ struct NowPage: View {
     @State private var isTypingSpeed = false
     @State private var typedSpeed = ""
     @FocusState private var speedFieldFocused: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(spacing: Theme.inner) {
             hero
             primary
-            LiveSlot(model: model)
             TodayCard(model: model)
         }
         .background { ArrowKeys(model: model).disabled(isTypingSpeed || !nudgeEnabled) }
@@ -232,8 +232,11 @@ struct NowPage: View {
 
     // MARK: hero
 
+    /// The signature card: speed, then this walk's time and distance (or the
+    /// one line about the connection) on the bloom. Light on dark whatever
+    /// the system appearance.
     private var hero: some View {
-        Card(padding: 14) {
+        SignatureCard(motionTier: running ? max(1, Int(model.live.speedKmh.rounded())) : 0) {
             VStack(spacing: 14) {
                 speedReadout
                     .frame(maxWidth: .infinity)
@@ -256,6 +259,7 @@ struct NowPage: View {
                         format: model.formatSpeed,
                         onEditingChanged: { isPickingSpeed = $0 },
                         onCommit: commitSpeedDraft,
+                        unit: model.speedUnitLabel,
                         height: 40
                     )
                     IconButton(
@@ -268,6 +272,8 @@ struct NowPage: View {
                     )
                     .accessibilityLabel("Faster")
                 }
+                LiveSlot(model: model)
+                    .padding(.top, -4)
             }
         }
     }
@@ -337,6 +343,13 @@ struct NowPage: View {
                 Rectangle().fill(Theme.ink).frame(height: 1.5).offset(y: 6)
             }
         }
+        // A small pop when the number changes, so a nudge is felt as well as
+        // seen. Costs nothing at rest.
+        .phaseAnimator(reduceMotion ? [1.0] : [1.0, 1.04, 1.0], trigger: model.formatSpeed(readoutValue)) { content, scale in
+            content.scaleEffect(scale)
+        } animation: { scale in
+            scale > 1 ? .easeOut(duration: 0.08) : .spring(response: 0.22, dampingFraction: 0.7)
+        }
         .contentShape(.rect)
         .onTapGesture(perform: beginSpeedEntry)
         .help("Click and type a speed: 3 then 5 is \(model.formatSpeed(3.5)). Return sets it, Esc cancels.")
@@ -384,7 +397,7 @@ struct NowPage: View {
     /// One button, one verb. Disconnected it connects; connected it starts
     /// and stops. Space presses it.
     private var primary: some View {
-        PrimaryButton(title: primaryTitle, height: 44, action: primaryAction)
+        GlossPrimaryButton(title: primaryTitle, height: 44, action: primaryAction)
             .keyboardShortcut(isTypingSpeed ? nil : KeyboardShortcut(.space, modifiers: []))
             .disabled(model.isConnecting || model.pendingVerb == "Stopping…"
                       || (model.busy && !running && !model.live.stopRequested && model.pendingVerb != "Starting…"))
@@ -493,7 +506,7 @@ private struct TodayCard: View {
 
 // MARK: - Live slot
 
-/// Always 36 pt, whatever it holds, so nothing below it ever moves. While the
+/// The foot of the signature card. Always 36 pt, whatever it holds, so nothing below it ever moves. While the
 /// belt moves it holds this walk's time and distance, each in its own view so
 /// only the one that changed redraws. A failed command takes it over.
 /// Otherwise one quiet line about the connection.
@@ -528,9 +541,9 @@ private struct LiveCell: View {
         let live = model.live
         switch kind {
         case .elapsed:
-            StatCell(value: model.formatElapsed(live.elapsedS), label: "Time")
+            StatCell(value: model.formatElapsed(live.elapsedS), label: "Time", labelColor: Theme.dim)
         case .distance:
-            StatCell(value: model.formatDistance(live.distanceM), label: "Distance", alignment: .trailing)
+            StatCell(value: model.formatDistance(live.distanceM), label: "Distance", alignment: .trailing, labelColor: Theme.dim)
         }
     }
 }
