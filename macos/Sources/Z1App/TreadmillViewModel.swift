@@ -111,6 +111,17 @@ final class TreadmillViewModel {
         }
     }
 
+    /// Which days, hours and how many a day. Changing it re-arms the timer so
+    /// the next look matches the new schedule at once.
+    var reminderSchedule: WalkReminderSchedule {
+        didSet {
+            guard reminderSchedule != oldValue else { return }
+            reminderSchedule.save(to: settingsDefaults)
+            guard !Self.isPreview, remindersEnabled else { return }
+            armReminderTimer()
+        }
+    }
+
     var launchAtLogin: Bool {
         didSet {
             guard !Self.isPreview, !updatingLoginItemState,
@@ -203,6 +214,7 @@ final class TreadmillViewModel {
         unitsImperial = defaults.object(forKey: Self.unitsKey) as? Bool ?? false
         dailyGoalMinutes = min(1_440, max(0, defaults.object(forKey: Self.goalKey) as? Int ?? 120))
         remindersEnabled = defaults.object(forKey: Self.remindersKey) as? Bool ?? true
+        reminderSchedule = WalkReminderSchedule(defaults: defaults)
         let loginState = Self.isPreview ? LoginItem.State.disabled : LoginItem.state
         launchAtLogin = loginState.isRegistered
         loginItemMessage = loginState.message
@@ -841,7 +853,8 @@ final class TreadmillViewModel {
         reminderTimer = nil
         guard remindersEnabled, notifier.authorized, !Self.isPreview, !isShuttingDown else { return }
         let when = WalkReminderPolicy.nextCheck(
-            after: Date(), lastWalkEnd: sessionStore.sessions.last?.endedAt, reminders: reminderLog
+            after: Date(), lastWalkEnd: sessionStore.sessions.last?.endedAt, reminders: reminderLog,
+            schedule: reminderSchedule
         )
         let timer = Timer(fire: when, interval: 0, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated { self?.scheduleReminderDelivery() }
@@ -880,7 +893,8 @@ final class TreadmillViewModel {
               !status.beltRunning, healthTracker.openWalkTotals == nil else { return }
         var log = reminderLog
         guard WalkReminderPolicy.isDue(
-            now: now, lastWalkEnd: sessionStore.sessions.last?.endedAt, reminders: log
+            now: now, lastWalkEnd: sessionStore.sessions.last?.endedAt, reminders: log,
+            schedule: reminderSchedule
         ) else { return }
 
         let lines = [

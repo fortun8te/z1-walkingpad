@@ -125,9 +125,29 @@ struct SettingsPage: View {
                     divider
                     cell {
                         Toggle(isOn: $model.remindersEnabled) {
-                            label("Remind me on quiet days", "Weekdays 9 to 6, at most twice a day")
+                            label("Remind me on quiet days", model.reminderSchedule.summary)
                         }
                         .toggleStyle(PillToggleStyle())
+                    }
+                    if model.remindersEnabled {
+                        divider
+                        cell { reminderDays }
+                        divider
+                        cell { reminderHours }
+                        divider
+                        cell {
+                            SettingRow(title: "At most") {
+                                ChipPicker(
+                                    options: [(1, "1"), (2, "2"), (3, "3")],
+                                    selection: $model.reminderSchedule.perDay, compact: true
+                                )
+                                .accessibilityElement(children: .contain)
+                                .accessibilityLabel("Reminders per day")
+                                Text("a day")
+                                    .font(Theme.caption)
+                                    .foregroundStyle(Theme.dim)
+                            }
+                        }
                     }
                     divider
                     cell {
@@ -138,6 +158,77 @@ struct SettingsPage: View {
             }
         }
     }
+
+    /// Seven toggle chips, Monday first. The last chosen day cannot be switched
+    /// off: a reminder schedule with no days would be silently dead.
+    private var reminderDays: some View {
+        let days: [(day: Int, letter: String, name: String)] = [
+            (2, "M", "Monday"), (3, "T", "Tuesday"), (4, "W", "Wednesday"), (5, "T", "Thursday"),
+            (6, "F", "Friday"), (7, "S", "Saturday"), (1, "S", "Sunday"),
+        ]
+        return SettingRow(title: "On") {
+            HStack(spacing: 2) {
+                ForEach(days, id: \.day) { entry in
+                    let chosen = model.reminderSchedule.days.contains(entry.day)
+                    Button {
+                        var next = model.reminderSchedule.days
+                        if chosen { if next.count > 1 { next.remove(entry.day) } } else { next.insert(entry.day) }
+                        model.reminderSchedule.days = next
+                    } label: {
+                        Text(entry.letter)
+                            .font(Theme.captionMedium)
+                            .foregroundStyle(chosen ? Theme.ink : Theme.dim)
+                            .frame(width: 22, height: 22)
+                            .background {
+                                if chosen { Capsule().fill(Theme.selection) }
+                            }
+                            .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(entry.name)
+                    .accessibilityAddTraits(chosen ? .isSelected : [])
+                }
+            }
+        }
+    }
+
+    private var reminderHours: some View {
+        SettingRow(title: "Between") {
+            Picker("From", selection: fromHour) {
+                ForEach(0..<24, id: \.self) { Text(Self.hourName($0)).tag($0) }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .fixedSize()
+            .accessibilityLabel("Remind from")
+            Text("to")
+                .font(Theme.caption)
+                .foregroundStyle(Theme.dim)
+            Picker("Until", selection: $model.reminderSchedule.untilHour) {
+                ForEach(1...24, id: \.self) { Text(Self.hourName($0 % 24)).tag($0) }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .fixedSize()
+            .accessibilityLabel("Remind until")
+        }
+    }
+
+    /// Moving From through Until would leave an empty window; the schedule's
+    /// initialiser nudges Until an hour past From, and this goes through it.
+    private var fromHour: Binding<Int> {
+        Binding(
+            get: { model.reminderSchedule.fromHour },
+            set: { hour in
+                let current = model.reminderSchedule
+                model.reminderSchedule = WalkReminderSchedule(
+                    days: current.days, fromHour: hour, untilHour: current.untilHour, perDay: current.perDay
+                )
+            }
+        )
+    }
+
+    private static func hourName(_ hour: Int) -> String { String(format: "%d:00", hour) }
 
     private var divider: some View {
         RowDivider().padding(.leading, Theme.inner)
