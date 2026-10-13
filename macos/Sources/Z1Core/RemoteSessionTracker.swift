@@ -84,6 +84,9 @@ public struct RemoteSessionTracker: Codable, Sendable {
         var stoppedAt: Date?
         /// Persisted recovery timestamp; older records decode this as nil.
         var lastObservedAt: Date?
+        /// Steps from earlier counter runs, minus any idle baseline. Optional
+        /// so saved state from older builds still decodes without migration.
+        var modelledStepOffset: Int?
     }
 
     private var session: Session?
@@ -154,64 +157,64 @@ public struct RemoteSessionTracker: Codable, Sendable {
             )
         }
 
-        let counters = Counters(status)
+        var counters = Counters(status)
         // Speed still on the belt means the walk is not over, even if FTMS
         // dropped `beltRunning` for a packet. Disconnect is handled separately.
         let running = status.speedKmh > 0.3 || status.beltRunning
         if var current = session {
-            let includeDeltas = current.wasRunning || running
+            // Stop packets can clear registers before a final counter packet
+            // arrives. Retain the stopped run's high-water counters so that
+            // a later stale snapshot cannot credit the same walk twice.
+            if !running, counters.elapsedS < current.lastCounters.elapsedS
+                || counters.distanceM < current.lastCounters.distanceM {
+                counters.elapsedS = max(counters.elapsedS, current.lastCounters.elapsedS)
+                counters.distanceM = max(counters.distanceM, current.lastCounters.distanceM)
+                counters.steps = max(counters.steps, current.lastCounters.steps)
+                if let prior = current.lastCounters.padSteps, let latest = counters.padSteps {
+                    counters.padSteps = max(prior, latest)
+                }
+            }
             // A pad session reset drops elapsed (Stop + Start). A 1–3 step
             // dip is the UI interpolator snapping back to the packet total —
             // treating that as a reset added the whole counter onto Today.
             let padReset = running && counters.elapsedS < current.lastCounters.elapsedS
-            if includeDeltas {
-                current.activeDurationS += Self.counterDelta(
-                    previous: current.lastCounters.elapsedS,
-                    current: counters.elapsedS,
-                    allowReset: padReset
-                )
-                current.distanceM += Self.counterDelta(
-                    previous: current.lastCounters.distanceM,
-                    current: counters.distanceM,
-                    allowReset: padReset
-                )
-                current.steps += Self.counterDelta(
-                    previous: current.lastCounters.steps,
-                    current: counters.steps,
-                    allowReset: padReset
-                )
-                if let prior = current.lastCounters.padSteps,
-                   let latest = counters.padSteps,
-                   let accumulated = current.rawPadSteps
-                {
+            let elapsedDelta = Self.counterDelta(
+                previous: current.lastCounters.elapsedS,
+                current: counters.elapsedS,
+                allowReset: padReset
+            )
+            current.activeDurationS += elapsedDelta
+            current.distanceM += padReset ? counters.distanceM : Self.counterDelta(
+                previous: current.lastCounters.distanceM,
+                current: counters.distanceM,
+                allowReset: padReset
+            )
+            // Track the offset explicitly. Inferring a continuous run
+            // from nearby distance totals loses steps after short runs,
+            // and accumulating only positive deltas inflates estimates
+            // when a speed change recalculates the current run's stride.
+            let stepOffset = padReset ? current.steps : (current.modelledStepOffset
+                ?? current.steps - current.lastCounters.steps)
+            current.modelledStepOffset = stepOffset
+            current.steps = max(0, stepOffset + counters.steps)
+            if let prior = current.lastCounters.padSteps,
+               let latest = counters.padSteps,
+               let accumulated = current.rawPadSteps
+            {
+                // The raw register sometimes survives a belt restart. If it
+                // did not fall with elapsed, we cannot establish which run
+                // it belongs to; use the model rather than double-count it.
+                if padReset, latest >= prior {
+                    current.rawPadSteps = nil
+                } else {
                     current.rawPadSteps = accumulated + Self.counterDelta(
                         previous: prior,
                         current: latest,
                         allowReset: padReset
                     )
-                } else {
-                    current.rawPadSteps = nil
                 }
-                // Interpolator can sit 1–3 steps ahead of the packet. When
-                // the display snaps back, drop those ticks instead of
-                // treating the dip as a new pad session.
-                if !padReset,
-                   counters.steps < current.lastCounters.steps,
-                   current.lastCounters.steps - counters.steps <= 5
-                {
-                    current.steps = max(0, current.steps - (current.lastCounters.steps - counters.steps))
-                }
-            }
-            // While accumulated distance still matches the pad's current
-            // counter run, this is one uninterrupted walk. Its modelled step
-            // estimate can move up or down when speed changes, so Today must
-            // use the same live estimate instead of accumulating old models.
-            // Once the pad counter has reset, distance no longer matches and
-            // the earlier segment remains correctly accumulated.
-            if counters.steps > 0,
-               abs(current.distanceM - counters.distanceM) <= 20
-            {
-                current.steps = counters.steps
+            } else {
+                current.rawPadSteps = nil
             }
             current.lastCounters = counters
             current.lastObservedAt = now
@@ -219,7 +222,10 @@ public struct RemoteSessionTracker: Codable, Sendable {
                 current.wasRunning = true
                 current.stoppedAt = nil
             } else {
-                if current.wasRunning { current.stoppedAt = now }
+                // A stopped reconnect may contain real progress made while
+                // offline. Credit it and move the end to this final sample;
+                // duplicate idle packets still never extend the grace period.
+                if current.wasRunning || elapsedDelta > 0 { current.stoppedAt = now }
                 current.wasRunning = false
             }
             session = current
@@ -235,7 +241,8 @@ public struct RemoteSessionTracker: Codable, Sendable {
                 lastCounters: counters,
                 wasRunning: true,
                 stoppedAt: nil,
-                lastObservedAt: now
+                lastObservedAt: now,
+                modelledStepOffset: seed.steps - counters.steps
             )
             idleCounters = nil
         } else {
@@ -331,6 +338,9 @@ public struct RemoteSessionTracker: Codable, Sendable {
 
     private static func seedCounters(current: Counters, idle: Counters?) -> Counters {
         guard let idle else { return current }
+        // Elapsed identifies a new counter run even when its first distance
+        // packet already equals or exceeds the previous short run's distance.
+        if current.elapsedS < idle.elapsedS { return current }
         return Counters(
             elapsedS: counterDelta(previous: idle.elapsedS, current: current.elapsedS, allowReset: true),
             distanceM: counterDelta(previous: idle.distanceM, current: current.distanceM, allowReset: true),

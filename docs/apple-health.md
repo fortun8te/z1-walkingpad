@@ -178,10 +178,12 @@ The required retry behavior is:
   A date-only or start-only match can mistake an unrelated workout for this
   entry. Do not round to the minute or match any overlapping workout.
 - Match the window actually written by Log Workout. In v3.1 its start is the
-  parsed `started_at` and its duration is `wall_duration_min`. Its calculated
-  end can differ from `ended_at`: the Mac serializes date fields to whole
-  seconds but rounds the original elapsed duration to 0.001 minute. An exact
-  comparison with the queued `ended_at` can therefore miss an existing import.
+  parsed `started_at` and its duration is `wall_duration_min`. New batches
+  derive that duration from the serialized whole-second start and end, so
+  the workout and step windows agree. Older queued batches remain immutable:
+  their duration was rounded separately to 0.001 minute, so their calculated
+  workout end can differ from `ended_at`. An exact comparison with that field
+  can therefore miss an existing import from an older batch.
 - Check source and distance where the phone exposes them. The current Log
   Workout action does not store `session_id` as Health metadata, so dates and
   activity type alone cannot establish the queued entry's identity when

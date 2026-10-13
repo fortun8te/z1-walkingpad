@@ -364,7 +364,7 @@ Reads ONE file: iCloud Drive &gt; Shortcuts &gt; z1-walkingpad &gt; health-queue
 			<key>WFWorkflowActionParameters</key>
 			<dict>
 				<key>WFCommentActionText</key>
-				<string>Health receives the real start, full elapsed duration, and belt distance. Calories stay out so WHOOP owns Strain -- it computes that from the band, and ignores any calories we send.</string>
+				<string>Health receives the start, full elapsed duration, and belt distance from the queue. This Shortcut sends no calorie or heart-rate sample.</string>
 			</dict>
 		</dict>
 		<dict>

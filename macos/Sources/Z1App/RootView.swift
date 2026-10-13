@@ -76,7 +76,7 @@ struct RootView: View {
                 .clipped()
                 TabBar(model: model, navigation: navigation)
             } else {
-                IntroPage { hasSeenIntro = true }
+                IntroPage(globalShortcutAvailable: model.globalShortcutAvailable) { hasSeenIntro = true }
             }
         }
         .padding(.horizontal, Theme.outer)
@@ -385,11 +385,13 @@ struct NowPage: View {
     /// and stops. Space presses it.
     private var primary: some View {
         PrimaryButton(title: primaryTitle, height: 44, action: primaryAction)
-            .keyboardShortcut(.space, modifiers: [])
+            .keyboardShortcut(isTypingSpeed ? nil : KeyboardShortcut(.space, modifiers: []))
             .disabled(model.isConnecting || model.pendingVerb == "Stopping…"
-                      || (model.busy && !running && model.pendingVerb != "Starting…"))
+                      || (model.busy && !running && !model.live.stopRequested && model.pendingVerb != "Starting…"))
             .help(model.isConnected
-                ? "Start or stop the belt. Space here, \(GlobalHotKey.display) anywhere."
+                ? (model.globalShortcutAvailable
+                   ? "Start or stop the belt. Space here, \(GlobalHotKey.display) anywhere."
+                   : "Start or stop the belt. Space works in this window; the global shortcut is unavailable.")
                 : "Look for the pad now")
     }
 
@@ -424,8 +426,9 @@ struct NowPage: View {
     private func commitSpeedDraft() {
         guard speedDraft.isFinite else { syncSpeedDraft(); return }
         let range = model.speedRange
-        let clamped = min(max(speedDraft, range.lowerBound), range.upperBound)
-        speedDraft = (clamped * 10).rounded() / 10
+        // The ruler already snaps display tenths while preserving exact
+        // imperial endpoints; only the model snaps to the pad's km/h grid.
+        speedDraft = min(max(speedDraft, range.lowerBound), range.upperBound)
         model.setSpeed(speedDraft)
     }
 }
@@ -579,7 +582,9 @@ private struct StatusLine: View {
             if let pending = model.pendingTargetDisplaySpeed {
                 return "Starts at \(model.formatSpeed(pending)) \(model.speedUnitLabel)"
             }
-            return "Space or \(GlobalHotKey.display) to start"
+            return model.globalShortcutAvailable
+                ? "Space or \(GlobalHotKey.display) to start"
+                : "Space to start. Global shortcut unavailable."
         }
         if model.failedAttempts >= 3 { return "Pad not found. Is the phone app closed?" }
         switch model.live.phase {

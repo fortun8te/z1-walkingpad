@@ -48,11 +48,15 @@ struct SpeedDial: View {
 
     private func speed(atX x: CGFloat, width: CGFloat) -> Double {
         let raw = range.lowerBound + Double(min(max(x / max(width, 1), 0), 1)) * span
-        return snapped(raw)
+        return Self.snapped(raw, in: range)
     }
 
-    /// Onto the 0.1 grid, then into range (or 6.4000001 lands past the top).
-    private func snapped(_ raw: Double) -> Double {
+    /// Interior values use the display's tenths. Endpoints stay exact: the
+    /// pad's minimum in mph can sit between tenths, and rounding it upward
+    /// would make the slowest belt speed impossible to select.
+    static func snapped(_ raw: Double, in range: ClosedRange<Double>) -> Double {
+        if raw <= range.lowerBound { return range.lowerBound }
+        if raw >= range.upperBound { return range.upperBound }
         let onGrid = (raw / Self.step).rounded() * Self.step
         return min(max(onGrid, range.lowerBound), range.upperBound)
     }
@@ -135,8 +139,8 @@ struct SpeedDial: View {
         .accessibilityAdjustableAction { direction in
             guard enabled else { return }
             switch direction {
-            case .increment: value = snapped(value + Self.step)
-            case .decrement: value = snapped(value - Self.step)
+            case .increment: value = Self.snapped(value + Self.step, in: range)
+            case .decrement: value = Self.snapped(value - Self.step, in: range)
             @unknown default: return
             }
             onCommit()

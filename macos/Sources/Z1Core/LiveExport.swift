@@ -78,7 +78,7 @@ public final class LiveExport {
             updatedAt: stampFormatter.string(from: now),
             connected: connected,
             beltRunning: connected && status.beltRunning,
-            speedKmh: connected ? max(0, status.speedKmh) : 0,
+            speedKmh: connected && status.speedKmh.isFinite ? max(0, status.speedKmh) : 0,
             elapsedSec: max(0, status.elapsedS),
             distanceM: max(0, status.distanceM),
             steps: max(0, status.steps),

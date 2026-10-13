@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 
 /// The single file read by the Z1 Import Health iPhone Shortcut.
 ///
@@ -119,13 +120,21 @@ public final class HealthQueue {
                 hasDeferredWork = true
                 continue
             }
+            // History is recoverable user-editable JSON. Validate each part
+            // before adding it: a corrupt counter must neither overflow the
+            // process nor subtract from an otherwise valid workout.
+            guard group.allSatisfy(Self.isValidSegment),
+                  let duration = Self.sum(group.map(\.activeDurationS)),
+                  let distance = Self.sum(group.map(\.distanceM)),
+                  let steps = Self.sum(group.map(\.steps)),
+                  Set(group.map(\.id)).count == group.count else { continue }
             let combined = WalkSession(
                 id: first.id,
                 startedAt: first.startedAt,
                 endedAt: last.endedAt,
-                activeDurationS: group.reduce(0) { $0 + $1.activeDurationS },
-                distanceM: group.reduce(0) { $0 + $1.distanceM },
-                steps: group.reduce(0) { $0 + $1.steps },
+                activeDurationS: duration,
+                distanceM: distance,
+                steps: steps,
                 caloriesKcal: group.reduce(0) { $0 + $1.caloriesKcal },
                 exportedToHealth: false
             )
@@ -178,7 +187,7 @@ public final class HealthQueue {
         let data = try Data(contentsOf: url)
         guard let fields = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let version = fields["schema_version"] as? NSNumber,
-              version.intValue == 2,
+              Self.isVersion(version, equalTo: 2),
               let workouts = fields["workouts"] as? [[String: Any]] else {
             throw HealthQueueError.invalidExistingQueue
         }
@@ -203,7 +212,7 @@ public final class HealthQueue {
         guard FileManager.default.fileExists(atPath: receiptsURL.path) else { return [] }
         let data = try Data(contentsOf: receiptsURL)
         guard let fields = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let version = fields["schema_version"] as? NSNumber, version.intValue == 1,
+              let version = fields["schema_version"] as? NSNumber, Self.isVersion(version, equalTo: 1),
               let ids = fields["queued_session_ids"] as? [String] else {
             throw HealthQueueError.invalidReceipts
         }
@@ -229,31 +238,56 @@ public final class HealthQueue {
         })
     }
 
-    private static func workout(for session: WalkSession) -> [String: Any]? {
+    private static func isVersion(_ value: NSNumber, equalTo version: Int) -> Bool {
+        CFGetTypeID(value) != CFBooleanGetTypeID() && value.doubleValue == Double(version)
+    }
+
+    private static func sum(_ values: [Int]) -> Int? {
+        var total = 0
+        for value in values {
+            guard value >= 0 else { return nil }
+            let addition = total.addingReportingOverflow(value)
+            guard !addition.overflow else { return nil }
+            total = addition.partialValue
+        }
+        return total
+    }
+
+    private static func isValidSegment(_ session: WalkSession) -> Bool {
         let wallDuration = session.endedAt.timeIntervalSince(session.startedAt)
         let activeDuration = session.activeDurationS
-        guard !session.exportedToHealth,
-              !session.id.isEmpty,
-              activeDuration >= 600, activeDuration <= 86_400,
-              session.distanceM >= 100, session.distanceM <= 200_000,
-              session.steps >= 0,
-              wallDuration.isFinite, wallDuration > 0, wallDuration <= 86_400,
-              Double(activeDuration) <= wallDuration + 5,
-              Double(session.distanceM) / Double(activeDuration) * 3.6 <= 7 else {
-            return nil
-        }
+        return !session.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && activeDuration > 0 && activeDuration <= 86_400
+            && session.distanceM >= 0 && session.distanceM <= 200_000
+            && session.steps >= 0
+            && wallDuration.isFinite && wallDuration > 0 && wallDuration <= 86_400
+            && Double(activeDuration) <= wallDuration + 5
+            && Double(session.distanceM) / Double(activeDuration) * 3.6 <= 7
+    }
+
+    private static func workout(for session: WalkSession) -> [String: Any]? {
+        guard !session.exportedToHealth, isValidSegment(session),
+              session.activeDurationS >= 600, session.distanceM >= 100 else { return nil }
         let format = ISO8601DateFormatter()
         format.formatOptions = [.withInternetDateTime]
         format.timeZone = TimeZone(secondsFromGMT: 0)
+        let startedAt = format.string(from: session.startedAt)
+        let endedAt = format.string(from: session.endedAt)
+        guard let start = format.date(from: startedAt), let end = format.date(from: endedAt) else { return nil }
+        // Shortcuts writes the workout using start + minutes, but the step
+        // sample uses these date strings. Derive both from the same whole-
+        // second window, without a separate rounding of fractional minutes.
+        let wallDuration = end.timeIntervalSince(start)
+        guard wallDuration > 0 else { return nil }
         return [
             "schema_version": 1,
             "session_id": session.id,
             "source": "z1-walkingpad",
-            "started_at": format.string(from: session.startedAt),
-            "ended_at": format.string(from: session.endedAt),
-            "duration_s": activeDuration,
+            "started_at": startedAt,
+            "ended_at": endedAt,
+            "duration_s": session.activeDurationS,
             "wall_duration_s": Int(wallDuration),
-            "wall_duration_min": (wallDuration / 60 * 1_000).rounded() / 1_000,
+            "wall_duration_min": wallDuration / 60,
             "distance_m": session.distanceM,
             "steps": session.steps,
         ]

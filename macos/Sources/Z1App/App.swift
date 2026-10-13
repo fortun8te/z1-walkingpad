@@ -90,7 +90,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         let mode: TreadmillViewModel.QuitMode
         if let requested = model.requestedQuit {
             mode = requested
-        } else if model.live.beltRunning, model.isConnected {
+        } else if model.isConnected,
+                  model.live.beltRunning || model.live.stopRequested || model.pendingVerb == "Starting…" {
+            // Start can already have reached the pad before motion telemetry
+            // arrives. Quitting in that gap must still offer to stop it.
             guard let choice = askAboutMovingBelt() else {
                 model.quitCancelled()
                 return .terminateCancel
@@ -109,7 +112,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     private func askAboutMovingBelt() -> TreadmillViewModel.QuitMode? {
         mainWindow.show()
         let alert = NSAlert()
-        alert.messageText = "The belt is still moving"
+        alert.messageText = model.live.beltRunning ? "The belt is still moving" : "The belt may still be moving"
         alert.informativeText = "Stop it before quitting? If you leave it running, the app stops recording this walk until you open it again."
         alert.addButton(withTitle: "Stop Belt and Quit")
         alert.addButton(withTitle: "Quit, Keep Walking")

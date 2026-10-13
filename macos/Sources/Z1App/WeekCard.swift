@@ -31,6 +31,12 @@ struct WeekCard: View {
                 }
             }
         }
+        .onChange(of: model.todayShown.day) { oldDay, newDay in
+            // An untouched History page follows today across midnight. An
+            // explicitly selected day stays put until the user navigates.
+            guard selectedDay == nil, Calendar.current.isDate(anchor, inSameDayAs: oldDay) else { return }
+            anchor = newDay
+        }
     }
 
     private var focusedDay: Date {
@@ -75,7 +81,9 @@ struct WeekCard: View {
 
     private func step(_ weeks: Int) {
         if weeks > 0, !model.canGoForward(from: anchor) { return }
-        anchor = model.shiftedWeek(anchor, by: weeks)
+        // After midnight the final page may be less than seven days away.
+        // Store the clamped day too, so paging back starts from what was shown.
+        anchor = model.weekEnd(model.shiftedWeek(anchor, by: weeks))
         selectedDay = nil
     }
 }

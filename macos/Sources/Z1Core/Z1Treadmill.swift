@@ -26,6 +26,7 @@ public enum Z1Error: Error, Equatable, LocalizedError {
     case controlRefused(op: UInt8, result: UInt8)
     case speedOutOfRange(Double)
     case invalidDeviceName
+    case propertyRefused(id: UInt8, result: UInt8)
 
     public var errorDescription: String? {
         switch self {
@@ -45,6 +46,8 @@ public enum Z1Error: Error, Equatable, LocalizedError {
             "speed \(kmh) out of range"
         case .invalidDeviceName:
             "pad name is too short to derive its unlock code"
+        case .propertyRefused(let id, let result):
+            "pad refused setting \(id) (result \(result))"
         }
     }
 
@@ -204,15 +207,6 @@ public actor Z1Treadmill {
     private func ensurePumpStarted() {
         guard !pumpStarted else { return }
         pumpStarted = true
-        transport.onDisconnect = { [weak self] in
-            guard let self else { return }
-            // Stamp the report with the link it belongs to *now*, on the
-            // transport's queue. The actor handles it a moment later, and by
-            // then a newer connect or disconnect may have started; the stamp
-            // is how it tells a stale echo from a loss of the current link.
-            let stamp = self.linkEpoch.value
-            Task { await self.handleTransportDisconnect(epoch: stamp) }
-        }
         let notifications = transport.notifications
         notifyPump = Task { [weak self] in
             for await (uuidString, data) in notifications {
@@ -244,21 +238,29 @@ public actor Z1Treadmill {
     /// scan or connect is in flight would otherwise be undone when that
     /// attempt finishes and flips the phase to `ready` on a link we dropped.
     private nonisolated let linkEpoch = LinkEpoch()
-    /// How many of our own teardowns are in flight. A disconnect callback that
-    /// arrives meanwhile is the echo of our own cancel, not a lost link. A
-    /// counter, not a flag: overlapping teardowns (a failed connect cleaning
-    /// up while the user disconnects) must not clear each other's mark.
-    private var ownDisconnectsInFlight = 0
+    // A reconnect must await the same native teardown as every Disconnect
+    // caller. Returning early from a second disconnect can otherwise let the
+    // first cancellation land on a newly connected peripheral.
+    private var transportTeardown: (id: UUID, task: Task<Void, Never>)?
+    private var lostConnectionEpoch: Int?
 
     private func ensureCurrent(_ epoch: Int) throws {
         try Task.checkCancellation()
         guard epoch == linkEpoch.value else { throw CancellationError() }
+        if lostConnectionEpoch == epoch { throw Z1Error.notConnected }
     }
 
     private func tearDownTransport() async {
-        ownDisconnectsInFlight += 1
-        await transport.disconnect()
-        ownDisconnectsInFlight -= 1
+        let teardown: (id: UUID, task: Task<Void, Never>)
+        if let existing = transportTeardown {
+            teardown = existing
+        } else {
+            let transport = self.transport
+            teardown = (UUID(), Task { await transport.disconnect() })
+            transportTeardown = teardown
+        }
+        await teardown.task.value
+        if transportTeardown?.id == teardown.id { transportTeardown = nil }
     }
 
     /// `scanTimeout` bounds the scan for a pad that is not already remembered.
@@ -266,12 +268,21 @@ public actor Z1Treadmill {
         guard status.phase == .disconnected || status.phase == .error else { return }
         ensurePumpStarted()
         let epoch = linkEpoch.advance()
+        lostConnectionEpoch = nil
+        // Capture the attempt now, not when a delayed callback runs. A late
+        // echo retained by the old transport must not impersonate a new link.
+        transport.onDisconnect = { [weak self] in
+            Task { await self?.handleTransportDisconnect(epoch: epoch) }
+        }
         mutate {
             $0.phase = .scanning
             $0.errorMessage = nil
             $0.hasTelemetry = false
+            $0.properties = [:]
         }
         do {
+            if transportTeardown != nil { await tearDownTransport() }
+            try ensureCurrent(epoch)
             try await transport.waitPoweredOn()
             try ensureCurrent(epoch)
             let (name, adopted) = try await resolvePeripheral(scanTimeout: scanTimeout)
@@ -291,7 +302,6 @@ public actor Z1Treadmill {
                 throw error
             }
             try ensureCurrent(epoch)
-            rememberPeripheral()
             try await transport.discoverProfile(
                 services: [Z1Constants.fitnessMachineService, Z1Constants.supplementService],
                 characteristics: [
@@ -342,25 +352,29 @@ public actor Z1Treadmill {
             unlocked = true
 
             // FTMS statics + control point indications
-            if transport.hasCharacteristic(Z1Constants.charSupportedSpeedRange),
-               let range = try? await transport.read(Z1Constants.charSupportedSpeedRange), range.count >= 4 {
-                try ensureCurrent(epoch)
+            let range = transport.hasCharacteristic(Z1Constants.charSupportedSpeedRange)
+                ? try? await transport.read(Z1Constants.charSupportedSpeedRange) : nil
+            try ensureCurrent(epoch)
+            // Start from this profile's defaults, never another peripheral's
+            // cached range. Ignore empty/reversed ranges from malformed reads.
+            var minimum = usesVendor ? 1.6 : 0.5
+            var maximum = usesVendor ? 6.4 : 12.0
+            if let range, range.count >= 4 {
                 let lo = Int(range[range.startIndex]) | (Int(range[range.startIndex + 1]) << 8)
                 let hi = Int(range[range.startIndex + 2]) | (Int(range[range.startIndex + 3]) << 8)
-                mutate {
-                    $0.minSpeedKmh = Double(lo) / 100
-                    $0.maxSpeedKmh = Double(hi) / 100
-                }
-            } else if !usesVendor {
-                mutate {
-                    $0.minSpeedKmh = 0.5
-                    $0.maxSpeedKmh = 12.0
+                if lo > 0, hi >= lo {
+                    minimum = Double(lo) / 100
+                    maximum = Double(hi) / 100
                 }
             }
+            mutate { $0.minSpeedKmh = minimum; $0.maxSpeedKmh = maximum }
             try ensureCurrent(epoch)
             try await transport.setNotify(Z1Constants.charControlPoint, enable: true)
             try ensureCurrent(epoch)
 
+            // Persist only a fully validated profile. A successful BLE link
+            // alone does not establish that this peripheral can be controlled.
+            rememberPeripheral()
             mutate { $0.phase = .ready }
         } catch {
             guard epoch == linkEpoch.value else {
@@ -374,6 +388,9 @@ public actor Z1Treadmill {
                 throw CancellationError()
             }
             unlocked = false
+            if (error as? BLETransportError) == .missingCharacteristics {
+                forgetPeripheral()
+            }
             // Cleanup may deliver a disconnect callback; it is ours, so the
             // original failure must stay visible.
             await tearDownTransport()
@@ -393,18 +410,22 @@ public actor Z1Treadmill {
     /// remote, exactly as it does when the app was never connected. The quit
     /// path that *does* want the belt stopped calls `sleep()` first.
     public func disconnect(stopBelt: Bool = false) async {
-        linkEpoch.advance()
+        let epoch = linkEpoch.advance()
         if stopBelt, hasControl, unlocked {
             _ = try? await stop()
         }
+        guard epoch == linkEpoch.value else { return }
         persistCalorieState(force: true)
-        await tearDownTransport()
+        // Retire the link before awaiting the native cancellation: controls
+        // and late packets are already invalid while CoreBluetooth tears down.
         resetConnectionState()
         failAllWaiters(Z1Error.notConnected)
         mutate {
             $0.phase = .disconnected
             $0.errorMessage = nil
         }
+        await tearDownTransport()
+        // No state writes here. A newer connect may now own the driver.
     }
 
     /// The transport reported that the link went away. Only a link we believed
@@ -413,9 +434,10 @@ public actor Z1Treadmill {
     private func handleTransportDisconnect(epoch: Int) {
         // A report from a link that has since been replaced or torn down.
         guard epoch == linkEpoch.value else { return }
-        if ownDisconnectsInFlight > 0 { return }
+        if transportTeardown != nil { return }
         switch status.phase {
         case .ready:
+            linkEpoch.advance()
             persistCalorieState(force: true)
             resetConnectionState()
             failAllWaiters(Z1Error.notConnected)
@@ -427,6 +449,7 @@ public actor Z1Treadmill {
             // connect() is mid-flight. Wake whatever it is waiting on so it
             // fails now instead of after the unlock timeout; its own catch
             // block reports the cause.
+            lostConnectionEpoch = epoch
             failAllWaiters(Z1Error.notConnected)
         case .disconnected, .error:
             // Late callback from a link that was already torn down or that
@@ -545,11 +568,7 @@ public actor Z1Treadmill {
         guard usesVendor else { return }
         let current = status.properties[1] ?? 0
         let value = Z1Units.displayUnitsValue(current: current, imperial: imperial)
-        _ = try await vendorRoundtrip(
-            Z1Protocol.propertyWriteFrame(propID: 1, value: UInt16(value)),
-            pred: { $0.cmd0 == Z1Constants.vopProperty && $0.cmd1 == 0x81 && $0.data.first == 1 }
-        )
-        mutate { $0.properties[1] = value }
+        try await writeProperty(1, value: value)
     }
 
     /// Soft power-off: stop the belt (if running) and switch the pad to
@@ -564,16 +583,25 @@ public actor Z1Treadmill {
         guard usesVendor else { return }
         let current = status.properties[10] ?? 0
         let value = (current & ~0xE0) | (2 << 5)
-        _ = try await vendorRoundtrip(
-            Z1Protocol.propertyWriteFrame(propID: 10, value: UInt16(value)),
-            pred: { $0.cmd0 == Z1Constants.vopProperty && $0.cmd1 == 0x81 && $0.data.first == 10 }
+        try await writeProperty(10, value: value)
+    }
+
+    private func writeProperty(_ id: UInt8, value: Int) async throws {
+        let reply = try await vendorRoundtrip(
+            Z1Protocol.propertyWriteFrame(propID: id, value: UInt16(value)),
+            pred: { $0.cmd0 == Z1Constants.vopProperty && $0.cmd1 == 0x81 && $0.data.first == id }
         )
-        mutate { $0.properties[10] = value }
+        let result = reply.data.dropFirst().first ?? 0xFF
+        guard result == 0 else { throw Z1Error.propertyRefused(id: id, result: result) }
+        mutate { $0.properties[Int(id)] = value }
     }
 
     // MARK: - telemetry
 
     private func handleNotification(_ uuidString: String, _ data: Data) {
+        // Buffered notifications can outlive native disconnect. During scan
+        // no current profile exists, so such packets also belong to an old link.
+        guard transportTeardown == nil, status.phase == .connecting || status.phase == .ready else { return }
         switch uuidString {
         case Z1Constants.charSupplementNotify.uuidString:
             guard let parsed = Z1Protocol.parseFrame(data) else { return }
@@ -621,6 +649,9 @@ public actor Z1Treadmill {
         let telemetryNow = ContinuousClock.now
         let prev = telemetry
         var parsed = Z1Protocol.parseTreadmillData(data)
+        // The parser rejects a truncated packet as a whole. It must not act
+        // as a fresh sample of the previous speed or integrate extra calories.
+        guard !parsed.raw.isEmpty else { return }
         if !usesVendor { parsed.steps = nil } // bit 13 is KingSmith-specific
         // FTMS packets may omit counters. Preserve their last values rather
         // than treating omission as zero and later adding the whole session.
@@ -909,6 +940,12 @@ public actor Z1Treadmill {
     private func controlCommand(_ cpBytes: Data, tunnelOp: UInt8, tunnelParams: Data = Data(), intentEpoch: Int? = nil) async throws {
         let link = linkEpoch.value
         do {
+            _ = try await cpCommand(cpBytes, intentEpoch: intentEpoch)
+        } catch Z1Error.controlRefused(_, 5) {
+            // FTMS may revoke control (for example after use of the remote).
+            // Reacquire and retry once, retaining the original motion intent.
+            try ensureCurrent(link)
+            try await ensureControl(intentEpoch: intentEpoch)
             _ = try await cpCommand(cpBytes, intentEpoch: intentEpoch)
         } catch Z1Error.controlRefused(_, 4) {
             try await Task.sleep(for: .seconds(3))

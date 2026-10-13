@@ -161,6 +161,9 @@ struct StatCell: View {
                 .lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: alignment == .trailing ? .trailing : .leading)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(label)
+        .accessibilityValue(value)
     }
 
     /// "2.36 km" sets the unit smaller, so the number carries the weight.

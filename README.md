@@ -66,7 +66,7 @@ queue.
 
 | File | What |
 | --- | --- |
-| `sessions.json` | Every finished walk of two active minutes or more. A walk is one belt run; it ends two minutes after Stop. |
+| `sessions.json` | Finished walks of at least one active minute and 20 m. A walk is one belt run; it ends two minutes after Stop. |
 | `live.json` | Read-only snapshot for Superapp and the MCP: [docs/live-json.md](docs/live-json.md). |
 | `health-queue.json` | In the Shortcuts iCloud folder: workouts of at least 10 minutes and 100 m for the iPhone Shortcut. [docs/apple-health.md](docs/apple-health.md). |
 | `health-queue-receipts.json`, `health-queue-cutover.json` | What the Mac already queued, and the first-run cutover. Receipts record queueing, not import. |
@@ -86,7 +86,8 @@ due.
 
 ## Build and test
 
-Swift 6, no third-party dependencies, deployment target macOS 14. With the
+Swift 6, no third-party dependencies, deployment target macOS 14. The bundle
+script builds for Apple Silicon (arm64). With the
 macOS 26 SDK the controls are Liquid Glass; older toolchains build flat ones.
 
 ```bash
@@ -94,6 +95,7 @@ cd macos
 bash build-app.sh              # release bundle in dist/Z1WalkingPad.app, installs nothing
 bash build-app.sh --debug      # faster debug bundle
 swift run z1tests              # the Swift assertions, with fake transports
+Z1_PREVIEW=1 swift test --filter Z1AppTests # app model tests; full Xcode
 ```
 
 `build-app.sh` writes version 2.0 and a build number that is the minute of the
@@ -102,8 +104,10 @@ a build, quit the running app and `ditto dist/Z1WalkingPad.app
 /Applications/Z1WalkingPad.app`. The bundle id stays `dev.z1walkingpad.menubar`
 so settings, the remembered pad and the Bluetooth permission carry over.
 
-`swift test` compiles and links the suite but runs none of its assertions
-(this project does not use XCTest); `swift run z1tests` does. For Python:
+`swift run z1tests` executes the framework-free core assertions. The separate
+Swift Testing app suite imports the actual app model and requires full Xcode
+and `Z1_PREVIEW=1`; it uses scratch history and never creates a Bluetooth
+central. `swift test` does not replace the core assertion runner. For Python:
 
 ```bash
 uv venv --python 3.12 .venv

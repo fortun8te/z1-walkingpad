@@ -25,6 +25,7 @@ struct PageScaffold<Content: View>: View {
 
 /// Shown once. Three lines, one button.
 struct IntroPage: View {
+    var globalShortcutAvailable = true
     var onContinue: () -> Void
 
     var body: some View {
@@ -36,7 +37,9 @@ struct IntroPage: View {
                 .fixedSize(horizontal: false, vertical: true)
             VStack(alignment: .leading, spacing: Theme.inner) {
                 line("Close the phone app. The pad takes one connection.")
-                line("\(GlobalHotKey.display) starts and stops from anywhere.")
+                line(globalShortcutAvailable
+                     ? "\(GlobalHotKey.display) starts and stops from anywhere."
+                     : "Global shortcut unavailable. Use Space in this window to start and stop.")
             }
             Spacer(minLength: 0)
             PrimaryButton(title: "Continue", height: 44, action: onContinue)

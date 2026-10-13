@@ -38,7 +38,8 @@ extension TreadmillViewModel {
 
     /// Minutes walked against the daily goal, 0…1.
     func goalProgress(for totals: DayTotals) -> Double {
-        min(1, Double(totals.activeDurationS) / Double(max(1, dailyGoalMinutes * 60)))
+        guard dailyGoalMinutes > 0 else { return 0 }
+        return min(1, max(0, Double(totals.activeDurationS) / (Double(dailyGoalMinutes) * 60)))
     }
 
     /// "96/120 min".
@@ -77,7 +78,6 @@ extension TreadmillViewModel {
     }
 
     func canGoForward(from anchor: Date, calendar: Calendar = .current) -> Bool {
-        calendar.startOfDay(for: shiftedWeek(anchor, by: 1, calendar: calendar))
-            <= calendar.startOfDay(for: Date())
+        calendar.startOfDay(for: anchor) < calendar.startOfDay(for: Date())
     }
 }

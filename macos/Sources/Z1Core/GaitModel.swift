@@ -16,13 +16,15 @@ public enum GaitModel {
     public static let maxSpeedKmh = 8.0
 
     public static func stepLengthM(speedKmh: Double) -> Double {
-        let s = min(maxSpeedKmh, max(minSpeedKmh, speedKmh))
+        let s = min(maxSpeedKmh, max(minSpeedKmh, speedKmh.isFinite ? speedKmh : minSpeedKmh))
         return (interceptCm + slopeCmPerKmh * s) / 100.0
     }
 
     public static func steps(distanceM: Int, speedKmh: Double) -> Int {
         guard distanceM > 0 else { return 0 }
-        return max(1, Int((Double(distanceM) / stepLengthM(speedKmh: speedKmh)).rounded()))
+        let estimate = (Double(distanceM) / stepLengthM(speedKmh: speedKmh)).rounded()
+        // Corrupted restored counters must not trap during a UI conversion.
+        return estimate >= Double(Int.max) ? Int.max : max(1, Int(estimate))
     }
 }
 
@@ -53,7 +55,8 @@ public struct StepCounter: Sendable, Equatable {
         if distanceM < previousDistance {
             steps = Double(max(0, reportedSteps))
         } else if distanceM > previousDistance {
-            steps += Double(distanceM - previousDistance) / max(0.31, strideM)
+            let stride = strideM.isFinite ? max(0.31, strideM) : 0.72
+            steps += Double(distanceM - previousDistance) / stride
         }
         lastDistanceM = distanceM
     }

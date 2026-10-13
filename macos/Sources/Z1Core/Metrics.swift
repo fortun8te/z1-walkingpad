@@ -18,12 +18,14 @@ public enum Z1Metrics {
 
     /// Gross VO2 (ml/kg/min) per the ACSM level-walking equation.
     public static func vo2ForSpeed(_ kmh: Double) -> Double {
-        let speedMPerMin = max(0.0, kmh) * 1000 / 60
+        let speedMPerMin = (kmh.isFinite ? max(0.0, kmh) : 0) * (1000 / 60.0)
         return speedCoeff * speedMPerMin + restingVO2
     }
 
     public static func kcalPerMinute(_ kmh: Double, weightKg: Double) -> Double {
-        vo2ForSpeed(kmh) * weightKg / 200
+        guard kmh.isFinite, weightKg.isFinite, weightKg > 0 else { return 0 }
+        let rate = vo2ForSpeed(kmh) * weightKg / 200
+        return rate.isFinite ? rate : 0
     }
 }
 
@@ -38,8 +40,9 @@ public struct CalorieTracker: Sendable {
 
     /// Credit burn for `elapsedS` seconds spent at `speedKmh`.
     public mutating func addSample(speedKmh: Double, elapsedS: Double) {
-        guard elapsedS > 0 else { return }
-        totalKcal += Z1Metrics.kcalPerMinute(speedKmh, weightKg: weightKg) * (elapsedS / 60)
+        guard elapsedS.isFinite, elapsedS > 0 else { return }
+        let next = totalKcal + Z1Metrics.kcalPerMinute(speedKmh, weightKg: weightKg) * (elapsedS / 60)
+        if next.isFinite { totalKcal = next }
     }
 
     public mutating func reset() {

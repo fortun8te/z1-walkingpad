@@ -24,8 +24,12 @@ final class TreadmillViewModel {
     /// Last failed command, shown until the next success. Kept apart from
     /// the status stream, which replaces its own error every second.
     private(set) var commandError: String?
-    private enum FailedCommand { case connection, start, stop, speed(Double) }
-    @ObservationIgnored private var failedCommand: FailedCommand?
+    enum FailedCommand: Equatable, Sendable { case connection, start, stop, speed(Double) }
+    struct CommandFailure: Error {
+        let retry: FailedCommand
+        let underlying: any Error
+    }
+    @ObservationIgnored private(set) var failedCommand: FailedCommand?
     @ObservationIgnored private var historyRetryAt: Date?
     /// How many scan/connect attempts have failed in a row. One failure is
     /// normal (the pad sleeps); a run of them means it is not there at all.
@@ -53,6 +57,7 @@ final class TreadmillViewModel {
     private(set) var todayShown = DayTotals(day: Date())
     /// Why start-at-login did not take, if it did not.
     private(set) var loginItemMessage: String?
+    private(set) var globalShortcutAvailable = true
 
     // MARK: persisted settings (UserDefaults, the same store @AppStorage uses)
 
@@ -81,6 +86,13 @@ final class TreadmillViewModel {
     /// Daily walking target in minutes (0 = no goal).
     var dailyGoalMinutes: Int {
         didSet {
+            let bounded = min(1_440, max(0, dailyGoalMinutes))
+            if bounded != dailyGoalMinutes {
+                // @Observable re-enters didSet through its generated setter.
+                // The normalized assignment persists on that bounded pass.
+                dailyGoalMinutes = bounded
+                return
+            }
             guard dailyGoalMinutes != oldValue else { return }
             settingsDefaults.set(dailyGoalMinutes, forKey: Self.goalKey)
             publishLive()
@@ -92,17 +104,19 @@ final class TreadmillViewModel {
         didSet {
             guard remindersEnabled != oldValue else { return }
             settingsDefaults.set(remindersEnabled, forKey: Self.remindersKey)
+            if !remindersEnabled { cancelReminderDelivery() }
             guard !Self.isPreview else { return }
-            if remindersEnabled { notifier.requestAuthorizationIfNeeded() }
-            armReminderTimer()
+            if remindersEnabled { refreshReminderAuthorization(requestIfNeeded: true) }
+            else { reminderAuthorizationTask?.cancel(); armReminderTimer() }
         }
     }
 
     var launchAtLogin: Bool {
         didSet {
-            guard !Self.isPreview, launchAtLogin != LoginItem.isEnabled else { return }
-            loginItemMessage = LoginItem.set(launchAtLogin)
-            if loginItemMessage != nil { launchAtLogin = LoginItem.isEnabled }
+            guard !Self.isPreview, !updatingLoginItemState,
+                  launchAtLogin != LoginItem.state.isRegistered else { return }
+            let failure = LoginItem.set(launchAtLogin)
+            applyLoginItemState(LoginItem.state, failure: failure)
         }
     }
 
@@ -124,6 +138,10 @@ final class TreadmillViewModel {
     @ObservationIgnored private var healthFinalizeDeadline: Date?
     /// Armed only while reminders are on, for the next moment one could be due.
     @ObservationIgnored private var reminderTimer: Timer?
+    @ObservationIgnored private var reminderAuthorizationTask: Task<Void, Never>?
+    @ObservationIgnored private(set) var reminderDeliveryTask: Task<Void, Never>?
+    @ObservationIgnored private var reminderDeliveryGeneration = 0
+    @ObservationIgnored private var updatingLoginItemState = false
     @ObservationIgnored private var stepCounter = StepCounter()
     @ObservationIgnored var healthTracker: RemoteSessionTracker
     @ObservationIgnored let sessionStore: SessionStore
@@ -131,7 +149,7 @@ final class TreadmillViewModel {
     /// real files.
     @ObservationIgnored private let liveExport: LiveExport?
     @ObservationIgnored private let sleepBlocker = SleepBlocker()
-    @ObservationIgnored private let notifier = Notifier()
+    @ObservationIgnored private let notifier: Notifier
     @ObservationIgnored private let hotKey = GlobalHotKey()
     /// Guards against an old reconnect task clearing a newer one's handle.
     @ObservationIgnored private var reconnectGeneration = 0
@@ -147,7 +165,9 @@ final class TreadmillViewModel {
     @ObservationIgnored private var speedTask: Task<Void, Never>?
     @ObservationIgnored private var speedCommandInFlight = false
     @ObservationIgnored private var speedGeneration = 0
-    @ObservationIgnored private var controlIntentGeneration = 0
+    @ObservationIgnored private(set) var controlIntentGeneration = 0
+    @ObservationIgnored private var operationTasks: [UUID: Task<Void, Never>] = [:]
+    private(set) var isShuttingDown = false
     @ObservationIgnored private var activeOperations = 0
     /// Today from the store alone, without the open walk.
     @ObservationIgnored var storedToday = DayTotals(day: Date())
@@ -155,7 +175,7 @@ final class TreadmillViewModel {
     /// cost the same whether the history contains ten sessions or ten thousand.
     @ObservationIgnored private(set) var savedSessionIDs: Set<String> = []
     @ObservationIgnored private var historySignature = HistorySignature()
-    @ObservationIgnored private var lastTrackerSave = Date.distantPast
+    @ObservationIgnored private var lastTrackerSave: ContinuousClock.Instant?
 
     static let weightKey = "weightKg"
     static let unitsKey = "unitsImperial"
@@ -174,15 +194,18 @@ final class TreadmillViewModel {
         return UserDefaults(suiteName: "dev.z1walkingpad.preview.\(ProcessInfo.processInfo.processIdentifier)")!
     }()
 
-    init() {
+    init(notifier: Notifier = Notifier()) {
+        self.notifier = notifier
         let defaults = Self.settingsStore
         let storedWeight = defaults.double(forKey: Self.weightKey)
         weightKg = storedWeight > 0 ? storedWeight : Z1Metrics.defaultWeightKg
         // The Z1 protocol and display are metric, so default to km/h.
         unitsImperial = defaults.object(forKey: Self.unitsKey) as? Bool ?? false
-        dailyGoalMinutes = defaults.object(forKey: Self.goalKey) as? Int ?? 120
+        dailyGoalMinutes = min(1_440, max(0, defaults.object(forKey: Self.goalKey) as? Int ?? 120))
         remindersEnabled = defaults.object(forKey: Self.remindersKey) as? Bool ?? true
-        launchAtLogin = LoginItem.isEnabled
+        let loginState = Self.isPreview ? LoginItem.State.disabled : LoginItem.state
+        launchAtLogin = loginState.isRegistered
+        loginItemMessage = loginState.message
         healthTracker = Self.restoreHealthTracker(from: defaults)
         sessionStore = Self.isPreview ? PreviewHarness.sessionStore() : SessionStore(openWalkStartedAt: healthTracker.openWalkTotals?.startedAt, hasPendingHistoryLogs: healthTracker.hasPendingLogs)
         liveExport = Self.isPreview ? nil : LiveExport()
@@ -215,7 +238,7 @@ final class TreadmillViewModel {
         refreshHistory()
         installSystemObservers()
         applyGlobalShortcut()
-        if remindersEnabled { notifier.requestAuthorizationIfNeeded() }
+        if remindersEnabled { refreshReminderAuthorization(requestIfNeeded: true) }
         // First reminder check only after a settling period: being reminded
         // to walk thirty seconds after logging in is how reminders get turned off.
         armReminderTimer()
@@ -286,7 +309,7 @@ final class TreadmillViewModel {
 
     /// The harness has no pad: actions are inert there, and touching
     /// `treadmill` would create a Bluetooth central.
-    private var canCommand: Bool { !Self.isPreview }
+    private var canCommand: Bool { !Self.isPreview && !isShuttingDown }
 
     func connectTapped() {
         guard canCommand, !busy else { return }
@@ -337,8 +360,9 @@ final class TreadmillViewModel {
                     do {
                         try await self.treadmill.setSpeed(pending)
                     } catch {
-                        self.coalescedTargetKmh = nil
-                        throw error
+                        if self.controlIntentGeneration == intent { self.coalescedTargetKmh = nil }
+                        // Start succeeded: retry the chosen speed, not Start.
+                        throw CommandFailure(retry: .speed(pending), underlying: error)
                     }
                 }
             }
@@ -482,7 +506,7 @@ final class TreadmillViewModel {
 
     // MARK: - quitting
 
-    enum QuitMode {
+    enum QuitMode: Sendable {
         /// Leave the belt exactly as it is; only free the pad's BLE slot.
         case leaveBelt
         /// Stop the belt and put the pad to sleep first.
@@ -503,53 +527,84 @@ final class TreadmillViewModel {
         requestedQuit = nil
     }
 
-    /// Everything that must happen before the process exits, capped at 3 s
-    /// so a pad that does not answer can never hang the quit.
-    func shutdown(_ mode: QuitMode) async {
+    /// Stop producing new work before any asynchronous disconnect. In
+    /// particular, a Start that finishes during Quit must not set a speed.
+    func prepareForShutdown() {
+        guard !isShuttingDown else { return }
+        isShuttingDown = true
+        controlIntentGeneration += 1
         automaticConnectionEnabled = false
         reconnectTask?.cancel()
+        for task in operationTasks.values { task.cancel() }
         cancelSpeedCommands()
+        healthFinalizeTask?.cancel()
+        healthFinalizeTask = nil
+        healthFinalizeDeadline = nil
+        reminderTimer?.invalidate()
+        reminderTimer = nil
+        reminderAuthorizationTask?.cancel()
+        cancelReminderDelivery()
+        pumpTask?.cancel()
         sleepBlocker.setActive(false)
         hotKey.unregister()
         persistHealthTracker()
+    }
+
+    /// A native disconnect can ignore cancellation while its callback is
+    /// pending. The deadline must release Quit without awaiting that callback.
+    func shutdown(_ mode: QuitMode) async {
+        prepareForShutdown()
         guard !Self.isPreview else { return }
-        // Readers of live.json must not see a walk that nobody is recording.
         var gone = status
         gone.phase = .disconnected
         gone.beltRunning = false
         publishLive(gone)
         let treadmill = self.treadmill
-        await withTaskGroup(of: Void.self) { group in
-            group.addTask {
-                if mode == .stopBelt { try? await treadmill.sleep() }
-                await treadmill.disconnect()
-            }
-            group.addTask { try? await Task.sleep(for: .seconds(3)) }
-            await group.next()
-            group.cancelAll()
-        }
+        await BoundedShutdown.run(timeout: .seconds(3), operation: {
+            if mode == .stopBelt { try? await treadmill.sleep() }
+            if !Task.isCancelled { await treadmill.disconnect() }
+        }, onTimeout: {
+            treadmill.cancelConnectionNow()
+        })
+        // Leave recovery state and readers explicitly offline even if the
+        // native disconnect callback is still pending.
+        healthTracker.markConnectionDrop()
+        persistHealthTracker()
+        publishLive(gone)
     }
 
     private func run(retry: FailedCommand, _ op: @MainActor @escaping () async throws -> Void) {
+        guard !isShuttingDown else { return }
+        let operationID = UUID()
+        let intent = controlIntentGeneration
         activeOperations += 1
         busy = true
-        Task {
+        operationTasks[operationID] = Task {
             defer {
+                operationTasks[operationID] = nil
                 activeOperations -= 1
                 busy = activeOperations > 0
             }
             do {
                 try await op()
-                clearCommandError()
+                completeCommand(error: nil, retry: retry, intent: intent)
             } catch {
-                // Surface command failures on screen: a silent retry loop is
-                // how "I hit Start and nothing happens" happens.
-                guard !(error is CancellationError) else { return }
-                commandError = error.localizedDescription
-                failedCommand = retry
-                NSLog("Z1App: \(error.localizedDescription)")
+                completeCommand(error: error, retry: retry, intent: intent)
             }
         }
+    }
+
+    /// Only the latest physical-control intent owns the visible result. A
+    /// superseded Start must not replace a newer Stop failure or success.
+    func completeCommand(error: (any Error)?, retry: FailedCommand, intent: Int) {
+        guard intent == controlIntentGeneration, !isShuttingDown else { return }
+        guard let error else { clearCommandError(); return }
+        let failure = error as? CommandFailure
+        let underlying = failure?.underlying ?? error
+        guard !(underlying is CancellationError) else { return }
+        commandError = underlying.localizedDescription
+        failedCommand = failure?.retry ?? retry
+        NSLog("Z1App: \(underlying.localizedDescription)")
     }
 
     private func clearCommandError() {
@@ -585,7 +640,7 @@ final class TreadmillViewModel {
     /// there is none. Silent either way; the app makes no sounds.
     private func applyGlobalShortcut() {
         guard !Self.isPreview else { return }
-        hotKey.register { [weak self] in
+        globalShortcutAvailable = hotKey.register { [weak self] in
             guard let self else { return }
             if self.isConnected {
                 self.startStopTapped()
@@ -598,6 +653,7 @@ final class TreadmillViewModel {
     // MARK: - telemetry
 
     private func receiveStatus(_ newStatus: Z1Treadmill.Status) {
+        guard !isShuttingDown else { return }
         let previousPhase = status.phase
         if newStatus.phase != .ready || !newStatus.beltRunning {
             cancelSpeedCommands()
@@ -649,6 +705,11 @@ final class TreadmillViewModel {
     /// per-field live copy the views read.
     func setStatus(_ next: Z1Treadmill.Status) {
         guard next != status else { return }
+        if next.beltRunning, reminderDeliveryTask != nil {
+            // A quiet-day check may be waiting on notification authorization
+            // when movement begins. It no longer has a reason to notify.
+            cancelReminderDelivery()
+        }
         status = next
         live.apply(next)
     }
@@ -717,8 +778,8 @@ final class TreadmillViewModel {
     /// save at once.
     private func persistHealthTracker(throttled: Bool = false) {
         guard !Self.isPreview else { return }
-        let now = Date()
-        if throttled, now.timeIntervalSince(lastTrackerSave) < 10 { return }
+        let now = ContinuousClock.now
+        if throttled, let lastTrackerSave, lastTrackerSave.duration(to: now) < .seconds(10) { return }
         guard let data = try? JSONEncoder().encode(healthTracker) else { return }
         settingsDefaults.set(data, forKey: Self.healthTrackerKey)
         lastTrackerSave = now
@@ -748,7 +809,29 @@ final class TreadmillViewModel {
         settingsDefaults.set(log, forKey: Self.connectionLogKey)
     }
 
+    /// Read back external Login Items changes without writing them back to the
+    /// service. Pending approval remains registered, so it can be turned off.
+    func applyLoginItemState(_ state: LoginItem.State, failure: String? = nil) {
+        updatingLoginItemState = true
+        defer { updatingLoginItemState = false }
+        if launchAtLogin != state.isRegistered { launchAtLogin = state.isRegistered }
+        let message = failure ?? state.message
+        if loginItemMessage != message { loginItemMessage = message }
+    }
+
     // MARK: - walk reminders
+
+    private func refreshReminderAuthorization(requestIfNeeded: Bool = false) {
+        guard !Self.isPreview, !isShuttingDown else { return }
+        reminderAuthorizationTask?.cancel()
+        reminderAuthorizationTask = Task { [weak self] in
+            guard let self else { return }
+            if requestIfNeeded { await self.notifier.requestAuthorizationIfNeeded() }
+            else { await self.notifier.refreshAuthorization() }
+            guard !Task.isCancelled else { return }
+            self.armReminderTimer()
+        }
+    }
 
     /// One timer, armed for the next moment a reminder could be due
     /// (`WalkReminderPolicy.nextCheck`) and only while reminders are on, so an
@@ -756,25 +839,45 @@ final class TreadmillViewModel {
     private func armReminderTimer() {
         reminderTimer?.invalidate()
         reminderTimer = nil
-        guard remindersEnabled, !Self.isPreview else { return }
+        guard remindersEnabled, notifier.authorized, !Self.isPreview, !isShuttingDown else { return }
         let when = WalkReminderPolicy.nextCheck(
             after: Date(), lastWalkEnd: sessionStore.sessions.last?.endedAt, reminders: reminderLog
         )
         let timer = Timer(fire: when, interval: 0, repeats: false) { [weak self] _ in
-            Task { @MainActor in self?.checkWalkReminder() }
+            MainActor.assumeIsolated { self?.scheduleReminderDelivery() }
         }
         timer.tolerance = 60
         RunLoop.main.add(timer, forMode: .common)
         reminderTimer = timer
     }
 
+    private func cancelReminderDelivery() {
+        reminderDeliveryGeneration += 1
+        reminderDeliveryTask?.cancel()
+        reminderDeliveryTask = nil
+    }
+
+    func scheduleReminderDelivery(now: Date = Date()) {
+        cancelReminderDelivery()
+        guard remindersEnabled, !isShuttingDown else { return }
+        let generation = reminderDeliveryGeneration
+        reminderDeliveryTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.reminderDeliveryGeneration == generation { self.reminderDeliveryTask = nil }
+            }
+            await self.checkWalkReminder(now: now)
+        }
+    }
+
     private var reminderLog: [Date] {
         settingsDefaults.array(forKey: Self.reminderLogKey) as? [Date] ?? []
     }
 
-    private func checkWalkReminder(now: Date = Date()) {
+    private func checkWalkReminder(now: Date = Date()) async {
         defer { armReminderTimer() }
-        guard remindersEnabled, !status.beltRunning, healthTracker.openWalkTotals == nil else { return }
+        guard remindersEnabled, !isShuttingDown, !Task.isCancelled,
+              !status.beltRunning, healthTracker.openWalkTotals == nil else { return }
         var log = reminderLog
         guard WalkReminderPolicy.isDue(
             now: now, lastWalkEnd: sessionStore.sessions.last?.endedAt, reminders: log
@@ -787,7 +890,8 @@ final class TreadmillViewModel {
             "The pad is right there.",
         ]
         let body = lines[Int(now.timeIntervalSince1970 / 60) % lines.count]
-        notifier.post(title: "Time for a walk?", body: body, identifier: "reminder-\(Int(now.timeIntervalSince1970))")
+        let accepted = await notifier.post(title: "Time for a walk?", body: body, identifier: "reminder-\(Int(now.timeIntervalSince1970))")
+        guard accepted, !isShuttingDown else { return }
         log.append(now)
         if log.count > 20 { log.removeFirst(log.count - 20) }
         settingsDefaults.set(log, forKey: Self.reminderLogKey)
@@ -798,13 +902,15 @@ final class TreadmillViewModel {
     /// Record every finished walk in local history.
     private func logCompletedWalks(_ walks: [CompletedWalk]) {
         guard !walks.isEmpty else { return }
-        applyHealthWeightIfAvailable()
         if let historyRetryAt, historyRetryAt > Date() {
             // A second walk may finish during backoff. Publish its pending
             // display state without attempting an early disk retry.
-            refreshHistory()
+            if walks != historySignature.pendingWalks { refreshHistory() }
             return
         }
+        // During a failed-save backoff, telemetry must not reread the iCloud
+        // weight file or rebuild unchanged history on every frame.
+        applyHealthWeightIfAvailable()
         historyRetryAt = nil
         for walk in walks {
             // A failed save stays in the tracker's log and is retried.
@@ -895,8 +1001,7 @@ final class TreadmillViewModel {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                self?.refreshHistory()
-                self?.armReminderTimer()
+                self?.refreshTimeDependentState()
             }
         }
         // A person at the Mac is the moment to retry: the pad is usually right
@@ -913,13 +1018,21 @@ final class TreadmillViewModel {
                 self?.scheduleReconnect(after: 1, force: true)
             }
         }
-        // Rolls Today over at midnight.
-        NotificationCenter.default.addObserver(
-            forName: .NSCalendarDayChanged,
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.willSleepNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.refreshHistory() }
+            // Do not leave the last ten seconds of a walk only in memory when
+            // a lid close or explicit Sleep suspends the process.
+            MainActor.assumeIsolated { self?.persistHealthTracker() }
+        }
+        // Relative task sleeps do not move with wall-clock corrections. Recheck
+        // actual dates on clock/time-zone changes and on the midnight rollover.
+        for name in [Notification.Name.NSCalendarDayChanged, .NSSystemClockDidChange, .NSSystemTimeZoneDidChange] {
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.refreshTimeDependentState() }
+            }
         }
         NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification,
@@ -927,10 +1040,26 @@ final class TreadmillViewModel {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                self?.applyHealthWeightIfAvailable()
-                self?.hurryReconnect()
+                guard let self, !self.isShuttingDown else { return }
+                self.applyHealthWeightIfAvailable()
+                self.applyLoginItemState(LoginItem.state)
+                if self.remindersEnabled { self.refreshReminderAuthorization() }
+                self.hurryReconnect()
             }
         }
+    }
+
+    func refreshTimeDependentState() {
+        guard !isShuttingDown else { return }
+        healthFinalizeTask?.cancel()
+        healthFinalizeTask = nil
+        healthFinalizeDeadline = nil
+        // Retry unsaved history against the corrected clock, not an obsolete
+        // backoff date that could now be hours in the future.
+        historyRetryAt = nil
+        refreshHistory()
+        finalizeHealthIfDue()
+        armReminderTimer()
     }
 
     private var reconnectPace: ReconnectPolicy.Pace {
@@ -947,7 +1076,7 @@ final class TreadmillViewModel {
     // Connecting only scans, unlocks telemetry and reads settings; it never
     // starts or changes belt motion. Unexpected drops retry in the background.
     private func scheduleReconnect(after delay: TimeInterval, force: Bool = false) {
-        guard automaticConnectionEnabled else { return }
+        guard automaticConnectionEnabled, !isShuttingDown else { return }
         if reconnectTask != nil {
             guard force else { return }
             reconnectTask?.cancel()
