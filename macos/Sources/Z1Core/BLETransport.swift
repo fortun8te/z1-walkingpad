@@ -106,9 +106,20 @@ final class BLETransport: NSObject, Z1PadTransport, @unchecked Sendable {
 
     private func lookup(_ uuid: CBUUID) throws -> (CBPeripheral, CBCharacteristic) {
         try lock.withLock {
-            guard let peripheral else { throw BLETransportError.notConnected }
+            guard let peripheral, peripheral.state == .connected else { throw BLETransportError.notConnected }
             guard let char = characteristics[uuid] else { throw BLETransportError.missingCharacteristics }
             return (peripheral, char)
+        }
+    }
+
+    /// UUIDs identify a characteristic type, not a particular discovery. A
+    /// delegate callback retained from an older peripheral/profile must not
+    /// complete a new request or publish old telemetry on the current link.
+    private func isCurrent(_ peripheral: CBPeripheral, characteristic: CBCharacteristic? = nil) -> Bool {
+        lock.withLock {
+            guard self.peripheral === peripheral else { return false }
+            if let characteristic { return characteristics[characteristic.uuid] === characteristic }
+            return true
         }
     }
 
@@ -227,6 +238,7 @@ final class BLETransport: NSObject, Z1PadTransport, @unchecked Sendable {
                 cont.resume(throwing: BLETransportError.timeout)
             }
             queue.async {
+                guard self.lock.withLock({ self.scanCont != nil }) else { return }
                 self.central.scanForPeripherals(withServices: nil, options: nil)
             }
         }
@@ -250,6 +262,7 @@ final class BLETransport: NSObject, Z1PadTransport, @unchecked Sendable {
                 cont.resume(throwing: BLETransportError.timeout)
             }
             queue.async {
+                guard self.lock.withLock({ self.scanCont != nil }) else { return }
                 // Nil services: KingSmith often omits 0x1826 from the advert.
                 self.central.scanForPeripherals(withServices: nil, options: nil)
             }
@@ -295,6 +308,7 @@ final class BLETransport: NSObject, Z1PadTransport, @unchecked Sendable {
                 cont.resume(throwing: BLETransportError.timeout)
             }
             queue.async {
+                guard self.lock.withLock({ self.peripheral === target && self.connectCont != nil }) else { return }
                 _ = self.lock.withLock { self.expectedDisconnectIDs.remove(target.identifier) }
                 target.delegate = self
                 self.central.connect(target, options: nil)
@@ -439,6 +453,13 @@ final class BLETransport: NSObject, Z1PadTransport, @unchecked Sendable {
     }
 
     func disconnect() async {
+        await withCheckedContinuation { continuation in
+            queue.async {
+                self.central.stopScan()
+                self.failAllPending(BLETransportError.notConnected)
+                continuation.resume()
+            }
+        }
         let target = lock.withLock { () -> CBPeripheral? in peripheral }
         guard let target else { return }
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
@@ -537,7 +558,7 @@ extension BLETransport: CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-        guard lock.withLock({ self.peripheral?.identifier == peripheral.identifier }) else {
+        guard lock.withLock({ self.peripheral === peripheral }) else {
             central.cancelPeripheralConnection(peripheral)
             return
         }
@@ -551,14 +572,14 @@ extension BLETransport: CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
-        guard lock.withLock({ self.peripheral?.identifier == peripheral.identifier }) else { return }
+        guard lock.withLock({ self.peripheral === peripheral }) else { return }
         if let cont = take(\.connectCont, timeoutKey: "connect") {
             cont.resume(throwing: error ?? BLETransportError.notConnected)
         }
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
-        guard lock.withLock({ self.peripheral?.identifier == peripheral.identifier }) else { return }
+        guard lock.withLock({ self.peripheral === peripheral }) else { return }
         let (requested, expected) = lock.withLock { () -> (CheckedContinuation<Void, Never>?, Bool) in
             let expected = expectedDisconnectIDs.remove(peripheral.identifier) != nil
             defer {
@@ -579,6 +600,7 @@ extension BLETransport: CBCentralManagerDelegate {
 
 extension BLETransport: CBPeripheralDelegate {
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
+        guard isCurrent(peripheral) else { return }
         if let cont = take(\.servicesCont, timeoutKey: "services") {
             if let error {
                 cont.resume(throwing: error)
@@ -589,6 +611,7 @@ extension BLETransport: CBPeripheralDelegate {
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
+        guard isCurrent(peripheral) else { return }
         lock.withLock {
             for char in service.characteristics ?? [] {
                 characteristics[char.uuid] = char
@@ -609,6 +632,7 @@ extension BLETransport: CBPeripheralDelegate {
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        guard isCurrent(peripheral, characteristic: characteristic) else { return }
         let uuid = characteristic.uuid
         let readCont = lock.withLock { () -> CheckedContinuation<Data, Error>? in
             defer { readConts[uuid] = nil }
@@ -628,6 +652,7 @@ extension BLETransport: CBPeripheralDelegate {
     }
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+        guard isCurrent(peripheral, characteristic: characteristic) else { return }
         let cont = lock.withLock { () -> CheckedContinuation<Void, Error>? in
             defer { writeConts[characteristic.uuid] = nil }
             return writeConts[characteristic.uuid]
@@ -643,6 +668,7 @@ extension BLETransport: CBPeripheralDelegate {
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
+        guard isCurrent(peripheral, characteristic: characteristic) else { return }
         let cont = lock.withLock { () -> CheckedContinuation<Void, Error>? in
             defer { notifyConts[characteristic.uuid] = nil }
             return notifyConts[characteristic.uuid]

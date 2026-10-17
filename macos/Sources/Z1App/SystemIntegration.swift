@@ -10,10 +10,27 @@ import UserNotifications
 /// every call reports its outcome rather than failing silently.
 @MainActor
 enum LoginItem {
-    static var isAvailable: Bool { Bundle.main.bundleIdentifier != nil }
+    enum State: Equatable {
+        case unavailable, disabled, enabled, requiresApproval
 
-    static var isEnabled: Bool {
-        isAvailable && SMAppService.mainApp.status == .enabled
+        var isRegistered: Bool { self == .enabled || self == .requiresApproval }
+        var message: String? {
+            self == .requiresApproval
+                ? "Waiting for approval in System Settings → General → Login Items" : nil
+        }
+    }
+
+    static var isAvailable: Bool {
+        Bundle.main.bundleIdentifier != nil && Bundle.main.bundleURL.pathExtension == "app"
+    }
+
+    static var state: State {
+        guard isAvailable else { return .unavailable }
+        switch SMAppService.mainApp.status {
+        case .enabled: return .enabled
+        case .requiresApproval: return .requiresApproval
+        default: return .disabled
+        }
     }
 
     /// Returns nil on success, or a human-readable reason it did not take.
@@ -28,9 +45,6 @@ enum LoginItem {
             } else {
                 guard service.status != .notRegistered else { return nil }
                 try service.unregister()
-            }
-            if service.status == .requiresApproval {
-                return "Waiting for approval in System Settings → General → Login Items"
             }
             return nil
         } catch {
@@ -71,30 +85,112 @@ final class SleepBlocker {
 /// what `swift run Z1App` is), so everything is gated on having one.
 @MainActor
 final class Notifier {
-    private var authorized = false
+    private(set) var authorized = false
     private var didRequest = false
+    private var authorizationGeneration = 0
+    private let isAvailable: () -> Bool
+    private let authorizationStatus: () async -> UNAuthorizationStatus
+    private let requestAuthorization: () async throws -> Bool
+    private let submit: (UNNotificationRequest) async throws -> Void
 
-    private var isAvailable: Bool {
-        Bundle.main.bundleIdentifier != nil && Bundle.main.bundleURL.pathExtension == "app"
-    }
-
-    func requestAuthorizationIfNeeded() {
-        guard isAvailable, !didRequest else { return }
-        didRequest = true
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert]) { granted, error in
-            if let error { NSLog("Z1App: notification authorization failed: \(error.localizedDescription)") }
-            Task { @MainActor in self.authorized = granted }
+    // The narrow dependencies let tests exercise denied and failed delivery
+    // without touching the real notification center or requesting permission.
+    init(
+        isAvailable: @escaping () -> Bool = {
+            Bundle.main.bundleIdentifier != nil && Bundle.main.bundleURL.pathExtension == "app"
+        },
+        authorizationStatus: @escaping () async -> UNAuthorizationStatus = {
+            await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+        },
+        requestAuthorization: @escaping () async throws -> Bool = {
+            try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert])
+        },
+        submit: @escaping (UNNotificationRequest) async throws -> Void = {
+            try await UNUserNotificationCenter.current().add($0)
         }
+    ) {
+        self.isAvailable = isAvailable
+        self.authorizationStatus = authorizationStatus
+        self.requestAuthorization = requestAuthorization
+        self.submit = submit
     }
 
-    func post(title: String, body: String, identifier: String) {
-        guard isAvailable, authorized else { return }
+    func refreshAuthorization() async {
+        authorizationGeneration += 1
+        let generation = authorizationGeneration
+        guard isAvailable() else { authorized = false; return }
+        let status = await authorizationStatus()
+        guard !Task.isCancelled, generation == authorizationGeneration else { return }
+        authorized = status == .authorized || status == .provisional
+    }
+
+    func requestAuthorizationIfNeeded() async {
+        guard isAvailable(), !didRequest else { await refreshAuthorization(); return }
+        didRequest = true
+        do { _ = try await requestAuthorization() }
+        catch {
+            didRequest = false // A transient failure must not block the next explicit enable.
+            NSLog("Z1App: notification authorization failed: \(error.localizedDescription)")
+        }
+        await refreshAuthorization()
+    }
+
+    /// True means the system accepted this request, not that a person saw it.
+    /// Refresh first because authorization can change in System Settings.
+    func post(title: String, body: String, identifier: String) async -> Bool {
+        await refreshAuthorization()
+        guard authorized, !Task.isCancelled else { return false }
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
         let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request) { error in
-            if let error { NSLog("Z1App: could not post notification: \(error.localizedDescription)") }
+        do {
+            try await submit(request)
+            return true
+        } catch {
+            NSLog("Z1App: could not post notification: \(error.localizedDescription)")
+            return false
         }
+    }
+}
+
+/// Quit has a real deadline even when native teardown ignores cancellation.
+/// The losing task may unwind later, but cannot resume the continuation twice.
+@MainActor
+final class BoundedShutdown {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var operationTask: Task<Void, Never>?
+    private var timeoutTask: Task<Void, Never>?
+
+    static func run(
+        timeout: Duration,
+        operation: @escaping @Sendable () async -> Void,
+        onTimeout: @escaping @MainActor () -> Void
+    ) async {
+        let race = BoundedShutdown()
+        await withCheckedContinuation { continuation in
+            race.continuation = continuation
+            race.operationTask = Task {
+                await operation()
+                race.finish()
+            }
+            race.timeoutTask = Task {
+                do { try await Task.sleep(for: timeout) }
+                catch { return }
+                guard race.continuation != nil else { return }
+                onTimeout()
+                race.finish()
+            }
+        }
+    }
+
+    private func finish() {
+        guard let continuation else { return }
+        self.continuation = nil
+        operationTask?.cancel()
+        timeoutTask?.cancel()
+        operationTask = nil
+        timeoutTask = nil
+        continuation.resume()
     }
 }

@@ -215,3 +215,111 @@ def test_server_exposes_exactly_one_read_only_tool():
 
     tools = asyncio.run(server.build_server().list_tools())
     assert [tool.name for tool in tools] == ["z1"]
+
+
+def test_explicit_source_never_falls_back_to_default_history(tmp_path, monkeypatch):
+    default = Path.home() / "Library/Application Support/Z1 WalkingPad"
+    default.mkdir(parents=True)
+    write_sessions(default, [walk("2026-07-13T09:00:00Z", "2026-07-13T09:20:00Z")])
+    monkeypatch.setenv("Z1_SESSIONS_DIR", str(tmp_path / "temporarily-unavailable"))
+    assert server._sessions() == []
+    assert server._live() is None
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan"), "Infinity", "NaN"])
+def test_nonfinite_numbers_do_not_crash_or_escape_as_invalid_json(tmp_path, monkeypatch, value):
+    point_at(tmp_path, monkeypatch)
+    write_sessions(tmp_path, [dict(startedAt="2026-07-13T09:00:00Z", distanceM=value,
+                                 activeDurationS=value, steps=value, caloriesKcal=value)])
+    assert server._row(server._sessions()[0]) == dict(d="2026-07-13", m=0, s=0, steps=0, kcal=0.0)
+    freeze_today(monkeypatch, 2026, 7, 13)
+    assert server._today()["s"] == 0
+    snapshot(tmp_path, monkeypatch, todayMinutes=value, todayKcal=value, caloriesKcal=value)
+    json.dumps(server._live(), allow_nan=False)
+    assert server._today()["s"] == 0
+
+
+def test_invalid_utf8_history_degrades_to_no_data(tmp_path, monkeypatch):
+    point_at(tmp_path, monkeypatch)
+    (tmp_path / "sessions.json").write_bytes(b"\xff\xfe")
+    assert server._sessions() == []
+
+
+def test_complete_live_totals_do_not_read_history(tmp_path, monkeypatch):
+    snapshot(tmp_path, monkeypatch)
+    def forbidden_read():
+        raise AssertionError("complete live totals must not re-read history")
+    monkeypatch.setattr(server, "_sessions", forbidden_read)
+    assert server._today()["m"] == 1600
+
+
+def test_incomplete_live_totals_keep_history_fallback(tmp_path, monkeypatch):
+    now = datetime.now().astimezone()
+    data = snapshot(tmp_path, monkeypatch)
+    del data["todayKcal"]
+    (tmp_path / "live.json").write_text(json.dumps(data))
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    write_sessions(tmp_path, [walk(start.isoformat(), (start + timedelta(minutes=20)).isoformat(), kcal=73)])
+    today = server._today()
+    assert today["m"] == 1600
+    assert today["kcal"] == 73
+
+
+@pytest.mark.parametrize("schema", [True, 1.0, "1"])
+def test_live_schema_requires_an_integer_version(tmp_path, monkeypatch, schema):
+    snapshot(tmp_path, monkeypatch, schema=schema)
+    assert server._live() is None
+
+
+def test_live_speed_always_serializes_as_finite_json(tmp_path, monkeypatch):
+    snapshot(tmp_path, monkeypatch, speedKmh=float("nan"))
+    assert server._live()["kmh"] == 0
+    json.dumps(server._today(), allow_nan=False)
+
+
+def test_missing_live_distance_and_duration_preserve_saved_totals(tmp_path, monkeypatch):
+    data = snapshot(tmp_path, monkeypatch)
+    del data["todayDistanceM"]
+    del data["todayMinutes"]
+    (tmp_path / "live.json").write_text(json.dumps(data))
+    now = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    write_sessions(tmp_path, [walk(now.isoformat(), (now + timedelta(minutes=20)).isoformat())])
+    assert server._today()["m"] == 1000
+    assert server._today()["s"] == 1200
+
+
+def test_extreme_saved_duration_cannot_overflow_datetime(tmp_path, monkeypatch):
+    point_at(tmp_path, monkeypatch)
+    freeze_today(monkeypatch, 2026, 7, 13)
+    write_sessions(tmp_path, [dict(startedAt="2026-07-13T09:00:00Z", activeDurationS=10**400)])
+    assert server._today()["s"] == 0
+
+
+def test_extreme_live_minutes_cannot_overflow_json(tmp_path, monkeypatch):
+    snapshot(tmp_path, monkeypatch, todayMinutes=1e308)
+    assert 0 <= server._today()["s"] <= sys.maxsize
+    json.dumps(server._today(), allow_nan=False)
+
+
+def test_history_calorie_sum_cannot_overflow_json(tmp_path, monkeypatch):
+    point_at(tmp_path, monkeypatch)
+    freeze_today(monkeypatch, 2026, 7, 13)
+    write_sessions(tmp_path, [walk("2026-07-13T09:00:00Z", "2026-07-13T09:20:00Z", kcal=1e308),
+                              walk("2026-07-13T10:00:00Z", "2026-07-13T10:20:00Z", kcal=1e308)])
+    json.dumps(server._today(), allow_nan=False)
+
+
+def test_duplicate_session_ids_are_counted_once(tmp_path, monkeypatch):
+    point_at(tmp_path, monkeypatch)
+    freeze_today(monkeypatch, 2026, 7, 13)
+    entry = walk("2026-07-13T09:00:00Z", "2026-07-13T09:20:00Z")
+    write_sessions(tmp_path, [entry, entry])
+    assert server._today()["steps"] == entry["steps"]
+
+
+def test_damaged_duplicate_does_not_hide_later_readable_record(tmp_path, monkeypatch):
+    point_at(tmp_path, monkeypatch)
+    freeze_today(monkeypatch, 2026, 7, 13)
+    entry = walk("2026-07-13T09:00:00Z", "2026-07-13T09:20:00Z")
+    write_sessions(tmp_path, [{"id": entry["id"]}, entry, entry])
+    assert server._today()["steps"] == entry["steps"]

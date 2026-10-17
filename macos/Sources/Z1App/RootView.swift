@@ -76,7 +76,7 @@ struct RootView: View {
                 .clipped()
                 TabBar(model: model, navigation: navigation)
             } else {
-                IntroPage { hasSeenIntro = true }
+                IntroPage(globalShortcutAvailable: model.globalShortcutAvailable) { hasSeenIntro = true }
             }
         }
         .padding(.horizontal, Theme.outer)
@@ -198,15 +198,15 @@ struct NowPage: View {
     @State private var isTypingSpeed = false
     @State private var typedSpeed = ""
     @FocusState private var speedFieldFocused: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(spacing: Theme.inner) {
             hero
             primary
-            LiveSlot(model: model)
             TodayCard(model: model)
         }
-        .background { ArrowKeys(model: model) }
+        .background { ArrowKeys(model: model).disabled(isTypingSpeed || !nudgeEnabled) }
         .onAppear {
             syncSpeedDraft()
             if let typed = PreviewHarness.typedSpeed {
@@ -216,6 +216,11 @@ struct NowPage: View {
         }
         .onChange(of: model.targetDisplaySpeed) { _, _ in syncSpeedDraft() }
         .onChange(of: model.speedRange) { _, _ in syncSpeedDraft() }
+        .onChange(of: nudgeEnabled) { _, enabled in
+            guard !enabled else { return }
+            isPickingSpeed = false
+            closeSpeedField(commit: false)
+        }
         .onChange(of: speedFieldFocused) { _, focused in
             // Clicking away mid-edit drops the half-typed value.
             guard !focused, isTypingSpeed else { return }
@@ -227,8 +232,11 @@ struct NowPage: View {
 
     // MARK: hero
 
+    /// The signature card: speed, then this walk's time and distance (or the
+    /// one line about the connection) on the bloom. Light on dark whatever
+    /// the system appearance.
     private var hero: some View {
-        Card(padding: 14) {
+        SignatureCard(motionTier: running ? max(1, Int(model.live.speedKmh.rounded())) : 0) {
             VStack(spacing: 14) {
                 speedReadout
                     .frame(maxWidth: .infinity)
@@ -239,7 +247,7 @@ struct NowPage: View {
                         size: 40,
                         enabled: nudgeEnabled,
                         help: "Slower (← \(model.formatSpeed(0.1)), ↓ \(model.formatSpeed(0.5)))",
-                        key: .leftArrow,
+                        key: isTypingSpeed ? nil : .leftArrow,
                         action: model.speedDownTapped
                     )
                     .accessibilityLabel("Slower")
@@ -247,10 +255,11 @@ struct NowPage: View {
                         range: model.speedRange,
                         value: $speedDraft,
                         belt: running ? model.displaySpeed : nil,
-                        enabled: model.isConnected,
+                        enabled: nudgeEnabled,
                         format: model.formatSpeed,
                         onEditingChanged: { isPickingSpeed = $0 },
                         onCommit: commitSpeedDraft,
+                        unit: model.speedUnitLabel,
                         height: 40
                     )
                     IconButton(
@@ -258,11 +267,13 @@ struct NowPage: View {
                         size: 40,
                         enabled: nudgeEnabled,
                         help: "Faster (→ \(model.formatSpeed(0.1)), ↑ \(model.formatSpeed(0.5)))",
-                        key: .rightArrow,
+                        key: isTypingSpeed ? nil : .rightArrow,
                         action: model.speedUpTapped
                     )
                     .accessibilityLabel("Faster")
                 }
+                LiveSlot(model: model)
+                    .padding(.top, -4)
             }
         }
     }
@@ -310,6 +321,7 @@ struct NowPage: View {
                 gap: 2.3,
                 lit: panelLit
             )
+            .accessibilityHidden(true)
             if isTypingSpeed {
                 TextField("Speed", text: $typedSpeed)
                     .textFieldStyle(.plain)
@@ -331,16 +343,28 @@ struct NowPage: View {
                 Rectangle().fill(Theme.ink).frame(height: 1.5).offset(y: 6)
             }
         }
-        .contentShape(.rect)
-        .onTapGesture {
-            guard model.isConnected, !isTypingSpeed else { return }
-            typedSpeed = ""
-            isTypingSpeed = true
+        // A small pop when the number changes, so a nudge is felt as well as
+        // seen. Costs nothing at rest.
+        .phaseAnimator(reduceMotion ? [1.0] : [1.0, 1.04, 1.0], trigger: model.formatSpeed(readoutValue)) { content, scale in
+            content.scaleEffect(scale)
+        } animation: { scale in
+            scale > 1 ? .easeOut(duration: 0.08) : .spring(response: 0.22, dampingFraction: 0.7)
         }
+        .contentShape(.rect)
+        .onTapGesture(perform: beginSpeedEntry)
         .help("Click and type a speed: 3 then 5 is \(model.formatSpeed(3.5)). Return sets it, Esc cancels.")
-        .accessibilityElement()
+        .accessibilityElement(children: isTypingSpeed ? .contain : .ignore)
         .accessibilityLabel("Speed")
-        .accessibilityValue("\(model.formatSpeed(readoutValue)) \(model.speedUnitLabel)")
+        .accessibilityValue(isTypingSpeed ? "Editing" : panelLit
+            ? "\(model.formatSpeed(readoutValue)) \(model.speedUnitLabel)" : "Not available")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { beginSpeedEntry() }
+    }
+
+    private func beginSpeedEntry() {
+        guard nudgeEnabled, !isTypingSpeed else { return }
+        typedSpeed = ""
+        isTypingSpeed = true
     }
 
     /// The typed speed on the panel's own template, one digit, the decimal
@@ -373,12 +397,14 @@ struct NowPage: View {
     /// One button, one verb. Disconnected it connects; connected it starts
     /// and stops. Space presses it.
     private var primary: some View {
-        PrimaryButton(title: primaryTitle, height: 44, action: primaryAction)
-            .keyboardShortcut(.space, modifiers: [])
+        GlossPrimaryButton(title: primaryTitle, height: 44, action: primaryAction)
+            .keyboardShortcut(isTypingSpeed ? nil : KeyboardShortcut(.space, modifiers: []))
             .disabled(model.isConnecting || model.pendingVerb == "Stopping…"
-                      || (model.busy && !running && model.pendingVerb != "Starting…"))
+                      || (model.busy && !running && !model.live.stopRequested && model.pendingVerb != "Starting…"))
             .help(model.isConnected
-                ? "Start or stop the belt. Space here, \(GlobalHotKey.display) anywhere."
+                ? (model.globalShortcutAvailable
+                   ? "Start or stop the belt. Space here, \(GlobalHotKey.display) anywhere."
+                   : "Start or stop the belt. Space works in this window; the global shortcut is unavailable.")
                 : "Look for the pad now")
     }
 
@@ -413,8 +439,9 @@ struct NowPage: View {
     private func commitSpeedDraft() {
         guard speedDraft.isFinite else { syncSpeedDraft(); return }
         let range = model.speedRange
-        let clamped = min(max(speedDraft, range.lowerBound), range.upperBound)
-        speedDraft = (clamped * 10).rounded() / 10
+        // The ruler already snaps display tenths while preserving exact
+        // imperial endpoints; only the model snaps to the pad's km/h grid.
+        speedDraft = min(max(speedDraft, range.lowerBound), range.upperBound)
         model.setSpeed(speedDraft)
     }
 }
@@ -479,7 +506,7 @@ private struct TodayCard: View {
 
 // MARK: - Live slot
 
-/// Always 36 pt, whatever it holds, so nothing below it ever moves. While the
+/// The foot of the signature card. Always 36 pt, whatever it holds, so nothing below it ever moves. While the
 /// belt moves it holds this walk's time and distance, each in its own view so
 /// only the one that changed redraws. A failed command takes it over.
 /// Otherwise one quiet line about the connection.
@@ -514,9 +541,9 @@ private struct LiveCell: View {
         let live = model.live
         switch kind {
         case .elapsed:
-            StatCell(value: model.formatElapsed(live.elapsedS), label: "Time")
+            StatCell(value: model.formatElapsed(live.elapsedS), label: "Time", labelColor: Theme.dim)
         case .distance:
-            StatCell(value: model.formatDistance(live.distanceM), label: "Distance", alignment: .trailing)
+            StatCell(value: model.formatDistance(live.distanceM), label: "Distance", alignment: .trailing, labelColor: Theme.dim)
         }
     }
 }
@@ -568,7 +595,9 @@ private struct StatusLine: View {
             if let pending = model.pendingTargetDisplaySpeed {
                 return "Starts at \(model.formatSpeed(pending)) \(model.speedUnitLabel)"
             }
-            return "Space or \(GlobalHotKey.display) to start"
+            return model.globalShortcutAvailable
+                ? "Space or \(GlobalHotKey.display) to start"
+                : "Space to start. Global shortcut unavailable."
         }
         if model.failedAttempts >= 3 { return "Pad not found. Is the phone app closed?" }
         switch model.live.phase {

@@ -31,6 +31,12 @@ struct WeekCard: View {
                 }
             }
         }
+        .onChange(of: model.todayShown.day) { oldDay, newDay in
+            // An untouched History page follows today across midnight. An
+            // explicitly selected day stays put until the user navigates.
+            guard selectedDay == nil, Calendar.current.isDate(anchor, inSameDayAs: oldDay) else { return }
+            anchor = newDay
+        }
     }
 
     private var focusedDay: Date {
@@ -70,11 +76,14 @@ struct WeekCard: View {
         .foregroundStyle(enabled ? Theme.dim : Theme.track)
         .disabled(!enabled)
         .help(help)
+        .accessibilityLabel(help)
     }
 
     private func step(_ weeks: Int) {
         if weeks > 0, !model.canGoForward(from: anchor) { return }
-        anchor = model.shiftedWeek(anchor, by: weeks)
+        // After midnight the final page may be less than seven days away.
+        // Store the clamped day too, so paging back starts from what was shown.
+        anchor = model.weekEnd(model.shiftedWeek(anchor, by: weeks))
         selectedDay = nil
     }
 }
@@ -133,29 +142,37 @@ private struct WeekBars: View {
                 let progress = min(1, max(0, model.goalProgress(for: day)))
                 let isFocused = calendar.isDate(day.day, inSameDayAs: focused)
                 let isToday = calendar.isDateInToday(day.day)
-                VStack(spacing: 4) {
-                    ZStack(alignment: .bottom) {
-                        RoundedRectangle(cornerRadius: 4, style: .continuous)
-                            .fill(Theme.wash)
-                        if !day.isEmpty {
+                Button {
+                    selectedDay = calendar.startOfDay(for: day.day)
+                } label: {
+                    VStack(spacing: 4) {
+                        ZStack(alignment: .bottom) {
                             RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                .fill(isFocused ? Theme.ink : Theme.barRest)
-                                .frame(height: max(4, barArea * CGFloat(progress)))
+                                .fill(Theme.wash)
+                            if !day.isEmpty {
+                                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                    .fill(isFocused ? Theme.ink : Theme.barRest)
+                                    .frame(height: max(4, barArea * CGFloat(progress)))
+                            }
                         }
+                        .frame(height: barArea)
+                        Text(day.day, format: .dateTime.weekday(.narrow))
+                            .font(.system(size: 9, weight: isToday ? .semibold : .regular))
+                            .foregroundStyle(isFocused ? Theme.ink : Theme.faint)
+                            .frame(height: WeekCard.labelHeight)
                     }
-                    .frame(height: barArea)
-                    Text(day.day, format: .dateTime.weekday(.narrow))
-                        .font(.system(size: 9, weight: isToday ? .semibold : .regular))
-                        .foregroundStyle(isFocused ? Theme.ink : Theme.faint)
-                        .frame(height: WeekCard.labelHeight)
+                    .contentShape(.rect)
                 }
-                .contentShape(.rect)
-                .onTapGesture { selectedDay = calendar.startOfDay(for: day.day) }
+                .buttonStyle(.plain)
                 .help(help(for: day))
                 .accessibilityElement()
                 .accessibilityLabel(day.day.formatted(.dateTime.weekday(.wide).day().month(.wide)))
                 .accessibilityValue(help(for: day))
-                .accessibilityAddTraits(.isButton)
+                // `.accessibilityElement()` replaces the Button's own element, which
+                // also drops its press action: VoiceOver could hear a day but not
+                // select it. Say it is a button and give it the action explicitly.
+                .accessibilityAddTraits(isFocused ? [.isButton, .isSelected] : .isButton)
+                .accessibilityAction { selectedDay = calendar.startOfDay(for: day.day) }
             }
         }
     }

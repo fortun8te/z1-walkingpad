@@ -122,7 +122,7 @@ public enum Z1Protocol {
     /// Parse FTMS Treadmill Data (0x2ACD), incl. KingSmith step-count bit 13.
     public static func parseTreadmillData(_ raw: Data) -> TreadmillData {
         var out = TreadmillData(raw: raw)
-        guard raw.count >= 2 else { return out }
+        guard raw.count >= 2 else { return TreadmillData() }
         let flags = Int(raw[raw.startIndex]) | (Int(raw[raw.startIndex + 1]) << 8)
         var off = raw.startIndex + 2
 
@@ -154,9 +154,9 @@ public enum Z1Protocol {
                 : 0
         }
         if flags & 0x08 != 0 { take(4) } // inclination + ramp angle
-        if flags & 0x10 != 0 { take(2) } // elevation gain/loss
-        if flags & 0x20 != 0 { take(1) } // instantaneous pace
-        if flags & 0x40 != 0 { take(1) } // average pace
+        if flags & 0x10 != 0 { take(4) } // positive + negative elevation gain, u16 each
+        if flags & 0x20 != 0 { take(2) } // instantaneous pace, u16
+        if flags & 0x40 != 0 { take(2) } // average pace, u16
         if flags & 0x80 != 0 { // expended energy: total u16, per hour u16, per minute u8
             out.calories = u16(take(2))
             take(3)
@@ -167,6 +167,7 @@ public enum Z1Protocol {
             out.elapsedS = u16(take(2))
         }
         if flags & 0x800 != 0 { take(2) } // remaining time
+        if flags & 0x1000 != 0 { take(4) } // force on belt + power output, s16 each
         if flags & 0x2000 != 0 { // KingSmith extension: step count
             out.steps = u16(take(2))
         }

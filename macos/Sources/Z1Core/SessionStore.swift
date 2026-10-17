@@ -85,6 +85,7 @@ public struct DayTotals: Equatable, Sendable, Identifiable {
     public var isEmpty: Bool { walks == 0 }
 
     public mutating func add(_ session: WalkSession, calendar: Calendar = .current) {
+        guard session.activeDurationS >= 0, session.distanceM >= 0, session.steps >= 0 else { return }
         let from = calendar.startOfDay(for: day)
         guard let through = calendar.date(byAdding: .day, value: 1, to: from) else { return }
         let wall = max(1, session.endedAt.timeIntervalSince(session.startedAt))
@@ -94,13 +95,26 @@ public struct DayTotals: Equatable, Sendable, Identifiable {
         // Records do not retain pause timestamps. Split across midnight in
         // proportion to wall time; cumulative rounding preserves exact totals.
         func portion(_ value: Int) -> Int {
-            Int((Double(value) * upper).rounded()) - Int((Double(value) * lower).rounded())
+            func scaled(_ fraction: Double) -> Int {
+                let rounded = (Double(value) * fraction).rounded()
+                // Double(Int.max) rounds beyond Int's representable range.
+                // Keep malformed but decodable history from crashing readers.
+                return rounded >= Double(Int.max) ? Int.max : Int(rounded)
+            }
+            return scaled(upper) - scaled(lower)
+        }
+        func adding(_ value: Int, to total: Int) -> Int {
+            let sum = total.addingReportingOverflow(value)
+            return sum.overflow ? Int.max : sum.partialValue
         }
         walks += 1
-        activeDurationS += portion(session.activeDurationS)
-        distanceM += portion(session.distanceM)
-        steps += portion(session.steps)
-        caloriesKcal += session.caloriesKcal * (upper - lower)
+        activeDurationS = adding(portion(session.activeDurationS), to: activeDurationS)
+        distanceM = adding(portion(session.distanceM), to: distanceM)
+        steps = adding(portion(session.steps), to: steps)
+        if session.caloriesKcal.isFinite, session.caloriesKcal >= 0 {
+            let total = caloriesKcal + session.caloriesKcal * (upper - lower)
+            caloriesKcal = total.isFinite ? total : .greatestFiniteMagnitude
+        }
     }
 }
 
@@ -229,7 +243,10 @@ public final class SessionStore: @unchecked Sendable {
             exportedToHealth: false, rawPadSteps: walk.rawPadSteps,
             stepModelVersion: walk.rawPadSteps == nil ? "gait-v1" : nil
         )
-        guard append(session) || contains(id: walk.id) else { return false }
+        // Reload can retain a walk only in memory after a damaged/missing
+        // file. A duplicate ID is therefore not proof of a durable history
+        // entry: repair the file before draining its pending tracker copy.
+        guard append(session) || (contains(id: walk.id) && save()) else { return false }
         tracker.acknowledgeLog(sessionID: walk.id)
         setPendingHistoryLogs(tracker.hasPendingLogs)
         return true
@@ -258,8 +275,18 @@ public final class SessionStore: @unchecked Sendable {
             guard let next = calendar.date(byAdding: .day, value: 1, to: cursor) else { break }
             cursor = next
         }
-        for day in Array(byDay.keys) {
-            for session in sessions { byDay[day]?.add(session, calendar: calendar) }
+        let through = calendar.date(byAdding: .day, value: 1, to: to) ?? to
+        for session in sessions {
+            // Visit only the days this walk overlaps. History redraws should
+            // not scan every saved walk once for every day in the range.
+            let end = max(session.endedAt, session.startedAt.addingTimeInterval(1))
+            guard end > from, session.startedAt < through else { continue }
+            var day = max(from, calendar.startOfDay(for: session.startedAt))
+            while day <= to, day < end {
+                byDay[day]?.add(session, calendar: calendar)
+                guard let next = calendar.date(byAdding: .day, value: 1, to: day), next > day else { break }
+                day = next
+            }
         }
         return byDay.values.sorted { $0.day < $1.day }
     }
@@ -355,29 +382,49 @@ public final class SessionStore: @unchecked Sendable {
         var unreadable = 0
         /// The file could not be read as a walk list at all.
         var wholeFileUnreadable = false
+
+        init(walks: [WalkSession] = [], unreadable: Int = 0, wholeFileUnreadable: Bool = false) {
+            // Stable IDs identify one belt segment. Duplicate records must not
+            // inflate Today or a Health group. Treat them like unreadable
+            // entries so the original bytes are rescued before the next save.
+            var seen = Set<String>()
+            self.walks = walks.filter { seen.insert($0.id).inserted }
+            self.unreadable = unreadable + walks.count - self.walks.count
+            self.wholeFileUnreadable = wholeFileUnreadable
+        }
     }
 
     /// Returns whether the main file was read cleanly.
     @discardableResult
     private func load() -> Bool {
         let primary = decodeWalks(from: url)
+        let existed = FileManager.default.fileExists(atPath: url.path)
+        let primaryIsClean = existed && primary.unreadable == 0 && !primary.wholeFileUnreadable
         var loaded = primary.walks
-        if loaded.isEmpty {
+        // A valid empty array is authoritative too. Restoring an old backup
+        // here would resurrect intentionally removed history on every launch.
+        if !primaryIsClean {
             let bak = url.deletingLastPathComponent().appendingPathComponent("sessions.json.bak")
-            loaded = decodeWalks(from: bak).walks
-        }
-        if loaded.isEmpty {
-            loaded = decodeWalksFromAgentExport(
-                url.deletingLastPathComponent().appendingPathComponent("agent-data.json")
-            )
+            var recovered = decodeWalks(from: bak).walks
+            if recovered.isEmpty {
+                recovered = decodeWalksFromAgentExport(
+                    url.deletingLastPathComponent().appendingPathComponent("agent-data.json")
+                )
+            }
+            // A partial read needs recovery too, not only a wholly broken
+            // file. Keep readable primary records authoritative while adding
+            // IDs recoverable from the immutable backup/export.
+            let primaryIDs = Set(loaded.map(\.id))
+            loaded += recovered.filter { !primaryIDs.contains($0.id) }
         }
         sessions = loaded.sorted { $0.startedAt < $1.startedAt }
         unreadableEntryCount = primary.unreadable
         unreadableFileNeedsRescue = primary.unreadable > 0 || primary.wholeFileUnreadable
         // Loading history must never mutate it: old records were already
         // merged and their original pad counts cannot be reconstructed.
-        let existed = FileManager.default.fileExists(atPath: url.path)
-        return !existed || (primary.unreadable == 0 && !primary.wholeFileUnreadable && !primary.walks.isEmpty)
+        // A missing file is not an explicit empty history. During reload,
+        // keep walks already held in memory until a clean replacement exists.
+        return primaryIsClean
     }
 
     /// One bad entry must not hide the rest of the history. Entries that do
@@ -400,14 +447,22 @@ public final class SessionStore: @unchecked Sendable {
             let walks = entries.compactMap(\.walk)
             return Loaded(walks: walks, unreadable: entries.count - walks.count)
         }
-        let exported = decodeWalksFromAgentExport(file)
-        return Loaded(walks: exported, wholeFileUnreadable: exported.isEmpty)
+        // Some older builds stored the export envelope at the history path.
+        // Preserve its unreadable-entry count just as for a plain walk list,
+        // otherwise the next save silently discards records it cannot decode.
+        struct Envelope: Decodable { var sessions: [Lossy] }
+        if let envelope = try? decoder.decode(Envelope.self, from: data) {
+            let walks = envelope.sessions.compactMap(\.walk)
+            return Loaded(walks: walks, unreadable: envelope.sessions.count - walks.count)
+        }
+        return Loaded(wholeFileUnreadable: true)
     }
 
     private func decodeWalksFromAgentExport(_ file: URL) -> [WalkSession] {
         guard let data = try? Data(contentsOf: file) else { return [] }
         struct Envelope: Decodable { var sessions: [Lossy] }
-        return (try? Self.makeDecoder().decode(Envelope.self, from: data))?.sessions.compactMap(\.walk) ?? []
+        let walks = (try? Self.makeDecoder().decode(Envelope.self, from: data))?.sessions.compactMap(\.walk) ?? []
+        return Loaded(walks: walks).walks
     }
 
     public static func shouldMerge(_ a: WalkSession, _ b: WalkSession) -> Bool {
@@ -453,7 +508,7 @@ public final class SessionStore: @unchecked Sendable {
                 let stamp = ISO8601DateFormatter().string(from: Date())
                     .replacingOccurrences(of: ":", with: "")
                 let rescue = url.deletingLastPathComponent()
-                    .appendingPathComponent("sessions.unreadable-\(stamp).json")
+                    .appendingPathComponent("sessions.unreadable-\(stamp)-\(UUID().uuidString).json")
                 try FileManager.default.copyItem(at: url, to: rescue)
                 unreadableFileNeedsRescue = false
             }

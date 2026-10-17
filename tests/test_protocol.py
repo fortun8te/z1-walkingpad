@@ -82,7 +82,22 @@ def test_parse_treadmill_data_truncated_frame_dropped_whole():
     # counter reset and would wipe calories/steps downstream).
     raw = bytes.fromhex("0424fa00")  # speed present; flagged fields absent
     d = p.parse_treadmill_data(raw)
-    assert d.speed_kmh == 2.5
+    assert d.speed_kmh is None
+    assert d.raw == b""
     assert d.distance_m is None
     assert d.elapsed_s is None
     assert d.steps is None
+
+
+def test_treadmill_optional_field_widths_and_every_truncated_prefix():
+    # Same full-field vector as the native driver suite. Both implementations
+    # must agree on SIG field widths before the KingSmith bit-13 extension.
+    raw = bytes.fromhex(
+        "fe3f2c0136017b0000"
+        "6400c8000a0014009001f401"
+        "3c00640002501e8403780007000800c800"
+    )
+    d = p.parse_treadmill_data(raw)
+    assert (d.speed_kmh, d.distance_m, d.calories, d.elapsed_s, d.steps) == (3, 123, 60, 900, 200)
+    for end in range(len(raw)):
+        assert p.parse_treadmill_data(raw[:end]) == p.TreadmillData(), end

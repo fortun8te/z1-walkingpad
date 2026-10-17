@@ -10,8 +10,8 @@
 #   Z1_BUILD_DIST=/private/tmp/z1-dist optional bundle output directory
 #
 # Version: CFBundleShortVersionString is 2.0 (Z1_SHORT_VERSION overrides it).
-# CFBundleVersion is the minute of the build as yyyyMMddHHmm, so every build
-# has a higher number than the last (Z1_BUNDLE_VERSION overrides it). Settings
+# CFBundleVersion is the minute of the build as yyyyMMddHHmm; builds in the
+# same minute share a number (Z1_BUNDLE_VERSION overrides it). Settings
 # and the About panel show both: "Z1 2.0 (build 202610131200)".
 #
 # Icon: Resources/AppIcon.icns is the app's icon (white Z1 on red). It is the
@@ -27,7 +27,7 @@ cd "$(dirname "$0")"
 APP_NAME="Z1WalkingPad"
 BUNDLE_ID="dev.z1walkingpad.menubar"
 DIST="${Z1_BUILD_DIST:-dist}"
-APP="$DIST/$APP_NAME.app"
+OUTPUT_APP="$DIST/$APP_NAME.app"
 SCRATCH="${Z1_BUILD_SCRATCH:-.build-frontend}"
 ENTITLEMENTS="Sources/Z1App/Z1WalkingPad.entitlements"
 CONFIG="release"
@@ -73,8 +73,31 @@ BIN_DIR="$("${BUILD[@]}" --show-bin-path 2>/dev/null)"
 VERSION="${Z1_BUNDLE_VERSION:-$(date +%Y%m%d%H%M)}"
 SHORT="${Z1_SHORT_VERSION:-2.0}"
 
-say "==> bundling $APP ($SHORT, build $VERSION)"
-rm -rf "$APP"
+# Assemble and verify beside the destination, keeping the last usable build
+# intact if copying resources or signing fails. Same-volume renames publish
+# the result; retain the backup if a failed publish cannot be rolled back.
+mkdir -p "$DIST"
+STAGING=$(mktemp -d "$DIST/.z1-bundle.XXXXXX")
+APP="$STAGING/$APP_NAME.app"
+BACKUP="$STAGING/Previous.app"
+cleanup_bundle() {
+  if [[ -e "$BACKUP" || -L "$BACKUP" ]]; then
+    if [[ ! -e "$OUTPUT_APP" && ! -L "$OUTPUT_APP" ]]; then
+      mv "$BACKUP" "$OUTPUT_APP" || {
+        echo "error: previous bundle retained at $BACKUP" >&2
+        return
+      }
+    else
+      echo "error: previous bundle retained at $BACKUP" >&2
+      return
+    fi
+  fi
+  rm -rf "$STAGING"
+}
+trap cleanup_bundle EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+say "==> bundling $OUTPUT_APP ($SHORT, build $VERSION)"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_DIR/Z1App" "$APP/Contents/MacOS/$APP_NAME"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/"
@@ -129,4 +152,9 @@ if [[ "$IDENT" != "$BUNDLE_ID" ]]; then
   echo "error: expected identifier $BUNDLE_ID, got: $IDENT" >&2
   exit 1
 fi
+if [[ -e "$OUTPUT_APP" || -L "$OUTPUT_APP" ]]; then
+  mv "$OUTPUT_APP" "$BACKUP"
+fi
+mv "$APP" "$OUTPUT_APP"
+rm -rf "$BACKUP"
 say "==> built $(cd "$DIST" && pwd)/$APP_NAME.app: Z1 $SHORT (build $VERSION)"

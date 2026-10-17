@@ -6,7 +6,7 @@ extension TreadmillViewModel {
     /// Saved IDs win over both tracker states during the save/acknowledge handoff.
     func displayTotals(addingTo stored: DayTotals) -> DayTotals {
         WalkDisplayTotals.addingTrackedWalks(
-            to: stored, savedSessionIDs: Set(sessionStore.sessions.map(\.id)),
+            to: stored, savedSessionIDs: savedSessionIDs,
             tracker: healthTracker, weightKg: weightKg
         )
     }
@@ -14,7 +14,7 @@ extension TreadmillViewModel {
     func hasPendingSave(on day: Date) -> Bool {
         _ = historyRevision
         return WalkDisplayTotals.hasPendingSave(
-            on: day, savedSessionIDs: Set(sessionStore.sessions.map(\.id)), tracker: healthTracker
+            on: day, savedSessionIDs: savedSessionIDs, tracker: healthTracker
         )
     }
 
@@ -38,7 +38,8 @@ extension TreadmillViewModel {
 
     /// Minutes walked against the daily goal, 0…1.
     func goalProgress(for totals: DayTotals) -> Double {
-        min(1, Double(totals.activeDurationS) / Double(max(1, dailyGoalMinutes * 60)))
+        guard dailyGoalMinutes > 0 else { return 0 }
+        return min(1, max(0, Double(totals.activeDurationS) / (Double(dailyGoalMinutes) * 60)))
     }
 
     /// "96/120 min".
@@ -54,7 +55,16 @@ extension TreadmillViewModel {
         let end = weekEnd(anchor, calendar: calendar)
         let start = calendar.date(byAdding: .day, value: -6, to: end) ?? end
         _ = historyRevision
-        return sessionStore.days(from: start, through: end, calendar: calendar).map { chartTotals(for: $0.day) }
+        _ = todayCoarse
+        // `days` already aggregated the saved history. Reusing those totals
+        // avoids scanning the whole store again for every bar in the week.
+        return sessionStore.days(from: start, through: end, calendar: calendar).map { stored in
+            if calendar.isDateInToday(stored.day) { return todayCoarse }
+            return WalkDisplayTotals.addingTrackedWalks(
+                to: stored, savedSessionIDs: savedSessionIDs,
+                tracker: healthTracker, weightKg: weightKg, calendar: calendar
+            )
+        }
     }
 
     func weekEnd(_ anchor: Date, calendar: Calendar = .current) -> Date {
@@ -68,7 +78,6 @@ extension TreadmillViewModel {
     }
 
     func canGoForward(from anchor: Date, calendar: Calendar = .current) -> Bool {
-        calendar.startOfDay(for: shiftedWeek(anchor, by: 1, calendar: calendar))
-            <= calendar.startOfDay(for: Date())
+        calendar.startOfDay(for: anchor) < calendar.startOfDay(for: Date())
     }
 }

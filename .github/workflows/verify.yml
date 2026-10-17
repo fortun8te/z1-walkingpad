@@ -26,6 +26,15 @@ jobs:
       - name: Run native tests with fake transports
         working-directory: macos
         run: swift run z1tests
+      - name: Run isolated app model tests
+        working-directory: macos
+        env:
+          Z1_PREVIEW: "1"
+        run: swift test --filter Z1AppTests
+      - name: Verify app packaging and signature
+        env:
+          Z1_BUILD_SCRATCH: .build
+        run: bash macos/build-app.sh --debug
       - name: Install Python test dependencies
         run: |
           python3 -m venv .venv

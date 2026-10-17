@@ -67,7 +67,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
 
     /// A Dock click with the window closed brings it back.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !mainWindow.isVisible { mainWindow.show() }
+        // A minimized window can still report isVisible. Dock reopen must
+        // restore it as well as a window that was closed.
+        mainWindow.show()
         return true
     }
 
@@ -88,7 +90,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         let mode: TreadmillViewModel.QuitMode
         if let requested = model.requestedQuit {
             mode = requested
-        } else if model.live.beltRunning, model.isConnected {
+        } else if model.isConnected,
+                  model.live.beltRunning || model.live.stopRequested || model.pendingVerb == "Starting…" {
+            // Start can already have reached the pad before motion telemetry
+            // arrives. Quitting in that gap must still offer to stop it.
             guard let choice = askAboutMovingBelt() else {
                 model.quitCancelled()
                 return .terminateCancel
@@ -107,7 +112,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     private func askAboutMovingBelt() -> TreadmillViewModel.QuitMode? {
         mainWindow.show()
         let alert = NSAlert()
-        alert.messageText = "The belt is still moving"
+        alert.messageText = model.live.beltRunning ? "The belt is still moving" : "The belt may still be moving"
         alert.informativeText = "Stop it before quitting? If you leave it running, the app stops recording this walk until you open it again."
         alert.addButton(withTitle: "Stop Belt and Quit")
         alert.addButton(withTitle: "Quit, Keep Walking")
@@ -164,14 +169,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     /// The Walk menu's titles follow the pad when it opens.
     func menuNeedsUpdate(_ menu: NSMenu) {
         guard let model else { return }
-        walkItem?.title = model.live.beltRunning ? "Stop Walk" : "Start Walk"
+        let stopping = model.live.beltRunning || model.live.stopRequested || model.pendingVerb == "Starting…"
+        walkItem?.title = stopping ? "Stop Walk" : "Start Walk"
         connectItem?.title = model.isConnected ? "Disconnect" : "Connect"
     }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         guard let model else { return false }
         switch item.action {
-        case #selector(toggleWalk(_:)): return model.isConnected && (!model.busy || model.live.beltRunning)
+        case #selector(toggleWalk(_:)):
+            let stopping = model.live.beltRunning || model.live.stopRequested || model.pendingVerb == "Starting…"
+            return model.isConnected && (stopping ? model.pendingVerb != "Stopping…" : !model.busy)
         case #selector(toggleConnection(_:)): return !model.busy && !model.isConnecting
         case #selector(showPage(_:)):
             item.state = (item.representedObject as? String) == navigation.page.rawValue ? .on : .off

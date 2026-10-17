@@ -16,6 +16,8 @@ import Z1Core
 /// - `Z1_PREVIEW_TYPED` digits already typed into the speed panel (e.g. `3`)
 /// - `Z1_PREVIEW_TICK=1` fake telemetry once a second, for CPU measurement
 /// - `Z1_PREVIEW_APPEARANCE` light | dark (otherwise the system's)
+/// - `Z1_PREVIEW_SOLID=1` the solid-card fallback Reduce Transparency and Increase Contrast select
+/// - `Z1_PREVIEW_FREEZE=1` stops the bloom's drift (screenshots)
 /// - `Z1_PREVIEW_ABOUT=1` also opens the About panel and prints `Z1_PREVIEW_ABOUT_WINDOW <n>`
 ///
 /// It never touches the real history: the store is a scratch file.
@@ -33,6 +35,16 @@ enum PreviewHarness {
     static var typedSpeed: String? {
         guard TreadmillViewModel.isPreview else { return nil }
         return env["Z1_PREVIEW_TYPED"]
+    }
+
+    /// Preview stand-in for the system accessibility flags, which cannot be set per process.
+    static var forcesSolidCard: Bool {
+        TreadmillViewModel.isPreview && env["Z1_PREVIEW_SOLID"] == "1"
+    }
+
+    /// Holds the bloom at its resting picture, for identical screenshots.
+    static var freezesMotion: Bool {
+        TreadmillViewModel.isPreview && env["Z1_PREVIEW_FREEZE"] == "1"
     }
 
     static var opensAbout: Bool {

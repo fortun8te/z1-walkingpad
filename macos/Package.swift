@@ -20,5 +20,6 @@ let package = Package(
         .executableTarget(name: "Z1Smoke", dependencies: ["Z1Core"]),
         .executableTarget(name: "z1tests", dependencies: ["Z1CoreTestSuite"]),
         .testTarget(name: "Z1CoreTests", dependencies: ["Z1Core", "Z1CoreTestSuite"]),
+        .testTarget(name: "Z1AppTests", dependencies: ["Z1App", "Z1Core"]),
     ]
 )

@@ -150,6 +150,8 @@ struct StatCell: View {
     var value: String
     var label: String
     var alignment: HorizontalAlignment = .leading
+    /// Labels are `faint` on a flat card; on the bloom they need more.
+    var labelColor: Color = Theme.faint
 
     var body: some View {
         VStack(alignment: alignment, spacing: 2) {
@@ -157,10 +159,13 @@ struct StatCell: View {
                 .lineLimit(1)
             Text(label)
                 .font(Theme.caption)
-                .foregroundStyle(Theme.faint)
+                .foregroundStyle(labelColor)
                 .lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: alignment == .trailing ? .trailing : .leading)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(label)
+        .accessibilityValue(value)
     }
 
     /// "2.36 km" sets the unit smaller, so the number carries the weight.

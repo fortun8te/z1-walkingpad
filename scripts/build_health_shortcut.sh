@@ -6,10 +6,14 @@ version="3.1"
 source_file="$repo_dir/shortcuts/Z1 Import Health.xml"
 build_dir=$(mktemp -d "${TMPDIR:-/tmp}/z1-health-shortcut.XXXXXX")
 unsigned_file="$build_dir/Z1 Import Health.wflow"
+staged_signed_file="$build_dir/Z1 Import Health.shortcut"
 signed_file="$repo_dir/shortcuts/Z1 Import Health v$version.shortcut"
 
 trap 'rm -r "$build_dir"' EXIT HUP INT TERM
 plutil -lint "$source_file"
 plutil -convert binary1 -o "$unsigned_file" "$source_file"
-shortcuts sign --mode anyone --input "$unsigned_file" --output "$signed_file"
+shortcuts sign --mode anyone --input "$unsigned_file" --output "$staged_signed_file"
+# A failed signing attempt must not replace the last installable artifact.
+test -s "$staged_signed_file"
+mv -f "$staged_signed_file" "$signed_file"
 echo "$signed_file"

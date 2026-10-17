@@ -14,6 +14,7 @@ macos/.build/
 /work/
 /research/
 /shortcuts/weight.json
+/shortcuts/*.shortcut
 /health/
 /device-data/
 *.log
